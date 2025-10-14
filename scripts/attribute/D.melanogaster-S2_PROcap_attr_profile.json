@@ -1,0 +1,17 @@
+{
+    "random_state": 47,
+    "loci": "../../data/D.melanogaster-S2cells-10.tss.clean.bed.gz",
+    "sequences": "../../data/dm6.fa",
+    "model_fnames": [
+        "../../models/D.melanogaster-S2_PROcap_f0.torch",
+        "../../models/D.melanogaster-S2_PROcap_f1.torch",
+        "../../models/D.melanogaster-S2_PROcap_f2.torch",
+        "../../models/D.melanogaster-S2_PROcap_f3.torch",
+        "../../models/D.melanogaster-S2_PROcap_f4.torch"
+    ],
+    "output_fname": "../../attr/D.melanogaster-S2_PROcap_attr_profile.npz",
+    "save_ohe": "../../attr/D.melanogaster-S2_ohe.npz",
+    "attribute_type": "profile",
+    "verbose": true,
+    "n_control_tracks": 0
+}

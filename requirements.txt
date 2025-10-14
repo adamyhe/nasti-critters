@@ -1,0 +1,2 @@
+bpnet-lite>=0.9.4
+tangermeme>=1.0.0

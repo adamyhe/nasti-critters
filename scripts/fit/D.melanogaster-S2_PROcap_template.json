@@ -1,0 +1,23 @@
+{
+    "alpha": 50,
+    "batch_size": 64,
+    "lr": 0.0005,
+    "max_epochs": 200,
+    "validation_iter": 50,
+    "early_stopping": 50,
+    "n_filters": 512,
+    "n_layers": 8,
+    "in_window": 2114,
+    "out_window": 1000,
+    "random_state": 47,
+    "max_jitter": 200,
+    "reverse_complement": true,
+    "loci": "../../data/S2_dm3_PROcap_merged_peaks.bed.gz",
+    "sequences": "../../data/dm3.fa",
+    "negatives": "../../data/S2_dm3_PROcap_negatives.bed.gz",
+    "signals": [
+        "../../data/S2_dm3_PROcap_pl.bw",
+        "../../data/S2_dm3_PROcap_mn.bw"
+    ],
+    "verbose": true
+}
