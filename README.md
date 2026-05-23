@@ -1,9 +1,9 @@
-# dm-clipnet
+# dm-procap-models
 
-CLIPNET models in Drosophila melanogaster
+Sequence-to-function models of PRO-cap in *Drosophila melanogaster*.
 
-## Installation
+## Install python dependencies
 
 ```bash
-pip install git+https://github.com/adamyhe/personalbpnet.git
+pip install -r requirements.txt
 ```

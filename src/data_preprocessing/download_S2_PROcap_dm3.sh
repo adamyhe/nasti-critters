@@ -49,8 +49,7 @@ zcat ../../data/S2_dm3_PROcap_merged_peaks.bed.gz | \
     grep -Ev "Het|chrU" | \
     bgzip > ../../data/S2_dm3_PROcap_merged_peaks_main.bed.gz
 
-bpnet negatives \
+bpnet negatives -v \
   -i ../../data/S2_dm3_PROcap_merged_peaks_main.bed.gz \
   -f ../../data/dm3.fa \
-  -o ../../data/S2_dm3_PROcap_negatives.bed.gz \
-  -v
+  -o ../../data/S2_dm3_PROcap_negatives.bed.gz

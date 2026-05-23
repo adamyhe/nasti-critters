@@ -39,7 +39,7 @@ if __name__ == "__main__":
     parser.add_argument("-b", "--bed_fp", type=str, required=True)
     parser.add_argument("-f", "--fa_fp", type=str, required=True)
     parser.add_argument("-o", "--out_fp", type=str, required=True)
-    parser.add_argument("-w", "--in_window", type=int, default=2514)
+    parser.add_argument("-w", "--in_window", type=int, default=2114)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     filter_bed = filter_nonACGT_regions(
