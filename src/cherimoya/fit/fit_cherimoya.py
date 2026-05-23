@@ -1,11 +1,11 @@
 """
-Fit a BPNet model for the D. melanogaster S2 PRO-cap project.
+Fit a Cherimoya model for the D. melanogaster S2 PRO-cap project.
 
 Training parameters and data paths are read from configs/. The background is
 restricted to the GC-matched negative loci specified by data_paths["negatives"].
 
 Usage:
-    python src/bpnet/fit/fit_bpnet.py -f 0
+    python src/cherimoya/fit/fit_cherimoya.py -f 0
 """
 
 import argparse
@@ -17,7 +17,7 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "bpnet_params.json"
+DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "cherimoya_params.json"
 DEFAULT_DATA_PATHS_PATH = REPO_ROOT / "configs" / "data_paths.json"
 DEFAULT_FOLD_ASSIGNMENTS_PATH = (
     REPO_ROOT / "configs" / "D.melanogaster_data_fold_assignments.csv"
@@ -26,45 +26,25 @@ DEFAULT_RUN_NAME = "D.melanogaster-S2_PROcap"
 
 
 def load_config(path: str | Path) -> dict:
-    """Load JSON-shaped config, allowing YAML-compatible conveniences."""
     with open(path) as f:
         config = yaml.safe_load(f)
     return config or {}
 
 
-def resolve_config_path(value: str | Path | None) -> str | None:
-    """Resolve relative config paths from the repository root."""
+def resolve_path(value: str | Path | None) -> str | None:
     if value is None:
         return None
 
     path = Path(value)
     if path.is_absolute():
         return str(path)
-
     return str((REPO_ROOT / path).resolve())
 
 
-def resolve_config_paths(params: dict) -> dict:
-    resolved = dict(params)
-    for key in ("loci", "sequences", "negatives", "controls"):
-        if key in resolved:
-            if isinstance(resolved[key], list):
-                resolved[key] = [resolve_config_path(p) for p in resolved[key]]
-            else:
-                resolved[key] = resolve_config_path(resolved[key])
-
-    if "signals" in resolved:
-        resolved["signals"] = [resolve_config_path(p) for p in resolved["signals"]]
-
-    if "blacklist" in resolved and resolved["blacklist"] is not None:
-        if isinstance(resolved["blacklist"], list):
-            resolved["blacklist"] = [
-                resolve_config_path(p) for p in resolved["blacklist"]
-            ]
-        else:
-            resolved["blacklist"] = [resolve_config_path(resolved["blacklist"])]
-
-    return resolved
+def resolve_path_list(values: list[str] | None) -> list[str] | None:
+    if values is None:
+        return None
+    return [resolve_path(value) for value in values]
 
 
 def load_bed(path: str | Path) -> pd.DataFrame:
@@ -117,6 +97,20 @@ def split_chroms(folds: pd.DataFrame, fold: int) -> tuple[list[str], list[str], 
     return training_chroms, validation_chroms, test_chroms
 
 
+def resolve_config_paths(params: dict) -> dict:
+    resolved = dict(params)
+    for key in ("loci", "sequences", "negatives"):
+        if key in resolved:
+            resolved[key] = resolve_path(resolved[key])
+
+    for key in ("signals", "controls", "blacklist"):
+        if key in resolved and resolved[key] is not None:
+            values = resolved[key]
+            resolved[key] = resolve_path_list(values if isinstance(values, list) else [values])
+
+    return resolved
+
+
 def validate_paths(params: dict) -> None:
     path_fields = [
         ("loci", params["loci"]),
@@ -124,14 +118,10 @@ def validate_paths(params: dict) -> None:
         ("negatives", params["negatives"]),
     ]
     path_fields.extend((f"signals[{i}]", p) for i, p in enumerate(params["signals"]))
-
-    controls = params.get("controls")
-    if controls is not None:
-        path_fields.extend((f"controls[{i}]", p) for i, p in enumerate(controls))
-
-    blacklist = params.get("blacklist")
-    if blacklist is not None:
-        path_fields.extend((f"blacklist[{i}]", p) for i, p in enumerate(blacklist))
+    if params["controls"] is not None:
+        path_fields.extend((f"controls[{i}]", p) for i, p in enumerate(params["controls"]))
+    if params["blacklist"] is not None:
+        path_fields.extend((f"blacklist[{i}]", p) for i, p in enumerate(params["blacklist"]))
 
     missing = [(label, path) for label, path in path_fields if not Path(path).exists()]
     if missing:
@@ -155,13 +145,13 @@ def main():
         "--params",
         type=str,
         default=str(DEFAULT_PARAMS_PATH),
-        help="training parameter config",
+        help="shared training parameter config",
     )
     parser.add_argument(
         "--data-paths",
         type=str,
         default=str(DEFAULT_DATA_PATHS_PATH),
-        help="data path config",
+        help="shared data path config",
     )
     parser.add_argument(
         "--fold-assignments",
@@ -172,13 +162,16 @@ def main():
     parser.add_argument("-o", "--output-dir", type=str, default=None)
     parser.add_argument("--n-filters", type=int, default=None)
     parser.add_argument("--n-layers", type=int, default=None)
-    parser.add_argument("--count-loss-weight", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--early-stopping", type=int, default=None)
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
+    parser.add_argument("--negative-ratio", type=float, default=None)
+    parser.add_argument("--muon-lr", type=float, default=None)
+    parser.add_argument("--muon-wd", type=float, default=None)
+    parser.add_argument("--adam-lr", type=float, default=None)
+    parser.add_argument("--adam-wd", type=float, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -188,7 +181,6 @@ def main():
     train_chroms, valid_chroms, test_chroms = split_chroms(folds, args.fold)
 
     params = {**config_params, **data_paths}
-
     params.update(
         {
             "training_chroms": train_chroms,
@@ -200,13 +192,16 @@ def main():
     cli_overrides = {
         "n_filters": args.n_filters,
         "n_layers": args.n_layers,
-        "count_loss_weight": args.count_loss_weight,
         "batch_size": args.batch_size,
-        "learning_rate": args.learning_rate,
         "max_epochs": args.max_epochs,
         "early_stopping": args.early_stopping,
         "max_jitter": args.max_jitter,
         "random_state": args.random_state,
+        "negatives_ratio": args.negative_ratio,
+        "muon_lr": args.muon_lr,
+        "muon_wd": args.muon_wd,
+        "adam_lr": args.adam_lr,
+        "adam_wd": args.adam_wd,
     }
     for key, value in cli_overrides.items():
         if value is not None:
@@ -214,7 +209,7 @@ def main():
     if args.verbose:
         params["verbose"] = True
 
-    output_dir = Path(args.output_dir or (REPO_ROOT / "models" / "bpnet"))
+    output_dir = Path(args.output_dir or (REPO_ROOT / "models" / "cherimoya"))
     params["name"] = str(output_dir / f"{DEFAULT_RUN_NAME}_f{args.fold}")
     params = resolve_config_paths(params)
 
@@ -239,10 +234,16 @@ def main():
     )
 
     import torch
-    from bpnetlite.bpnet import BPNet
+    from cherimoya import Cherimoya
     from data_loader import PeakGenerator
     from tangermeme.io import extract_loci
     from torch.optim import AdamW
+    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+    try:
+        from torch.optim import Muon
+    except ImportError:
+        from muon import Muon
 
     train_data_loader = PeakGenerator(
         peaks=peaks,
@@ -289,33 +290,68 @@ def main():
         X_valid_ctl = None
     y_valid = torch.abs(y_valid)
 
-    model = BPNet(
+    n_control_tracks = 0 if params["controls"] is None else len(params["controls"])
+    model = Cherimoya(
         name=params["name"],
         n_filters=params["n_filters"],
         n_outputs=len(params["signals"]),
-        n_control_tracks=0 if params["controls"] is None else len(params["controls"]),
-        count_loss_weight=params["count_loss_weight"],
+        n_control_tracks=n_control_tracks,
         n_layers=params["n_layers"],
         trimming=(params["in_window"] - params["out_window"]) // 2,
         verbose=params["verbose"],
     )
     model = model.to("cuda")
-    optimizer = AdamW(model.parameters(), lr=params["learning_rate"])
 
-    fit_kwargs = {
-        "training_data": train_data_loader,
-        "optimizer": optimizer,
-        "X_valid": X_valid,
-        "y_valid": y_valid,
-        "max_epochs": params["max_epochs"],
-        "batch_size": params["batch_size"],
-        "early_stopping": params["early_stopping"],
-        "dtype": torch.float,
-    }
-    if X_valid_ctl is not None:
-        fit_kwargs["X_ctl_valid"] = X_valid_ctl
+    muon_params, adam_params = [], []
+    for name, parameter in model.named_parameters():
+        if parameter.ndim == 2 and "weight" in name and name != "linear.weight":
+            muon_params.append(parameter)
+        else:
+            adam_params.append(parameter)
 
-    model.fit(**fit_kwargs)
+    muon_optimizer = Muon(
+        muon_params, lr=params["muon_lr"], weight_decay=params["muon_wd"]
+    )
+    adam_optimizer = AdamW(
+        adam_params, lr=params["adam_lr"], weight_decay=params["adam_wd"]
+    )
+
+    num_warmup_epochs = 5
+    max_epochs = params["max_epochs"]
+    num_warmup_iters = len(train_data_loader) * num_warmup_epochs
+    num_decay_iters = len(train_data_loader) * max(1, max_epochs - num_warmup_epochs)
+
+    muon_scheduler = SequentialLR(
+        muon_optimizer,
+        schedulers=[
+            LinearLR(muon_optimizer, start_factor=0.01, total_iters=num_warmup_iters),
+            CosineAnnealingLR(muon_optimizer, T_max=num_decay_iters, eta_min=1e-5),
+        ],
+        milestones=[num_warmup_iters],
+    )
+    adam_scheduler = SequentialLR(
+        adam_optimizer,
+        schedulers=[
+            LinearLR(adam_optimizer, start_factor=0.01, total_iters=num_warmup_iters),
+            CosineAnnealingLR(adam_optimizer, T_max=num_decay_iters, eta_min=1e-5),
+        ],
+        milestones=[num_warmup_iters],
+    )
+
+    model.fit(
+        training_data=train_data_loader,
+        muon_optimizer=muon_optimizer,
+        adam_optimizer=adam_optimizer,
+        muon_scheduler=muon_scheduler,
+        adam_scheduler=adam_scheduler,
+        X_valid=X_valid,
+        X_ctl_valid=X_valid_ctl,
+        y_valid=y_valid,
+        max_epochs=params["max_epochs"],
+        batch_size=params["batch_size"],
+        early_stopping=params["early_stopping"],
+        dtype=torch.bfloat16,
+    )
 
     print(f"\nModel saved to {output_dir}/")
 

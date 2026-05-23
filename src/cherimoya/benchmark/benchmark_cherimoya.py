@@ -1,11 +1,12 @@
 """
-Benchmark BPNet predictions on held-out fold chromosomes.
+Benchmark trained Cherimoya models across configured folds.
 
 By default, parameters and data paths are read from configs/ and model paths are
-derived as models/bpnet/D.melanogaster-S2_PROcap_f{fold}.torch.
+derived as models/cherimoya/D.melanogaster-S2_PROcap_f{fold}.torch.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "bpnet_params.json"
+DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "cherimoya_params.json"
 DEFAULT_DATA_PATHS_PATH = REPO_ROOT / "configs" / "data_paths.json"
 DEFAULT_FOLD_ASSIGNMENTS_PATH = (
     REPO_ROOT / "configs" / "D.melanogaster_data_fold_assignments.csv"
@@ -23,9 +24,7 @@ DEFAULT_FOLD_ASSIGNMENTS_PATH = (
 DEFAULT_RUN_NAME = "D.melanogaster-S2_PROcap"
 
 
-def load_config(path: str | Path | None) -> dict:
-    if path is None:
-        return {}
+def load_config(path: str | Path) -> dict:
     with open(path) as f:
         config = yaml.safe_load(f)
     return config or {}
@@ -74,21 +73,6 @@ def load_fold_assignments(path: str | Path) -> pd.DataFrame:
     return folds
 
 
-def merge_params(args: argparse.Namespace) -> dict:
-    config_params = load_config(args.params)
-    data_paths = load_config(args.data_paths)
-    legacy_params = load_config(args.parameters)
-
-    params = {**config_params, **data_paths, **legacy_params}
-
-    params["loci"] = resolve_path(params.get("loci"))
-    params["sequences"] = resolve_path(params.get("sequences"))
-    params["signals"] = resolve_path_list(params.get("signals"))
-    params["controls"] = resolve_path_list(params.get("controls"))
-    params["output_fname"] = resolve_path(params.get("output_fname"))
-    return params
-
-
 def derive_model_paths(
     folds: pd.DataFrame,
     model_fnames: list[str] | None,
@@ -126,13 +110,8 @@ def validate_paths(path_fields: list[tuple[str, str | None]]) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "-p",
-        "--parameters",
-        type=str,
-        default=None,
-        help="optional legacy parameter config; overrides shared configs",
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
         "--params",
@@ -152,20 +131,37 @@ def main():
         default=str(DEFAULT_FOLD_ASSIGNMENTS_PATH),
         help="CSV assigning chromosomes to folds",
     )
-    parser.add_argument("--models-dir", type=str, default="models/bpnet")
+    parser.add_argument("--models-dir", type=str, default="models/cherimoya")
     parser.add_argument("--run-name", type=str, default=DEFAULT_RUN_NAME)
     parser.add_argument("--model-fnames", nargs="+", default=None)
-    parser.add_argument("--output-fname", type=str, default=None)
+    parser.add_argument("--metrics-dir", type=str, default="performance_metrics/cherimoya")
+    parser.add_argument("--predictions-dir", type=str, default="predictions/cherimoya")
+    parser.add_argument("--save-output", action="store_true")
+    parser.add_argument("-b", "--batch-size", type=int, default=None)
+    parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    params = merge_params(args)
-    if args.output_fname is not None:
-        params["output_fname"] = resolve_path(args.output_fname)
-
+    config_params = load_config(args.params)
+    data_paths = load_config(args.data_paths)
     folds = load_fold_assignments(args.fold_assignments)
+
+    params = {**config_params, **data_paths}
+    params["loci"] = resolve_path(params.get("loci"))
+    params["sequences"] = resolve_path(params.get("sequences"))
+    params["signals"] = resolve_path_list(params.get("signals"))
+    params["controls"] = resolve_path_list(params.get("controls"))
+    if params["blacklist"] is not None:
+        values = params["blacklist"]
+        params["blacklist"] = resolve_path_list(values if isinstance(values, list) else [values])
+
+    if args.batch_size is not None:
+        params["batch_size"] = args.batch_size
+    if args.verbose:
+        params["verbose"] = True
+
     model_paths = derive_model_paths(
         folds=folds,
-        model_fnames=args.model_fnames or params.get("model_fnames"),
+        model_fnames=args.model_fnames,
         models_dir=args.models_dir,
         run_name=args.run_name,
     )
@@ -183,26 +179,25 @@ def main():
     path_fields.extend((f"signals[{i}]", p) for i, p in enumerate(params["signals"]))
     if params["controls"] is not None:
         path_fields.extend((f"controls[{i}]", p) for i, p in enumerate(params["controls"]))
+    if params["blacklist"] is not None:
+        path_fields.extend((f"blacklist[{i}]", p) for i, p in enumerate(params["blacklist"]))
     path_fields.extend((f"model fold {fold}", path) for fold, path in model_paths.items())
     validate_paths(path_fields)
 
     import torch
-    from bpnetlite.bpnet import BPNet
     from bpnetlite.performance import (
         jensen_shannon_distance,
         pearson_corr,
         spearman_corr,
     )
+    from cherimoya import Cherimoya
     from tangermeme.io import extract_loci
     from tangermeme.predict import predict
 
-    if params["n_cpus"] is not None:
-        torch.set_num_threads(params["n_cpus"])
-        torch.set_num_interop_threads(params["n_cpus"])
-
     loci = load_bed(params["loci"])
-    n_control_tracks = 0 if params["controls"] is None else len(params["controls"])
-    trimming = (params["in_window"] - params["out_window"]) // 2
+
+    print(f"Run: {args.run_name}")
+    print(f"Models dir: {resolve_path(args.models_dir)}")
 
     signals = []
     preds = []
@@ -218,6 +213,7 @@ def main():
             out_window=params["out_window"],
             verbose=params["verbose"],
             ignore=list("QWERYUIOPSDFHJKLZXVBNM"),
+            exclusion_lists=params["blacklist"],
         )
         if len(data) == 3:
             X, y, X_ctl = data
@@ -227,23 +223,7 @@ def main():
             X_ctl = None
         signals.append(torch.abs(y))
 
-        model = BPNet(
-            n_filters=params["n_filters"],
-            n_outputs=len(params["signals"]),
-            n_control_tracks=n_control_tracks,
-            count_loss_weight=params["count_loss_weight"],
-            n_layers=params["n_layers"],
-            trimming=trimming,
-            verbose=params["verbose"],
-        )
-        model.load_state_dict(
-            torch.load(
-                model_path,
-                weights_only=True,
-                map_location=torch.device("cpu"),
-            )
-        )
-
+        model = Cherimoya.load(model_path, device="cuda" if torch.cuda.is_available() else "cpu")
         preds.append(
             predict(
                 model=model,
@@ -262,7 +242,6 @@ def main():
         ).numpy()
         for pred, signal in zip(preds, signals)
     ]
-
     profile_jsd = [
         jensen_shannon_distance(
             torch.nn.functional.log_softmax(
@@ -272,39 +251,90 @@ def main():
         ).numpy()
         for pred, signal in zip(preds, signals)
     ]
-
-    counts_pearson = [
-        pearson_corr(torch.exp(pred[1] - 1).squeeze(), signal.sum(dim=(-1, -2))).item()
-        for pred, signal in zip(preds, signals)
-    ]
-
     log_counts_pearson = [
         pearson_corr(pred[1].squeeze(), torch.log1p(signal.sum(dim=(-1, -2)))).item()
         for pred, signal in zip(preds, signals)
     ]
-
     counts_spearman = [
         spearman_corr(pred[1].squeeze(), signal.sum(dim=(-1, -2))).item()
         for pred, signal in zip(preds, signals)
     ]
+    log_counts_pearson_all = pearson_corr(
+        torch.cat([pred[1].squeeze() for pred in preds]),
+        torch.cat([torch.log1p(signal.sum(dim=(-1, -2))) for signal in signals]),
+    ).item()
+    counts_spearman_all = spearman_corr(
+        torch.cat([pred[1].squeeze() for pred in preds]),
+        torch.cat([signal.sum(dim=(-1, -2)) for signal in signals]),
+    ).item()
 
+    print("\nPer-fold results:\n----------------")
     print(
-        f"Profile Pearson correlation: {[np.nanmedian(c) for c in profile_corr]}"
-        f" (n_nan={[np.isnan(c).mean() for c in profile_corr]})"
+        f"Profile Pearson correlation: {[np.nanmedian(c).item() for c in profile_corr]}"
+        f" (n_nan={[np.isnan(c).mean().item() for c in profile_corr]})"
     )
     print(
-        f"Profile Jensen-Shannon distance: {[np.nanmedian(j) for j in profile_jsd]} "
-        f"(n_nan={[np.isnan(j).mean() for j in profile_jsd]})"
+        f"Profile Jensen-Shannon distance: {[np.nanmedian(j).item() for j in profile_jsd]} "
+        f"(n_nan={[np.isnan(j).mean().item() for j in profile_jsd]})"
     )
-    print(f"Counts Pearson correlation: {counts_pearson}")
-    print(f"Log Counts Pearson correlation: {log_counts_pearson}")
+    print(f"Log counts Pearson correlation: {log_counts_pearson}")
     print(f"Counts Spearman correlation: {counts_spearman}")
 
-    if params["output_fname"] is not None:
-        import joblib
+    print("\nGenome-wide results:\n----------------")
+    print(f"Profile Pearson correlation: {np.nanmedian(np.concatenate(profile_corr))}")
+    print(
+        f"Profile Jensen-Shannon distance: {np.nanmedian(np.concatenate(profile_jsd))}"
+    )
+    print(f"Log counts Pearson correlation: {log_counts_pearson_all}")
+    print(f"Counts Spearman correlation: {counts_spearman_all}")
 
-        Path(params["output_fname"]).parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({"preds": preds, "signals": signals}, params["output_fname"])
+    metrics = {
+        "run_name": args.run_name,
+        "model_paths": {str(fold): path for fold, path in model_paths.items()},
+        "per_fold": {
+            str(fold): {
+                "profile_pearson": np.nanmedian(profile_corr[i]).item(),
+                "profile_jsd": np.nanmedian(profile_jsd[i]).item(),
+                "log_counts_pearson": log_counts_pearson[i],
+                "counts_spearman": counts_spearman[i],
+            }
+            for i, fold in enumerate(model_paths)
+        },
+        "genome_wide": {
+            "profile_pearson": np.nanmedian(np.concatenate(profile_corr)).item(),
+            "profile_jsd": np.nanmedian(np.concatenate(profile_jsd)).item(),
+            "log_counts_pearson": log_counts_pearson_all,
+            "counts_spearman": counts_spearman_all,
+        },
+    }
+    metrics_dir = Path(resolve_path(args.metrics_dir))
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = metrics_dir / f"{args.run_name}.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+    print(f"\nMetrics saved to {metrics_path}")
+
+    if args.save_output:
+        output_dir = Path(resolve_path(args.predictions_dir))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{args.run_name}.npz"
+        scaled_preds = {
+            f"predict_fold{fold}": (
+                torch.nn.functional.softmax(
+                    pred[0].reshape(pred[0].shape[0], -1), dim=-1
+                )
+                * torch.exp(pred[1])
+            )
+            .reshape(*pred[0].shape)
+            .numpy()
+            for fold, pred in zip(model_paths, preds)
+        }
+        expts = {
+            f"expt_fold{fold}": signal.numpy()
+            for fold, signal in zip(model_paths, signals)
+        }
+        np.savez_compressed(output_path, **scaled_preds, **expts)
+        print(f"\nPredictions saved to {output_path}")
 
 
 if __name__ == "__main__":

@@ -108,14 +108,7 @@ def main():
     config_params = load_config(args.params)
     data_paths = load_config(args.data_paths)
     legacy_params = load_config(args.parameters)
-    params = {
-        "in_window": 1000,
-        "out_window": 1000,
-        "verbose": False,
-        **config_params,
-        **data_paths,
-        **legacy_params,
-    }
+    params = {**config_params, **data_paths, **legacy_params}
 
     params["loci"] = resolve_path(params.get("loci"))
     params["sequences"] = resolve_path(params.get("sequences"))

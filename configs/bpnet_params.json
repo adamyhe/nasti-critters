@@ -1,4 +1,5 @@
 {
+    "checkpoint": null,
     "batch_size": 64,
     "learning_rate": 0.0005,
     "count_loss_weight": 50,
@@ -12,5 +13,15 @@
     "random_state": 47,
     "max_jitter": 200,
     "reverse_complement": true,
-    "verbose": true
+    "shuffle": true,
+    "verbose": true,
+    "controls": null,
+    "blacklist": null,
+    "negatives_ratio": 0.1,
+    "n_cpus": null,
+    "output_fname": null,
+    "n_outputs": null,
+    "n_control_tracks": null,
+    "n_shuffles": 20,
+    "save_ohe": null
 }

@@ -2,7 +2,7 @@
 Calculate BPNet attributions on the configured PRO-cap loci.
 
 By default, parameters and data paths are read from configs/ and model paths are
-derived as models/D.melanogaster-S2_PROcap_f{fold}.torch.
+derived as models/bpnet/D.melanogaster-S2_PROcap_f{fold}.torch.
 """
 
 import argparse
@@ -135,7 +135,7 @@ def main():
         choices=["counts", "profile"],
         default="profile",
     )
-    parser.add_argument("--models-dir", type=str, default="models")
+    parser.add_argument("--models-dir", type=str, default="models/bpnet")
     parser.add_argument("--run-name", type=str, default=DEFAULT_RUN_NAME)
     parser.add_argument("--model-fnames", nargs="+", default=None)
     parser.add_argument("--output-fname", type=str, default=None)
@@ -146,22 +146,7 @@ def main():
     data_paths = load_config(args.data_paths)
     legacy_params = load_config(args.parameters)
 
-    defaults = {
-        "in_window": 2114,
-        "out_window": 1000,
-        "n_filters": 512,
-        "n_layers": 8,
-        "n_outputs": None,
-        "n_control_tracks": None,
-        "count_loss_weight": 100,
-        "batch_size": 16,
-        "n_shuffles": 20,
-        "random_state": None,
-        "verbose": False,
-        "controls": None,
-        "save_ohe": None,
-    }
-    params = {**defaults, **config_params, **data_paths, **legacy_params}
+    params = {**config_params, **data_paths, **legacy_params}
 
     params["attribute_type"] = args.attribute_type
     params["loci"] = resolve_path(params.get("loci"))
