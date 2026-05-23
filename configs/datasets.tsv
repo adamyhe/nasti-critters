@@ -1,0 +1,4 @@
+dataset_name	organism	tissue_condition	geo_accession	sra_accessions	genome_build_name	assembly_accession	data_type	publication	remapping_status
+D.melanogaster-S2_PROcap	Drosophila melanogaster	S2 cells	-	SRR611829,SRR611830	dm6	GCF_000001215.4	PRO-cap	Kwak et al. 2013	current
+S.cerevisiae_PROcap	Saccharomyces cerevisiae	YPD log phase	-	GSM1974987	R64-1-1	GCA_000146045.2	PRO-cap	Booth et al. 2016	current
+S.pombe_PROcap	Schizosaccharomyces pombe	YES log phase	-	GSM1974988	ASM294v2	GCA_000002945.2	PRO-cap	Booth et al. 2016	current
