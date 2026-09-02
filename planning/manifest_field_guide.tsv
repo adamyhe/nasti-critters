@@ -1,0 +1,16 @@
+field_or_rule	definition	recommended_action
+default_include = include	Best-supported target/control baseline for the requested assay family.	Start here, subject to archive-run resolution and normal QC.
+default_include = conditional	Biologically valuable but affected by perturbation, protocol equivalence, limited replication, unpublished status, or unresolved archive mapping.	Include with an explicit assay/condition covariate or as a separate model head.
+default_include = exclude	Negative-enzyme/background control or outside the requested assay scope.	Retain for QC/background estimation; do not use as positive TSS targets.
+target_use	Whether a row is a cap-positive target or a negative protocol control.	Train positive profiles only from target rows; use controls to diagnose background.
+cap_status = TAP−	Library omitted tobacco acid pyrophosphatase or analogous cap-dependent conversion.	Treat as protocol-negative control, not a transcription-start target.
+assay_family	Canonical PRO-cap/ChRO-cap/GRO-cap or a close 5′GRO equivalent.	Use as a batch covariate; consider separate output heads for protocol families.
+archive_mapping_status	Confidence level for sample → experiment → run mapping.	Never infer missing SRR/ERR IDs from accession adjacency. Resolve with ENA/NCBI before download.
+raw_fastq_url	Direct ENA URL is present only where a run accession was independently resolved.	Check URL availability and MD5 before pipeline ingestion.
+archive_fastq_lookup_url	Experiment/run query endpoint for rows without a direct FASTQ link.	Open/query this endpoint to obtain run accession, layout, FASTQ path, and MD5.
+assembly policy	Deposited processed tracks span mm9/mm10, dm3/dm6, WS230, sacCer3, and TAIR10.	Prefer uniform raw-read reprocessing to mm39, dm6, ce11/WBcel235, sacCer3, or TAIR10 as listed.
+strand/orientation QC	PRO-cap-like assays are directional, but R1/R2 conventions vary.	Validate strand orientation at known unidirectional promoters before generating profiles.
+spike_in	Exogenous organism/material added for normalization.	Map jointly or sequentially, record spike-in fraction, and exclude spike-in reads from target labels.
+replicate_group	Rows intended to be compared/pooled as biological replicates.	Assess replicate concordance before pooling; do not combine distinct conditions as replicates.
+C. elegans caveat	Many mature transcripts receive trans-spliced leaders, separating RNA 5′ ends from true initiation sites.	Prefer nascent cap maps for TSS labels and avoid validating solely against mature-RNA annotations.
+processed tracks	Convenient for inspection but derived with heterogeneous pipelines and old assemblies.	Use raw reads for a unified modeling benchmark whenever possible.
