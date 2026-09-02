@@ -4,26 +4,22 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=1
 #SBATCH --gpus=1
-#SBATCH -C GPU_GEN:AMP|GPU_GEN:LOV|GPU_GEN:HPR
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --partition=gpu,akundaje,owners
 #SBATCH --time=24:00:00
+# No --partition or -C here: both are site-specific. Pass at submit time, e.g.
+#   sbatch --partition=gpu -C "GPU_SKU:A100_PCIE" src/bpnet/fit/slurm.sh
 #SBATCH --array=0-4
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
 
-ml openblas/0.3.28
-ml xsimd/8.1.0
-ml xz/5.8.1
-ml hdf5/1.14.4
-ml arrow/22.0.0
-ml load py-pyarrow/18.1.0_py312
-ml lz4/1.8.0
-ml biology
-ml htslib
-ml ucsc-utils
+# Site-specific module loads go here, if your cluster needs any.
+# The repo's own environment (mamba + uv) normally suffices:
+if command -v mamba >/dev/null; then
+    eval "$(mamba shell hook --shell bash)"
+    mamba activate nasti-critters || true
+fi
+[ -f .venv/bin/activate ] && . .venv/bin/activate   # venv last
 
-mamba activate torch
-nvidia-smi -L
+command -v nvidia-smi >/dev/null && nvidia-smi -L || true
 time python fit_bpnet.py -f ${SLURM_ARRAY_TASK_ID} -v

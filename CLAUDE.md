@@ -504,6 +504,56 @@ from raw reads via `proseq2.0`. BPNet's count head consumes
 `log1p(total signal)` with `count_loss_weight`, and the training outlier filter is a quantile of total
 signal — both are meaningless when one species' labels are arbitrarily scaled and another's are read counts.
 
+## Upstream reference: procap-atlas
+
+[kundajelab/procap-atlas](https://github.com/kundajelab/procap-atlas) is the mature sibling of this repo (ENCODE PRO-cap atlas, human K562).
+It is the source of truth for **io, sampling, and training standards**; this repo tracks it. It lives at
+`~/github/procap-atlas` locally.
+
+**Copy its standards, not its assumptions.** procap-atlas is human-only and hardcodes `data/hg38.fa`,
+`data/hg38.blacklist.bed.gz`, `data/GRCh38-cCREs.bed.gz`, and a 7-fold `% 7` split. This repo is
+multi-species: per-species FASTA from `experiment_config.yaml`, species-keyed `chrom_splits.yaml`, and
+peak-level random folds for S. pombe. **Never** replace that logic with a wholesale copy of theirs.
+
+Already synced:
+
+- `src/bpnet/fit/data_loader.py` — byte-identical to theirs; do not fork it.
+- `src/cherimoya/fit/data_loader.py` — now a ~46-line thin wrapper over `cherimoya.io.PeakGenerator`,
+  ported from theirs. It was a ~440-line frozen fork of the *pre-refactor* PeakGenerator, incompatible with
+  the pinned cherimoya. The only thing layered on top is `torch.abs()` on returned signal, because upstream
+  cherimoya no longer un-negates minus-strand values in `__getitem__`.
+- `src/bpnet/fit/fit_bpnet.py` — builds its training loader via `data_loader.PeakGenerator` instead of
+  reimplementing `extract_loci` + outlier filter + `PeakNegativeSampler` inline (~55 lines removed). Also
+  `from bpnetlite.bpnet import BPNet`, optional `blacklist`/`exclusion_lists`, `dtype=torch.float`, and
+  `alpha` renamed to `count_loss_weight` (`--alpha` kept as an alias).
+- `src/cherimoya/fit/fit_cherimoya.py` — ported to the cherimoya >= 0.2 API (see below).
+
+Deliberately not copied: `--background NAME:RATIO` multi-source negatives (its `ccre` source is
+GRCh38-only), `--min-reads` (needs their `config/n_reads.txt`), and their hitcall/modisco/predict/
+motifcompendium/model_upload trees (out of scope here).
+
+## Cherimoya API compatibility
+
+`cherimoya >= 0.2` broke the API this repo was written against (the historical `69f16dc` commit). Both
+breaks are fixed, ported from procap-atlas:
+
+- `Cherimoya.__init__` has **no `n_outputs`**; use `signal_groups=[len(signals)]` — one 2-element group is
+  one stranded (pl, mn) pair.
+- `fit()` requires **`lw_optimizer` and `lw_scheduler`** (no defaults) — a third optimizer for the `lw0`/`lw1`
+  Kendall uncertainty loss weights, stepped separately in the training loop. Built as
+  `SGD(lw_params, lr=lw_lr, weight_decay=lw_wd, momentum=lw_momentum)` with linear warmup then a flat
+  `ConstantLR` (no cosine decay). Defaults `lw_lr=0.001, lw_wd=0.0, lw_momentum=0.9` live in
+  `config/cherimoya_params.json`.
+- The Muon/AdamW split must also exclude `conv_weight` (2-D depth-wise conv belongs on AdamW), and `lw0`/`lw1`
+  go to neither.
+- `PeakGenerator(signals=[params["signals"]])` — **nested**. A flat 2-element list now means two independent
+  unstranded groups, which breaks reverse-complement channel swapping. `params["signals"]` itself stays flat
+  for `extract_loci` and for `signal_groups`.
+- `Cherimoya.load(path, device=...)` is unchanged and still compatible.
+
+Note `load()` reconstructs via `cls(**payload['config'])`, so a checkpoint saved by a pre-0.2 cherimoya
+whose stored config contains `n_outputs` will fail to load under the pinned version.
+
 ## The 2026-09-01 cotton addition: GRO-cap in diploid and tetraploid cotton
 
 Wen et al. 2026, *Genome Biology* 27(1):12, doi

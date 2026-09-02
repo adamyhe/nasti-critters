@@ -1,8 +1,8 @@
 """
 Benchmark trained Cherimoya models across configured folds.
 
-By default, parameters and data paths are read from configs/ and model paths are
-derived as models/cherimoya/D.melanogaster-S2_PROcap_f{fold}.torch.
+Data, species and folds resolve through src/experiments.py; model paths are
+read from models/cherimoya/{experiment}/{experiment}.fold{f}.torch.
 """
 
 import argparse
@@ -16,34 +16,13 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "cherimoya_params.json"
-DEFAULT_DATA_PATHS_PATH = REPO_ROOT / "configs" / "data_paths.json"
-DEFAULT_FOLD_ASSIGNMENTS_PATH = (
-    REPO_ROOT / "configs" / "D.melanogaster_data_fold_assignments.csv"
+
+sys.path.insert(0, str(REPO_ROOT / "src"))
+from experiments import (  # noqa: E402
+    IGNORE,
+    Experiment,
+    load_params,
 )
-DEFAULT_RUN_NAME = "D.melanogaster-S2_PROcap"
-
-
-def load_config(path: str | Path) -> dict:
-    with open(path) as f:
-        config = yaml.safe_load(f)
-    return config or {}
-
-
-def resolve_path(value: str | Path | None) -> str | None:
-    if value is None:
-        return None
-
-    path = Path(value)
-    if path.is_absolute():
-        return str(path)
-    return str((REPO_ROOT / path).resolve())
-
-
-def resolve_path_list(values: list[str] | None) -> list[str] | None:
-    if values is None:
-        return None
-    return [resolve_path(value) for value in values]
 
 
 def load_bed(path: str | Path) -> pd.DataFrame:
@@ -58,82 +37,15 @@ def load_bed(path: str | Path) -> pd.DataFrame:
     )
 
 
-def load_fold_assignments(path: str | Path) -> pd.DataFrame:
-    folds = pd.read_csv(path)
-    required = {"chrom", "fold"}
-    missing = required - set(folds.columns)
-    if missing:
-        raise ValueError(
-            f"Fold assignments missing required column(s): {sorted(missing)}"
-        )
-
-    folds = folds.copy()
-    folds["chrom"] = folds["chrom"].astype(str)
-    folds["fold"] = folds["fold"].astype(int)
-    return folds
-
-
-def derive_model_paths(
-    folds: pd.DataFrame,
-    model_fnames: list[str] | None,
-    models_dir: str,
-    run_name: str,
-) -> dict[int, str]:
-    fold_ids = sorted(folds["fold"].unique())
-    if model_fnames:
-        if len(model_fnames) > len(fold_ids):
-            raise ValueError(
-                f"Got {len(model_fnames)} model paths for {len(fold_ids)} folds."
-            )
-        return {
-            fold: resolve_path(model_fnames[i])
-            for i, fold in enumerate(fold_ids[: len(model_fnames)])
-        }
-
-    models_dir = resolve_path(models_dir)
-    return {
-        fold: str(Path(models_dir) / f"{run_name}_f{fold}.torch")
-        for fold in fold_ids
-    }
-
-
-def validate_paths(path_fields: list[tuple[str, str | None]]) -> None:
-    missing = [
-        (label, path)
-        for label, path in path_fields
-        if path is None or not Path(path).exists()
-    ]
-    if missing:
-        for label, path in missing:
-            print(f"Error: {label} not found: {path}", file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--params",
-        type=str,
-        default=str(DEFAULT_PARAMS_PATH),
-        help="shared training parameter config",
+        "-e", "--experiment", type=str, required=True,
+        help="experiment ID as it appears in config/experiment_config.yaml",
     )
-    parser.add_argument(
-        "--data-paths",
-        type=str,
-        default=str(DEFAULT_DATA_PATHS_PATH),
-        help="shared data path config",
-    )
-    parser.add_argument(
-        "--fold-assignments",
-        type=str,
-        default=str(DEFAULT_FOLD_ASSIGNMENTS_PATH),
-        help="CSV assigning chromosomes to folds",
-    )
-    parser.add_argument("--models-dir", type=str, default="models/cherimoya")
-    parser.add_argument("--run-name", type=str, default=DEFAULT_RUN_NAME)
-    parser.add_argument("--model-fnames", nargs="+", default=None)
+    parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument("--metrics-dir", type=str, default="performance_metrics/cherimoya")
     parser.add_argument("--predictions-dir", type=str, default="predictions/cherimoya")
     parser.add_argument("--save-output", action="store_true")
@@ -141,48 +53,32 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    config_params = load_config(args.params)
-    data_paths = load_config(args.data_paths)
-    folds = load_fold_assignments(args.fold_assignments)
-
-    params = {**config_params, **data_paths}
-    params["loci"] = resolve_path(params.get("loci"))
-    params["sequences"] = resolve_path(params.get("sequences"))
-    params["signals"] = resolve_path_list(params.get("signals"))
-    params["controls"] = resolve_path_list(params.get("controls"))
-    if params["blacklist"] is not None:
-        values = params["blacklist"]
-        params["blacklist"] = resolve_path_list(values if isinstance(values, list) else [values])
-
-    if args.batch_size is not None:
-        params["batch_size"] = args.batch_size
-    if args.verbose:
-        params["verbose"] = True
-
-    model_paths = derive_model_paths(
-        folds=folds,
-        model_fnames=args.model_fnames,
-        models_dir=args.models_dir,
-        run_name=args.run_name,
-    )
-
-    required = ["loci", "sequences", "signals"]
-    missing = [key for key in required if not params.get(key)]
-    if missing:
-        print(f"Error: missing required config key(s): {missing}", file=sys.stderr)
+    try:
+        exp = Experiment.load(args.experiment)
+    except (KeyError, ValueError) as err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    if exp.missing:
+        for m in exp.missing:
+            print(f"Error: missing {m}", file=sys.stderr)
         sys.exit(1)
 
-    path_fields = [
-        ("loci", params["loci"]),
-        ("sequences", params["sequences"]),
-    ]
-    path_fields.extend((f"signals[{i}]", p) for i, p in enumerate(params["signals"]))
-    if params["controls"] is not None:
-        path_fields.extend((f"controls[{i}]", p) for i, p in enumerate(params["controls"]))
-    if params["blacklist"] is not None:
-        path_fields.extend((f"blacklist[{i}]", p) for i, p in enumerate(params["blacklist"]))
-    path_fields.extend((f"model fold {fold}", path) for fold, path in model_paths.items())
-    validate_paths(path_fields)
+    params = load_params("cherimoya", {"batch_size": args.batch_size, "verbose": True if args.verbose else None})
+    params.update({
+        "loci": str(exp.peaks),
+        "sequences": str(exp.sequences),
+        "signals": [str(x) for x in exp.signals],
+        "controls": [str(x) for x in exp.controls] if exp.controls else None,
+        "blacklist": exp.blacklist,
+    })
+
+    folds = exp.all_folds("cherimoya", models_dir=args.models_dir)
+    absent = [f for f in folds if not f["model"].exists()]
+    if absent:
+        for f in absent:
+            print(f"Error: model for fold {f['fold']} not found: {f['model']}",
+                  file=sys.stderr)
+        sys.exit(1)
 
     import torch
     from bpnetlite.performance import (
@@ -196,13 +92,13 @@ def main():
 
     loci = load_bed(params["loci"])
 
-    print(f"Run: {args.run_name}")
-    print(f"Models dir: {resolve_path(args.models_dir)}")
+    print(f"Experiment: {exp.id} ({exp.species})")
+    print(f"Models: {folds[0]['model'].parent}")
 
     signals = []
     preds = []
-    for fold, model_path in model_paths.items():
-        test_chroms = folds.loc[folds["fold"] == fold, "chrom"].to_list()
+    for f in folds:
+        fold, model_path, test_chroms = f["fold"], f["model"], f["test_chroms"]
         data = extract_loci(
             loci=loci,
             sequences=params["sequences"],
@@ -212,7 +108,7 @@ def main():
             in_window=params["in_window"],
             out_window=params["out_window"],
             verbose=params["verbose"],
-            ignore=list("QWERYUIOPSDFHJKLZXVBNM"),
+            ignore=IGNORE,
             exclusion_lists=params["blacklist"],
         )
         if len(data) == 3:
@@ -289,8 +185,8 @@ def main():
     print(f"Counts Spearman correlation: {counts_spearman_all}")
 
     metrics = {
-        "run_name": args.run_name,
-        "model_paths": {str(fold): path for fold, path in model_paths.items()},
+        "run_name": exp.id,
+        "model_paths": {str(f["fold"]): str(f["model"]) for f in folds},
         "per_fold": {
             str(fold): {
                 "profile_pearson": np.nanmedian(profile_corr[i]).item(),
@@ -298,7 +194,7 @@ def main():
                 "log_counts_pearson": log_counts_pearson[i],
                 "counts_spearman": counts_spearman[i],
             }
-            for i, fold in enumerate(model_paths)
+            for i, fold in enumerate(x["fold"] for x in folds)
         },
         "genome_wide": {
             "profile_pearson": np.nanmedian(np.concatenate(profile_corr)).item(),
@@ -307,17 +203,17 @@ def main():
             "counts_spearman": counts_spearman_all,
         },
     }
-    metrics_dir = Path(resolve_path(args.metrics_dir))
+    metrics_dir = REPO_ROOT / args.metrics_dir
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = metrics_dir / f"{args.run_name}.json"
+    metrics_path = metrics_dir / f"{exp.id}.json"
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=4)
     print(f"\nMetrics saved to {metrics_path}")
 
     if args.save_output:
-        output_dir = Path(resolve_path(args.predictions_dir))
+        output_dir = REPO_ROOT / args.predictions_dir
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{args.run_name}.npz"
+        output_path = output_dir / f"{exp.id}.npz"
         scaled_preds = {
             f"predict_fold{fold}": (
                 torch.nn.functional.softmax(
@@ -327,11 +223,11 @@ def main():
             )
             .reshape(*pred[0].shape)
             .numpy()
-            for fold, pred in zip(model_paths, preds)
+            for fold, pred in zip((x["fold"] for x in folds), preds)
         }
         expts = {
             f"expt_fold{fold}": signal.numpy()
-            for fold, signal in zip(model_paths, signals)
+            for fold, signal in zip((x["fold"] for x in folds), signals)
         }
         np.savez_compressed(output_path, **scaled_preds, **expts)
         print(f"\nPredictions saved to {output_path}")
