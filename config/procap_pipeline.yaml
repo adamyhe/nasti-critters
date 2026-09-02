@@ -1,0 +1,287 @@
+# ENCODE PRO-cap computational pipeline.
+#
+# Transcribed from planning/20240501_PRO-cap_Computational_Pipeline.pdf. Tool
+# versions and parameter strings below are the ENCODE spec verbatim; deviations
+# required for non-human species are marked "DEVIATION".
+#
+# ENCODE runs these steps under the Resource Management System
+# (https://github.com/aldenleung/rmsp), a Python DAG/caching layer. rmsp is
+# orchestration only, not required by the underlying tools, so this repo drives
+# the same steps from src/data_preprocessing/run_procap_pipeline.py and relies on
+# per-step output existence for caching.
+
+provenance:
+  source_document: planning/20240501_PRO-cap_Computational_Pipeline.pdf
+  document_date: 2024-05-01
+  orchestrator: https://github.com/aldenleung/rmsp
+  encode_reference_genome: hg38 (GCA_000001405.15)
+  encode_rdna: U13369.1
+
+tool_versions:
+  fastp: 0.23.4
+  STAR: 2.7.11a
+  samtools: "1.18"
+  umi_tools: 1.1.5
+  biodatatools: 0.0.7
+  pints: 1.1.10
+
+steps:
+  # 1. Adapter trimming and UMI processing.
+  trim:
+    tool: fastp
+    encode_params: "--overlap_len_require 18 --length_required 18"
+    # Named adapter sequences. Which one an experiment uses is recorded per
+    # sample in planning/manifest_samples.tsv (`adapter` column) and reaches the
+    # pipeline as raw.adapter in experiment_config.yaml -- measured, not guessed.
+    #
+    # THIS IS THE SINGLE LARGEST CORRECTNESS FIX IN THE PIPELINE SO FAR. Until
+    # it existed no adapter was configured at all, and 37 of 69 FASTQs carry one
+    # mid-read: PRO-cap/ChRO-cap inserts are 20-45 bp inside a 74-151 bp read,
+    # so fastp's auto-detection (which looks for an overrepresented TAIL) found
+    # nothing -- `reads with adapter trimmed: 0`. STAR then soft-clipped the
+    # adapter and failed --outFilterMatchNminOverLread 0.66, reporting
+    # `unmapped: too short` for up to 95.9% of a library.
+    #
+    # Two are needed, and the split follows assay lineage exactly:
+    #   smallRNA_RA3      PRO-cap / ChRO-cap / CoPRO   (27 files)  = proseq2.0 ADAPT1
+    #   truseq_universal  5'GRO / GRO-cap              (10 files)
+    #
+    # EACH NAME MAPS TO A LIST, because a dimer can be deposited TRUNCATED and
+    # fastp matches an adapter by looking for its BEGINNING somewhere in the
+    # read. A read that starts five bases into the adapter therefore never
+    # matches, survives trimming as a full-length run of pure adapter, and STAR
+    # discards it as `unmapped: too short`. Measured, per read, on the raw
+    # FASTQs:
+    #
+    #   run                          starts with the 5-truncated form
+    #   SRR12774945  C.griseus KLA           43.4%   (pct_unique 28%)
+    #   SRR6660402   Link2018 BMDM           18.7%   (pct_unique 38%)
+    #   SRR12513906  mouse liver CONTROL      0.0%   (pct_unique 91%)
+    #   SRR639142    C.elegans   CONTROL      0.0%   (pct_unique 82%)
+    #
+    # Only the truseq lineage shows it; the small-RNA RA3 libraries deposit
+    # dimers with a VARIABLE 0-2 bp insert instead, which fastp already handles
+    # because the adapter's own start is still present.
+    #
+    # The fix must be a second sequence, NOT a shortened first one. Configuring
+    # `GGAAGAGCACACGTCTGAAC` alone would catch the truncated dimers but leave
+    # 5 bp of adapter on every REAL read, since fastp would then trim at
+    # insert+5. Multiple sequences require --adapter_fasta, so both drivers
+    # write these lists to a FASTA and pass that; a single-entry list behaves
+    # exactly as --adapter_sequence did.
+    #
+    # CONFIRMED BY ISOLATION on a 2 M-read subsample of SRR12774945, counting
+    # `too_short_reads` -- which is the counter that moves, because a read that
+    # is entirely adapter trims to length 0 and is booked as too short rather
+    # than as adapter-trimmed:
+    #
+    #   --adapter_sequence AGATCGGAAGAGC                     23,864
+    #   --adapter_fasta (full only)                          27,930
+    #   (nothing; fastp auto-detects a 33-mer)                27,136
+    #   --adapter_fasta (full + truncated)                   904,438   <-- 45.2%
+    #   --adapter_sequence + --adapter_fasta (both)          903,891
+    #
+    # Only the configs carrying the truncated entry move, so it is the truncated
+    # entry doing the work and auto-detection is irrelevant here.
+    #
+    # DO NOT verify this from fastp's `read1_adapter_counts`: it reports ZERO for
+    # `GGAAGAGCACACGTCTGAAC` even while that sequence is discarding 45% of the
+    # library, because it cannot attribute a trim that leaves nothing behind.
+    # Reading that counter as a no-op is a mistake already made once here.
+    #
+    # Both drivers pass --adapter_sequence (the first entry) AS WELL AS
+    # --adapter_fasta. The fasta is what catches the variants; pinning the
+    # sequence suppresses fastp's auto-detection, so trimming is a pure function
+    # of this config rather than of the data. The last two rows above are the
+    # measurement showing that pinning costs nothing.
+    adapters:
+      smallRNA_RA3:
+        - TGGAATTCTCGGGTGCCAAGG
+      truseq_universal:
+        - AGATCGGAAGAGC
+        # The same adapter minus its first 5 bases, as deposited.
+        - GGAAGAGCACACGTCTGAAC
+    # Applied to every library. fastp only trims an actual poly-X tail, so these
+    # are inert where there is none -- but SRR19034544 (M.musculus-GCB_PROcap,
+    # 150 bp, 200 M reads) is 65% poly-G, a NovaSeq/NextSeq artifact, against
+    # under 1% everywhere else.
+    poly_params: "--trim_poly_g --trim_poly_x"
+    notes: >-
+      UMI handling is per-dataset: pass umi.enabled/umi.len/umi.loc from the
+      experiment's raw block. Spt5_PROcap_sc carries a 10-nt UMI on the 5'
+      adaptor, i.e. at the START OF READ 1 -- see steps.dedup.umi_locations.
+      Most other datasets have no UMI, in which case the fastp --umi flags are
+      omitted entirely.
+      NOTE `--overlap_len_require 18` in encode_params is a PAIRED-END-ONLY
+      option (it governs mate-overlap analysis), so it is inert for 33 of the 38
+      experiments. `--length_required 18` is the part that matters, and it only
+      began to matter once adapters were actually being trimmed.
+      STAR is deliberately NOT relaxed: --outFilterMismatchNmax 1 stays, because
+      the read-structure survey found NO dead sequencing cycle in any of the 69
+      files (max N content 1.1%), so there is no systematic N consuming the
+      mismatch budget. Verify with `qc/reads/*.tsv` before changing it.
+
+  # 2. Alignment to primary assembly + rDNA decoy.
+  align:
+    tool: STAR
+    encode_params: >-
+      --alignMatesGapMax 1000 --outFilterMultimapNmax 10
+      --outFilterMismatchNmax 1 --outFilterMultimapScoreRange 0
+      --outSAMattributes All
+    deviations:
+      - >-
+        DEVIATION: --genomeSAindexNbases must be lowered for compact genomes;
+        the per-species value is in config/genomes.yaml.
+      - >-
+        DEVIATION: the rDNA decoy accession is human-specific (U13369.1). Each
+        species needs its own; see rdna_accession in config/genomes.yaml.
+      - >-
+        --alignMatesGapMax 1000 only applies to paired-end libraries
+        (Ino80_PROcap_sc, Spt5_PROcap_sc); it is inert for single-end input.
+
+  # 3. Keep uniquely mapped reads.
+  filter:
+    tool: samtools
+    encode_params: "-q 255"
+    notes: >-
+      STAR assigns MAPQ 255 to uniquely mapped reads, so -q 255 is the unique
+      filter that pairs with --outFilterMultimapNmax 10.
+
+  # 4. Deduplication.
+  dedup:
+    tool: umi_tools
+    encode_params: "dedup"
+    # fastp appends the extracted UMI to the read name with a ':' separator,
+    # but umi_tools defaults --umi-separator to '_'. An SRA-style read name has
+    # no '_', so umi_tools then takes the WHOLE name as the UMI and dies with
+    # "not all umis are the same length" -- the lengths differing only because
+    # the read number does (SRRxxxxxxxx.1234567 vs .12345678). Match fastp.
+    umi_separator: ":"
+    # umi_tools' own default clustering method. --paired is ORTHOGONAL to this
+    # and is added separately for paired-end runs; do not conflate the two.
+    method: "directional"
+    # Where the UMI physically sits -> the fastp --umi_loc value. The key is the
+    # prose in the manifest's umi_loc column (curated from the paper); the value
+    # is what fastp needs. Mapping it here rather than hardcoding a rule keeps
+    # the manifest authoritative, which matters because the archives corroborate
+    # nothing about UMIs -- ENA's library_construction_protocol mentions one for
+    # NONE of these runs.
+    #
+    # `5' adaptor` -> read1 is MEASURED, not inferred, and it replaces a
+    # hardcoded `read2 if paired else read1` that was wrong for the only
+    # libraries it applied to. Indexing the S. cerevisiae genome and locating
+    # the first genome-matching 24-mer inside each read puts the modal offset at
+    # 10 in read 1 (51-58% of reads, with the expected 1/4 and 1/16 chance-match
+    # tail at 9 and 8) and at 0 in read 2. The 10 bases are random -- no
+    # sequence recurs more than 3 times in 400 reads -- so they are a UMI and
+    # not a fixed barcode.
+    #
+    # Consequences of having had it backwards, for the 3 Spt5 experiments: fastp
+    # cut 10 real genomic bases off read 2 (harmless, read 2 is dropped by the
+    # one-mate filter), the actual UMI stayed on read 1 and reached STAR (soft
+    # clipped, so 5' coordinates were preserved, but it cost aligned length
+    # against --outFilterMatchNminOverLread 0.66), and umi_tools deduplicated on
+    # read 2's first 10 GENOMIC bases -- a tag determined by read 2's own
+    # mapping position, so it added nothing beyond the fragment's 3' coordinate
+    # while dropping 43-57% of reads.
+    umi_locations:
+      "5' adaptor": read1
+      "3' adaptor": read2
+    notes: >-
+      Only meaningful for libraries with a UMI. For datasets without one, record
+      dedup as skipped rather than silently collapsing genuine duplicate 5' ends
+      -- PRO-cap stacks many real reads on a single initiation base.
+
+  # 5. Strand-specific 5'-end signal, then merge replicates.
+  signal:
+    # WHAT THIS REPO ACTUALLY RUNS. Not biodatatools -- see encode_tool below.
+    tool: "bedtools genomecov -5 + bedGraphToBigWig"
+    encode_params: ""
+    # ENCODE's own choice, recorded as provenance only. The subcommand is absent
+    # from the source document, and that is IMMATERIAL rather than an open gap:
+    # procap-atlas consumes ENCODE's per-replicate bigWigs directly by accession
+    # and sums them with bigWigMerge, which is only meaningful for raw
+    # unnormalised per-base counts -- so the quantity those files carry is
+    # pinned, and it is the quantity produced here. The subcommand would only
+    # buy byte-identity, never a goal. There is deliberately no `backend` switch
+    # to flip: implementing the ENCODE-exact path means a new rule plus
+    # re-adding the dependency.
+    encode_tool: "biodatatools 0.0.7"
+    encode_subcommand: unrecorded
+    notes: >-
+      bedtools genomecov -5 plus bedGraphToBigWig produces the same quantity as
+      ENCODE's biodatatools step -- a strand-separated, single-base 5'-end count
+      track -- but is not byte-identical to it.
+    # REPLICATE MERGING: at the BAM level, before counting. samtools merge pools
+    # the per-run BAMs, then genomecov -5 runs once. This is numerically
+    # IDENTICAL to summing per-run count tracks, because 5'-end counting is
+    # additive over reads -- pooling reads then counting equals counting per pool
+    # then summing. So biodatatools is not needed for merging either, and
+    # neither is a separate merge step.
+    #
+    # procap-atlas sums at the bigWig level instead (bigWigMerge, in
+    # src/preprocess/merge_bigwigs.py) because it starts from GEO-provided
+    # bigWigs and has no BAMs to pool. Starting from FASTQ, merging earlier is
+    # one genomecov pass instead of N passes plus a merge plus a re-conversion.
+    #
+    # It also sidesteps a real trap: bigWigMerge defaults -threshold to 0 and
+    # DROPS values at or below it, so a minus-strand track stored as negative
+    # values merges to nothing. The deleted legacy script needed
+    # `-threshold=-1000000` for exactly this, and src/make_negatives.py still
+    # abs-values the minus bigWig before merging strands. Merging BAMs has no
+    # equivalent hazard.
+    merge_replicates: "samtools merge (BAM level, pre-counting)"
+    five_prime_end: true
+    stranded: true
+    # PAIRED-END LIBRARIES: which mate carries the RNA 5' end.
+    #
+    # `bedtools genomecov -5` reports the 5' end of EVERY alignment record, so
+    # on a paired BAM it counts R1's 5' end (the initiation site) and R2's 5'
+    # end (the RNA 3' end, on the opposite strand) alike. Unfiltered, about half
+    # of each track is strand-flipped 3'-end signal. Only one mate may
+    # contribute; workflow/Snakefile's final_bam rule applies this, after dedup
+    # because umi_tools --paired needs both mates.
+    #
+    # R1 is the near-universal PRO-cap convention and is consistent with the UMI
+    # sitting in the 3' adaptor (hence read2) for the Spt5 libraries -- but it
+    # is NOT stated in the manifest for the five paired S.cerevisiae
+    # experiments, which are the only paired ones here. VALIDATE it like
+    # reverse_strand: confirm signal piles up at annotated TSSs, not 3' ends,
+    # before trusting a paired dataset.
+    five_prime_mate: R1
+
+  # 6. Peak calling.
+  peaks:
+    tool: pints_caller
+    encode_params: "--min-lengths-opposite-peaks 5"
+    exp_type: PROcap
+    peak_classes:
+      - unidirectional
+      - bidirectional
+    combine: concatenate      # NOT bedtools merge -- see notes
+    notes: >-
+      Many non-human species have a large fraction of unidirectional TSSs, so the
+      training/validation/test locus set is the union of PINTS unidirectional and
+      bidirectional calls.
+
+      The two sets are CONCATENATED and sorted, not interval-merged. This follows
+      kundajelab/ProCapNet's _merge_uni_bi_peaks.py (via procap-atlas), which does
+      `sorted(uni_peaks + bi_peaks)` and nothing else. Do not add `bedtools merge`:
+      collapsing overlapping intervals destroys the one-row-per-called-peak
+      structure, and merging a unidirectional call into an overlapping
+      bidirectional one loses the distinction the model is being trained on.
+
+      PINTS `divergent` calls are deliberately NOT included: they are a subset of
+      the bidirectional set, so adding them duplicates loci.
+
+      Upstream also keeps per-peak columns -- strand, confidence, class label, and
+      summit position(s) -- rather than cutting to BED3. Summits matter because
+      extract_loci can centre windows on the summit instead of the interval
+      midpoint (`summits=True`).
+
+# Post-pipeline steps already implemented elsewhere in this repo:
+#   GC-matched negatives:  src/make_negatives.py  (model prep, not part
+#                          of this pipeline -- needs the uv venv)
+#   fold assignments:      config/chrom_splits.yaml (chromosome-level) or
+#                          src/data_preprocessing/make_random_splits.py
+#                          (peak-level, for species with too few chromosomes)

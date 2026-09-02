@@ -205,6 +205,257 @@ the only safe test of completion.
 `--help` and missing-data errors stay instant on a login node and are testable without a
 GPU stack installed. `fit_bpnet.py` was the last holdout and now follows suit.
 
+## Label generation: the ENCODE PRO-cap pipeline
+
+Labels are produced by the ENCODE PRO-cap pipeline, transcribed verbatim from
+`planning/20240501_PRO-cap_Computational_Pipeline.pdf` into `config/procap_pipeline.yaml` (tool versions
+and exact parameter strings live there; deviations for non-human species are marked `DEVIATION`):
+
+    fastp 0.23.4 --overlap_len_require 18 --length_required 18
+      -> STAR 2.7.11a --alignMatesGapMax 1000 --outFilterMultimapNmax 10
+                      --outFilterMismatchNmax 1 --outFilterMultimapScoreRange 0 --outSAMattributes All
+      -> samtools 1.18 -q 255 (STAR marks unique reads MAPQ 255)
+      -> umi_tools 1.1.5 dedup      (UMI libraries only)
+      -> 5' stranded bigWigs, merged across replicates
+      -> PINTS 1.1.10 --min-lengths-opposite-peaks 5
+
+Two drivers, same steps:
+
+- **`workflow/Snakefile` — preferred.** Proper DAG: parallel, resumable, atomic outputs, per-rule
+  resources. `snakemake -c16 --config tier=include`. **Verified by local dry-run 2026-08-30**
+  (`uvx --from snakemake --with pyyaml snakemake -s workflow/Snakefile -n -c1 --config tier=...`):
+  228 jobs for `tier=include`, **704 for all tiers** over 38 experiments and 10 genomes;
+  `fetch_only` 78, `signal_only` 542. Note the **target name must come before `--config`** --
+  `snakemake -n --config tier=include qc` makes Snakemake read `qc` as a config entry and die with
+  "Config entries have to be defined as name=value pairs"; `snakemake qc -n --config tier=include`
+  is correct.
+
+  That dry-run was the first ever run against this Snakefile and it immediately found a **fatal
+  pre-existing bug**: `fetch_annotation` declared `{species}.{ext}.gz` as output but only
+  `{species}.log` as its log, and Snakemake requires output, log and benchmark to carry the same
+  wildcards. It aborted at DAG construction with "Not all output, log and benchmark files of rule
+  fetch_annotation contain the same wildcards", which took down the **whole** workflow, not just QC.
+  Fixed. Run the dry-run after touching the Snakefile -- it is cheap and needs no cluster.
+  There is a `fetch_only` target: transfers are capped at 4 by the `downloads` resource and are
+  one thread each, so a big `-c` is wasted during fetching — run `snakemake fetch_only -c4` on a
+  transfer node, then the compute phase with a large `-c`. Also pass `--resources mem_mb=N` when
+  raising `-c`: `align` declares 40 GB for mouse but declared resources are inert without a limit,
+  so `-c64` would start 5 mouse alignments and ask for 200 GB.
+  `-c N` is a global thread budget; `threads:` per rule is both the scheduler's cost and the value
+  interpolated into the tool's own flag, so the two cannot drift. `samtools -@` takes *additional*
+  threads, hence `-@ $(({threads} - 1))`. `pints` sets `threads` from `N_CHROMS` (derived from
+  `genomes.yaml`'s `n_chromosomes`) because PINTS parallelises across chromosomes — 8 threads on
+  S. pombe's 3 chromosomes reserves 5 idle slots. That count comes from `genomes.yaml` (genome
+  structure), not `chrom_splits.yaml` (fold assignment): the two answer different questions, and
+  S. pombe has no entry in the latter. Concurrent ENA transfers are limited by a custom `downloads`
+  resource, defaulted to 4 in the Snakefile via `workflow.global_resources.setdefault` and
+  overridable with `--resources downloads=N`; a custom resource with no limit anywhere is
+  unconstrained, which is why the default is set rather than merely declared.
+  Run-level intermediates are keyed by *run*, not experiment, so a run shared by two experiments is
+  mapped once. Scope is fetch -> negatives; `resolve_runs.py`/`build_experiment_config.py` stay outside
+  (metadata, not DAG work) and training stays on `launch.py`.
+- **`src/data_preprocessing/run_procap_pipeline.py`** — single-experiment path, serial, caches on output
+  existence. Useful for `-e <one>` debugging and `--fetch-genomes`/`--index-only`.
+
+ENCODE orchestrates these steps with [rmsp](https://github.com/aldenleung/rmsp), a DAG/caching layer;
+Snakemake fills the same role here.
+
+**ArrayExpress submissions need their ENA counterpart filled in by hand.** `resolve_runs.py` queries ENA
+with `bioproject`/`sra_study` from the manifest and skips a project that has neither — which is what
+`Embryo_PROcap_dm: no bioproject/sra_study in manifest; skipping query` means. `E-MTAB-6154` is an
+ArrayExpress accession, and ENA's portal does not resolve it. The sequencing data *is* in ENA, brokered
+under a different accession; find it via the BioStudies API
+(`https://www.ebi.ac.uk/biostudies/api/v1/studies/E-MTAB-6154`), whose record links out to the ENA study.
+For this one that is **ERP106976 / PRJEB25091**, now recorded per sample in the manifest, and all 44
+manifest rows resolve. If another ArrayExpress row appears, do the same lookup rather than teaching
+`resolve_runs.py` a second archive.
+
+**Fetching is separate from mapping.** `fetch_fastqs.py` bulk-downloads every FASTQ the config references
+(~120 GiB, 74 files over 64 runs — measured from ENA `fastq_bytes`) with md5 verification, so transfers
+can run on a login/transfer node instead of burning
+GPU allocation and a failed mapping run never re-downloads. Transfers stage through
+`data/fastq/.incoming/` and are only moved to the final path once the md5 matches — a file at the final path
+always means complete and verified. `run_procap_pipeline.py --fastq-dir` picks those up and only falls back
+to downloading on demand. Set `PROCAP_FASTQ_DIR` or symlink `data/fastq` to scratch on a cluster.
+
+Fetch only what the config references, not whole studies: whole-study downloads are **far larger**,
+because several deposits bundle unrelated assays and other organisms (PRJNA834081 is 8/11 human Ramos
+libraries; SRP131922 is 294 runs of which one is wanted; PRJNA1105209 is 506 GiB of which 26 GiB is wanted).
+Bulk-fetching also does not substitute for the sample->run crosswalk: the crosswalk is what *labels* each
+file, and for the TAP+/TAP- studies those labels are the entire point.
+
+Things that will bite you:
+
+- **Paired-end libraries must contribute ONE MATE ONLY to the signal.** `bedtools genomecov -5` reports
+  the 5' end of *every* alignment record, so on a paired BAM it counts R1's 5' end (the initiation site)
+  and R2's 5' end (the RNA 3' end, on the opposite strand) alike — roughly half of each track becomes
+  strand-flipped 3'-end signal. `final_bam` therefore applies `samtools view -f 64`, selected by
+  `steps.signal.five_prime_mate`. It happens **after dedup** because `umi_tools --paired` needs both
+  mates. Only 5 of 40 experiments are paired (all S. cerevisiae: Ino80 x2, Spt5 x3), which is why this
+  went unnoticed. **R1 is a convention here, not a documented fact** — the manifest records read
+  orientation only for `Liver_ChROcap_mm`, which ENA reports as single-end anyway. Validate it like
+  `reverse_strand`: confirm signal piles up at annotated TSSs rather than 3' ends.
+- **The Spt5 UMI is at the START OF READ 1, and `--umi_loc` comes from the manifest — not from the
+  layout.** It was `read2 if paired else read1`, which was backwards for the only three experiments it
+  applied to. Established by indexing the S. cerevisiae genome and locating the first genome-matching
+  24-mer inside each read: the modal offset is **10 in read 1** (51-58% of reads, with the expected 1/4
+  and 1/16 chance-match tail at 9 and 8) and **0 in read 2**. The 10 bases are random — no sequence
+  recurs more than 3 times in 400 reads — so they are a UMI, not a fixed barcode. Note the two candidate
+  models are **indistinguishable from read structure alone** if you only compare adapter offsets, because
+  a UMI ligated between insert and 3' adapter appears at the end of R1 and the start of R2 exactly like
+  insert sequence would; the genomic test is what separates them.
+  `steps.dedup.umi_locations` maps the manifest's prose (`5' adaptor` -> `read1`) to fastp's value, with
+  two guards that both fire: an unmapped prose value fails DAG construction and the serial driver, and a
+  `3' adaptor` UMI on a *single-end* run is rejected outright, because there it sits at the read's 3' end
+  where `--umi_loc` cannot reach it.
+  What having it backwards cost the three Spt5 experiments: fastp cut 10 real genomic bases off read 2
+  (harmless — read 2 is dropped by the one-mate filter); the actual UMI stayed on read 1 and reached STAR,
+  where `alignEndsType Local` soft-clips it, so **5' coordinates were preserved** but aligned length was
+  spent against `--outFilterMatchNminOverLread 0.66`; and umi_tools deduplicated on read 2's first 10
+  *genomic* bases — a tag determined by read 2's own mapping position, so it added nothing beyond the
+  fragment's 3' coordinate while dropping 43-57% of reads in the only 3 of 40 experiments that are
+  deduped at all.
+- **How a library is known to have a UMI: the manifest's `umi_len`/`umi_loc` columns, and nothing else.**
+  `build_experiment_config.py` derives `raw.umi` from them (it used to be a hardcoded dict transcribed by
+  hand from free text in `library_layout`). **The archives cannot corroborate this** — ENA's
+  `library_construction_protocol` was queried for all 45 runs and mentions a UMI for *none* of them,
+  including the three Spt5 experiments that demonstrably have one, so the manifest is authoritative and
+  must be curated from the paper or GEO record. The direct evidence for Spt5 is the extracted read name,
+  `SRR29037352.25948720:ACTAGATAGC` — a 10-base tag, matching `umi_len: 10`.
+  The scheme is **default-deny**: a library whose UMI was never noted is treated as having none and keeps
+  its PCR duplicates. That is the safer error, because deduplicating a non-UMI PRO-cap library destroys
+  real stacked 5' ends — but it does mean a missed UMI is silent.
+- **umi_tools does nothing to non-UMI libraries, by design.** `final_bam` takes `unique.bam` directly
+  when `has_umi(run)` is false, so the `dedup` rule never runs for them — 37 of 40 experiments. This is
+  deliberate: PRO-cap legitimately stacks many reads on one initiation base, so deduplicating a non-UMI
+  library destroys real signal. Only the three Spt5 experiments carry a UMI.
+
+- **fastp and umi_tools disagree about the UMI separator by default.** fastp appends the extracted UMI
+  to the read name with `:`; umi_tools' `--umi-separator` defaults to `_`. An SRA-style read name
+  (`SRR29037352.1234567`) contains no `_`, so umi_tools takes the *entire read name* as the UMI and
+  aborts with `AssertionError: not all umis are the same length(!): 30 - 31` — the two lengths differing
+  only because the read number gained a digit. Both drivers now pass
+  `--umi-separator` from `steps.dedup.umi_separator`. If you change fastp's UMI handling, change this
+  with it.
+- **`--paired` and `--method` are orthogonal in umi_tools** — the first describes the library layout, the
+  second picks the clustering algorithm. The dedup rule used to return one *or* the other, so paired runs
+  silently got the default method while single-end runs were forced onto `unique`. Both now come from
+  `steps.dedup` (`method: directional`, umi_tools' own default) with `--paired` added only for paired-end
+  runs. Only the three `Spt5_PROcap_sc` experiments have a UMI at all, so this path is easy to leave
+  broken unnoticed.
+
+- **STAR's `--limitBAMsortRAM` defaults to the size of the GENOME INDEX**, not to anything about the
+  library, so the sort budget is smallest exactly where libraries are deepest relative to the genome.
+  A yeast run died with `not enough memory for BAM sorting: SOLUTION: re-run STAR with at least
+  1134315395` while mouse was fine — counter-intuitively, the compact genomes break first. Both drivers
+  now pass it explicitly: the Snakefile derives it from the rule's own `mem_mb` minus an index reserve
+  (13 GB for the compact genomes, 10 GB for mouse), and `run_procap_pipeline.py` takes
+  `--star-sort-ram GB` (default 10). Note this is separate from Snakemake's `mem_mb`, which STAR knows
+  nothing about — raising `--resources mem_mb` alone does not fix it.
+
+- **bigWigs and PINTS are restricted to `main_chromosomes` (in `config/genomes.yaml`), not the whole
+  assembly.** Two reasons, both learned the hard way. `bedGraphToBigWig` records only contigs that appear
+  in its input, so on dm6's 1,862 scaffolds one strand has reads where the other has none and the two
+  bigWigs end up with different contig sets — PINTS then aborts with
+  `bw_pl and bw_mn should have the same chromosomes`. And scaffolds cannot enter a fold anyway, since
+  `chrom_splits.yaml` lists only main chromosomes. Both the `bedgraph`/`chrom_sizes` rules and
+  `run_procap_pipeline.py` filter to the same list. The rDNA sink is excluded here too: it belongs in the
+  STAR index, not the peak-calling space.
+- **PINTS' `--chromosome-start-with` defaults to `chr`, which silently matches nothing for the
+  Ensembl-named species.** S. cerevisiae (`I`..`XVI`), S. pombe (`I`..`III`) and A. thaliana (`1`..`5`)
+  would have produced **zero peaks with no error**. Both drivers now pass the prefix from `chrom_style`:
+  `chr` for the UCSC assemblies, empty for the Ensembl ones. This is a silent-wrong-answer bug, not a
+  crash — check the PINTS log reports a sane chromosome count before trusting a new species.
+
+- **The peak set is PINTS `unidirectional` + `bidirectional` calls, CONCATENATED and sorted — not
+  interval-merged.** This follows kundajelab/ProCapNet's `_merge_uni_bi_peaks.py` (via procap-atlas), which
+  does `sorted(uni + bi)` and nothing else. Do not add `bedtools merge`: collapsing overlapping intervals
+  destroys the one-row-per-called-peak structure and folds unidirectional calls into overlapping
+  bidirectional ones. PINTS `divergent` calls are excluded — they are a subset of the bidirectional set, so
+  including them duplicates loci. Upstream also keeps strand/confidence/class/summit columns rather than
+  cutting to BED3; summits allow `extract_loci(summits=True)`. Many non-human species have a large fraction
+  of unidirectional TSSs, so both classes are needed; this union is the locus set for train, validation
+  *and* test.
+- **Replicates are merged at the BAM level, and that already IS summing.** `merge_runs` pools the
+  per-run BAMs with `samtools merge`, then `genomecov -5` runs once. That is numerically identical to
+  summing per-run count tracks, because 5'-end counting is additive over reads — pooling reads then
+  counting equals counting per pool then summing. So `biodatatools` is not needed for merging either.
+  procap-atlas sums at the bigWig level (`bigWigMerge`, in `src/preprocess/merge_bigwigs.py`) because it
+  starts from GEO-provided bigWigs and has no BAMs to pool; starting from FASTQ, merging earlier is one
+  `genomecov` pass instead of N passes plus a merge plus a re-conversion. It also avoids a real trap:
+  **`bigWigMerge` defaults `-threshold` to 0 and drops values at or below it**, so a minus-strand track
+  stored as negative values merges to nothing. The deleted legacy fly script needed
+  `-threshold=-1000000` for precisely this, and `src/make_negatives.py` still abs-values the minus bigWig
+  before merging strands. Do not "modernise" this into a bigWig-level merge.
+- **We do NOT use `biodatatools`, and the unrecorded subcommand does not matter.** ENCODE produces its
+  per-replicate bigWigs with `biodatatools` 0.0.7 and the source document omits the subcommand. That was
+  logged as a blocker; it is not one, because the quantity is pinned from both ends. procap-atlas consumes
+  ENCODE's per-replicate bigWigs **directly by accession** (`ENCFF*.bigWig` as `pl_bigwigs`/`mn_bigwigs`
+  in its config) and sums them with `bigWigMerge` — and summing replicates is only meaningful for raw,
+  unnormalised per-base counts, so that is what those files are. We produce the same quantity from the
+  same read-level spec and merge at the BAM level, which is arithmetically the same sum. The subcommand
+  would only buy byte-identity, which was never the goal.
+  What actually runs is recorded as `steps.signal.tool`; ENCODE's choice sits beside it as
+  `encode_tool` / `encode_subcommand: unrecorded`. There is deliberately **no `backend` switch** — nothing
+  imports biodatatools, no code reads such a key, and the `encode-exact` extra was removed rather than
+  left installing an unused package.
+  **The distinction that does matter is raw vs normalised.** Summing normalised tracks is meaningless,
+  which is exactly why the GEO-provided `R1Normed` yeast bigWigs had to be re-mapped rather than reused.
+- **rDNA decoy.** ENCODE aligns to genome + rDNA (U13369.1 for human). No per-species rDNA accession has been
+  verified — every `rdna_accession` in `config/genomes.yaml` is `null` with a note. This matters most for
+  mouse (rDNA largely absent from the primary assembly) and least for yeast (rDNA inside chrXII).
+- **`Liver_ChROcap_mm` is single-end — the paired-end claim was a curation error.** All 8 runs report
+  `library_layout=SINGLE` with exactly one FASTQ, no `nominal_length`, and a uniform ~74.8 bp read. The
+  manifest had said "paired-end; RNA 5' end in R1 and RNA 3' end in R2", which almost certainly came from
+  misreading the sample names: they carry `R1`/`R2` as the **biological replicate**
+  (`Old_Female_R1_PROCAP` / `Old_Female_R2_PROCAP`), pairing with the age×sex strata and with the
+  manifest's own `biological_replicate` column — not read 1 / read 2. Since `library_layout` in
+  `experiment_config.yaml` is resolved from ENA rather than from the manifest, the pipeline was already
+  treating these correctly; regenerating the config after the fix is a no-op. `five_prime_mate` does not
+  apply to them. ChRO-cap is cap-selected, so the single read's 5' end is the initiation site — the same
+  thing proseq2.0 expresses as `-G/--SE_READ=RNA_5prime` ("like GRO-seq") rather than `-P` ("like
+  PRO-seq"). Confirm with the initiator logo from `snakemake qc`.
+- **Strand orientation.** `--reverse-strand` swaps which read strand becomes the plus track. R1/R2 conventions
+  vary across these deposits; validate at known unidirectional promoters before trusting a new dataset.
+- **No UMI means no dedup.** PRO-cap legitimately stacks many reads on a single initiation base, so
+  deduplicating a non-UMI library destroys signal. The driver skips `umi_tools` and says so. Only
+  `Spt5_PROcap_sc` has a UMI (10 nt, 3' adaptor).
+- **Booth2016 was NOT TAP-bundled — that was a curation error, now resolved.** `S.cerevisiae_PROcap`
+  and `S.pombe_PROcap` were skipped on the belief that TAP+ and TAP− runs shared one GEO sample. The
+  archive says otherwise: each sample's two runs sit under a **single SRA experiment**
+  (`SRX1490952`/`SRX1490953`), and in SRA one experiment is one library, so two runs means one library
+  sequenced twice. TAP+ and TAP− are different libraries and would carry different SRX. All **10** samples
+  in `PRJNA306424` follow the same 2-runs-per-SRX pattern — including mRNA-seq, where TAP is meaningless —
+  and **no sample in the study is labelled TAP−/minus/control**. No TAP− data was deposited. Both runs are
+  technical replicates and merging them is correct; both experiments now run, taking targets from 24 to 26.
+  Residual risk, which metadata cannot exclude: TAP+ and TAP− reads pooled *inside* one library without
+  demultiplexing. The initiator logo from `snakemake qc` would be diluted if so — check it before
+  publishing yeast numbers.
+  **The `--allow-bundled-tap` guard stays**, because it is right for a genuinely bundled deposit; it is
+  just no longer triggered. Other projects here do have real TAP− controls as separate samples
+  (`LacZ_PROcap_dm`, `Kruesi2013_ce_GROcap`), which is why the assumption was reasonable.
+- **TAP− rows are controls, not targets.** Where they exist they appear as `raw.protocol_controls` and are
+  for background and specificity checks only.
+- **Spike-ins.** Ino80/Spt5 (S. pombe), LacZ (mouse MEFs), and Bcell (Drosophila) carry spike-ins. They must
+  never contribute to target labels; the driver warns, but splitting them off is not yet implemented.
+
+
+## Editing the `trim` rule re-runs everything — know this before you do it
+
+`trim` has two PERSISTENT outputs (`fastp.json`, `fastp.html`) alongside its `temp()` FASTQs. So unlike
+the deeper rules, whose temp outputs are long deleted, `trim` still has metadata to compare against — and
+Snakemake's default rerun-triggers include `params` and `code`. **Any edit to the trim rule therefore
+re-runs trim for all 59 runs and cascades through align, peaks and QC**, whether or not the edit affects a
+given library. Adding `--adapter_fasta` also gives `trim` a new input file, which forces it the same way.
+
+That is a full uniform re-map, which is defensible — it is what this repo is for — but it is not cheap
+(59 STAR alignments including hamster at 2.4 Gb) and it should be a decision, not a surprise. To scope it
+down instead, run with `--rerun-triggers mtime` and delete only the affected experiments' outputs.
+
+The reverse is also worth knowing: a change *below* trim usually will NOT be picked up automatically,
+because the intermediate chain is `temp()` and already deleted, so the params/code comparison has no
+output file to compare and the persistent files downstream look up to date. Force those explicitly.
+
 ## Data provenance and the re-mapping transition
 
 `processed:` paths in `config/experiment_config.yaml` now point at ENCODE-pipeline output under
@@ -734,6 +985,71 @@ different STAR indices. Keep both implementations in step — the shared entry p
 chloroplast's length and `scaffold_51` within 5% of the P. patens mitochondrion's, and neither holds any
 of that sequence. Match on sequence: 15 random 30-mers from the organelle against the assembly, both
 strands. 0/15 means absent; 1/15 is what a NUMT looks like and is not evidence of presence.
+
+## SRR19034544: interleaved mates deposited as a single-end run
+
+**`M.musculus-GCB_PROcap` was modelling 3' ends on the antisense strand**, and the orientation metaplot is
+what caught it. Worth reading as a case study, because every layer of metadata was wrong and only the
+reads settled it.
+
+The symptom: sense signal peaked sharply at the annotated TSS (correct), but antisense peaked **just
+downstream at ~+36 instead of divergent upstream**, with `antisense/sense` of exactly **1.00** where every
+other mouse experiment sits at 0.52-0.70. Annotation was not the cause -- GCB uses 23,798 mm10 TSSs, the
+most of any mouse experiment and essentially the same as `liver-old`'s 23,496, which produces the cleanest
+plot in the set.
+
+That geometry is the signature of an unfiltered R2. `genomecov -5` takes the 5' end of every record, and
+R2's 5' end is the RNA **3' end** -- opposite strand, displaced downstream by the fragment length. It is
+the exact artifact `final_bam`'s `samtools view -f 64` exists to prevent, and the guard never fired
+because the run is recorded as single-end.
+
+**ENA and SRA both report SINGLE, and both are wrong.** Proven from the reads alone:
+
+- every instrument name occurs exactly twice (2 M names over 4 M reads);
+- consecutive reads share `flowcell:lane:tile:x:y` (`A00700:262:HW3FYDRXX:1:2101:15365:1016`), i.e. one
+  cluster, i.e. one fragment;
+- mate2's insert is the **reverse complement** of mate1's -- 35/36 identity, the mismatch being an `N` --
+  so both mates read one ~36 bp fragment from opposite ends;
+- still interleaved 200 M reads deep, so it is not a header-only artifact.
+
+`read_count` is 404,607,360 = 2 x 202,303,680, which also explains why this run looked like a 7-10x depth
+outlier against its 41-52 M siblings, and why it is 65% poly-G (both mates read ~100 dark cycles past a
+36 bp fragment).
+
+**What hid it:** SRA labels every read `/1` when it dumps a run as single-end, and gives the two mates
+different accession names (`SRR19034544.1`, `.2`). So the mate flag says `/1` on both, and the names look
+unique. `library_layout` is resolved from ENA precisely because the manifest was wrong twice
+(`Liver_ChROcap_mm`, `Tome2018_mm_CoPRO` both claimed paired and are single) -- this is the same class of
+error in the opposite direction, with the archive as the source.
+
+**The mechanism.** `deposited_interleaved` in `planning/manifest_samples.tsv` -> `raw.interleaved` in
+`experiment_config.yaml` -> a `deinterleave` rule in `workflow/Snakefile` and the matching branch in
+`run_procap_pipeline.py`. Note:
+
+- `library_layout` stays **SINGLE**. That is what the archive says and it remains recorded; `interleaved`
+  is the measured correction layered on top.
+- `is_paired()` is now the PROCESSING decision (paired deposit **or** interleaved) and is deliberately
+  distinct from `RUN_LAYOUT`. It is what makes `-f 64` fire.
+- `run_fastqs()` is keyed on `RUN_LAYOUT`, not `is_paired()` -- it describes what is ON DISK, and using
+  `is_paired()` would make the DAG look for two files that do not exist.
+- Read names are rewritten to the instrument name with `/1` stripped, so both mates share a name. Safe
+  here because this run has no UMI, so fastp's `:`-appended UMI convention and umi_tools'
+  `--umi-separator` are not in play.
+- `--overlap_len_require 18` finally does something for this run: the mates fully overlap a 36 bp
+  fragment, so fastp can do overlap-based correction.
+
+**Two traps when editing the awk**, both hit while writing it:
+
+1. It must be ONE source line. Written across lines, `\n` inside the awk string becomes a literal newline
+   and the program is an unterminated string literal. **A Snakemake dry-run will not catch this** -- it
+   does not parse shell content, so the DAG builds and the rule fails at runtime.
+2. The awk braces must be doubled (`{{`/`}}`). Snakemake formats the shell string, so a single `{` is read
+   as a substitution field.
+
+Verified by running the exact command Snakemake emits against a fixture built to mimic the real file:
+5/5 records to each mate, odd records to mate 1 and even to mate 2, names matching between mates, `/1` and
+the SRA accession stripped. `AWK_DEINTERLEAVE` in `run_procap_pipeline.py` is the same program; keep them
+identical.
 
 ## The 2026-08-30 manifest update: 3 projects, 12 experiments, 4 species
 
