@@ -180,3 +180,34 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .DS_Store
+
+# Excel lock files from opening the planning manifest
+~$*.xlsx
+
+# Raw and processed genomics data: FASTQs, genomes, STAR indices, bigWigs,
+# peak calls. ~120 GiB of FASTQ alone for the full experiment set.
+data/
+models/
+logs/
+predictions/
+performance_metrics/
+attr/
+data/annotation/
+
+# QC output, including the stats tables. These are RUN ARTIFACTS and are
+# deliberately not tracked: qc/stats/experiment_stats.{tsv,md} are also outputs
+# of the stats_table rule, so a committed copy makes Snakemake report "Nothing
+# to be done" and never rebuild it -- a stale table that looks authoritative is
+# worse than no table. Read them where the pipeline ran, or refresh locally with
+#   python src/qc/experiment_stats.py --all -o qc/stats/experiment_stats.tsv \
+#       --markdown qc/stats/experiment_stats.md
+#
+# ANCHORED with a leading slash on purpose. A bare `qc/` matches a directory of
+# that name at ANY depth, so it also ignored **src/qc/** -- the QC *source*
+# tree. read_structure_qc.py was silently skipped by `git add -A` because of it,
+# and orientation_qc.py / experiment_stats.py are tracked only because they
+# predate the rule. Do not remove the slash.
+/qc/
+
+# Snakemake working metadata
+.snakemake/

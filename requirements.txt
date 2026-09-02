@@ -1,3 +1,0 @@
-bpnet-lite>=1.0.0
-tangermeme>=1.0.0
-cherimoya
