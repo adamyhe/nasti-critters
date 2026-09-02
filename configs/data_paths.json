@@ -1,9 +1,0 @@
-{
-    "loci": "data/S2_dm3_PROcap_merged_peaks.bed.gz",
-    "sequences": "data/dm3.fa",
-    "negatives": "data/S2_dm3_PROcap_negatives.bed.gz",
-    "signals": [
-        "data/S2_dm3_PROcap_pl.bw",
-        "data/S2_dm3_PROcap_mn.bw"
-    ]
-}

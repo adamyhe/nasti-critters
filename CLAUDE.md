@@ -119,3 +119,154 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   resolution compiles: `triton` has manylinux wheels, and the only source installs left are `cherimoya`
   (git pin) and `connection-pool`, both pure Python. If you add a Python dep that needs building, put the
   compilers back in `environment.yml`, not `pyproject.toml`.
+
+## Common commands
+
+```bash
+# --- ENCODE PRO-cap pipeline (the current path for producing labels) ---
+python src/data_preprocessing/resolve_runs.py                  # manifest -> run accessions via ENA
+python src/data_preprocessing/build_experiment_config.py       # manifest -> experiment_config.yaml
+python src/data_preprocessing/fetch_fastqs.py --dry-run        # ~200 GiB for all 42 experiments
+python src/data_preprocessing/fetch_fastqs.py --tier include -j 4
+python src/data_preprocessing/fetch_fastqs.py --verify-only    # md5 audit of what is on disk
+python src/data_preprocessing/run_procap_pipeline.py --list    # what is defined and what is ready
+python src/data_preprocessing/run_procap_pipeline.py --index-only --species S.cerevisiae
+python src/data_preprocessing/run_procap_pipeline.py -e S.cerevisiae-Ino80ctl_PROcap --dry-run
+python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
+
+# Mapped reads + peak counts per experiment, for exclude/merge decisions
+snakemake stats -c8 --config tier=include,conditional   # target BEFORE --config
+python src/qc/experiment_stats.py --all \
+    -o qc/stats/experiment_stats.tsv --markdown qc/stats/experiment_stats.md
+
+# GC-matched negatives (run from repo root; driven by experiment_config.yaml)
+uv run python src/make_negatives.py --dry-run
+uv run python src/make_negatives.py -e S.cerevisiae_PROcap --force -j 3
+
+# S. pombe peak-level folds (required before pombe training; see "Splits" below)
+python src/data_preprocessing/make_random_splits.py
+
+# Train BPNet, one experiment/fold
+python src/bpnet/fit/fit_bpnet.py -e D.melanogaster-S2_PROcap -f 0 -v
+
+# Submit all (experiment x fold) BPNet jobs; skips already-trained and missing-data combos
+python src/bpnet/fit/launch.py --dry-run
+python src/bpnet/fit/launch.py --time 12:00:00 --mem 32G
+
+# Train Cherimoya (D. melanogaster / dm3 config set only)
+python src/cherimoya/fit/fit_cherimoya.py -f 0
+
+# Evaluate / attribute
+python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
+python src/bpnet/benchmark/benchmark_predictions.py
+python src/bpnet/attribute/attribute.py --attribute-type profile
+```
+
+There is no linter config, no formatter config, and no tests. Verification means running a script — use
+`--dry-run` (preprocessing/launcher) or a single `-f 0` fold as the cheap smoke test.
+
+## Architecture: one convention, via src/experiments.py
+
+Everything resolves through **`src/experiments.py`**. Scripts add `REPO_ROOT/src` to
+`sys.path` and import from it; do not reintroduce per-script path constants.
+
+| Concern | Single source |
+| --- | --- |
+| What data | `config/experiment_config.yaml`, selected with `-e EXPERIMENT` |
+| Which folds | `config/chrom_splits.yaml` by species (S. pombe absent by design), or peak-level `config/splits/{species}_random_fold_assignments.csv` |
+| Hyperparameters | `config/{bpnet,cherimoya}_params.json`, one file per model family |
+| Model paths | `models/{family}/{experiment}/{experiment}.fold{f}.torch` |
+| Non-ACGT bases | `experiments.IGNORE` |
+
+`Experiment.load(id)` returns resolved absolute paths plus `species`, `blacklist`, and a
+`missing` list of absent inputs. `.fold_split(f)` applies the one fold rule (test = `f`,
+validation = `(f+1) % n`, train = the rest) and transparently switches to peak-level splits
+where they exist. `.all_folds(family)` gives every fold with its test chromosomes and
+checkpoint path — what the benchmark and attribution scripts iterate over.
+
+**This was two incompatible regimes until recently, and the history explains the shape.**
+`eefd528` "Reviving this project" (2026-05-23) added a flat `config/data_paths.json` for a
+single dm3 Drosophila dataset. `c9b1311` added cherimoya onto that same scaffolding one
+commit later. `a806e0d` "Added yeast genomes" then needed multiple species, introduced
+`experiment_config.yaml` + `chrom_splits.yaml`, and converted **only** `fit_bpnet.py` and
+`launch.py`. The five downstream scripts kept reading `data_paths.json`, so the repo ended
+up with two genome builds of the same Drosophila data, two model filename conventions, and
+duplicated hyperparameters that had silently diverged (`count_loss_weight` 100 vs 50,
+`max_epochs` 100 vs 200). All of that is now unified; `data_paths.json` is deleted. If you
+need the old dm3 dataset, add it as an experiment rather than resurrecting a parallel path.
+
+**Completion is `.final.torch`, not `.torch`.** Both bpnet-lite and cherimoya write
+`{name}.torch` every time validation loss improves — so it can exist after one epoch — and
+`{name}.final.torch` exactly once at the end of `fit()`. `model_path(..., final=True)` is
+the only safe test of completion.
+
+**Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
+`data_loader` are imported *inside* `main()`, after argparse and path validation, so
+`--help` and missing-data errors stay instant on a login node and are testable without a
+GPU stack installed. `fit_bpnet.py` was the last holdout and now follows suit.
+
+## Data conventions to preserve
+
+- **Strand sign.** Minus-strand bigwigs may store signal as negative values (UCSC convention) or positive
+  (direct). The codebase normalizes with `torch.abs()` on every signal/control tensor after `extract_loci`,
+  and `make_negatives.py` abs-values the minus bigwig before merging strands. `src/bpnet/fit/data_loader.py`
+  exists *only* to add these `abs()` calls around `bpnetlite`'s `PeakGenerator`. Any new code that reads
+  signal must do the same.
+- **Non-ACGT.** Every `extract_loci` call passes `ignore=list("QWERYUIOPSDFHJKLZXVBNM")`.
+- **Outlier peaks: no signal-based filter is applied, deliberately.** Both fit scripts pass
+  `max_counts=None`, matching procap-atlas, which does the same in its `fit_bpnet.py` and
+  `fit_cherimoya.py`. The pre-unification `fit_bpnet.py` (at `a806e0d`) did drop peaks above
+  `quantile(total_signal, 0.99) * 1.2`; the port to `data_loader.PeakGenerator` removed it, which brought
+  this repo in line with upstream. Do not reinstate it casually: the threshold is data-dependent, so every
+  species and library gets a different effective cutoff, which is corrosive in a repo whose point is
+  cross-species comparison — and the top of a PRO-cap signal distribution is real biology (snRNA, histone,
+  ribosomal-protein promoters), i.e. the most informative loci for an initiation model. Upstream uses
+  signal quantiles only in *diagnostics* (`locus_diagnostics`, `generate_warning_flags.py`), never to drop
+  training data. Artifact removal is the exclusion lists' job, and those are canonical published lists —
+  **do not hand-curate regions into them**, or folds and preprocessing stop being comparable with
+  plant-design, csRNANet and procap-atlas.
+- **The real gap this leaves:** S. cerevisiae and S. pombe have no published exclusion list *and* no
+  outlier filter, so their only guards are non-ACGT filtering and the fold structure. Their in-assembly
+  rDNA arrays (`XII:451786-489469`; `III:1-23130` and `III:2440994-2452883`) will be among the
+  highest-signal PINTS calls. Those are real Pol I loci rather than mismapping artifacts, and `log1p` on
+  the count head compresses their influence, so this is a known and probably tolerable exposure rather
+  than a bug — but check it before publishing yeast numbers.
+- **Negatives live in `main_chromosomes`, from `config/genomes.yaml`** — the same allow-list the bigWig
+  and PINTS steps use, so negatives are drawn from exactly the space the peaks occupy.
+  `src/make_negatives.py` applies it in three places: the peak set, both bedgraphs, and the chrom.sizes
+  it feeds `bedGraphToBigWig`. All three are needed — restricting only chrom.sizes makes
+  `bedGraphToBigWig` abort on the first contig it no longer lists.
+  This replaced a hand-written per-*experiment* `CHROM_EXCLUDE` regex map, which was wrong two ways.
+  It **under-covered**: 3 of 38 experiments had an entry, so 35 filtered nothing while chrom.sizes came
+  from the whole FASTA `.fai` — fine for dm6, but S. moellendorffii has 757 scaffolds and C. griseus 637.
+  And it was **actively incorrect**: the patterns were substring regexes over the entire BED line, so
+  dm6's `_` dropped any peak whose *name* contained an underscore, not just the scaffolds it targeted
+  (verified — a `chr2L` peak named `peak_with_underscore` was being discarded).
+  The new filter matches column 0 exactly, `str()`s the YAML names (bare-numeric chromosomes parse as
+  ints and would match nothing), and raises if `main_chromosomes` and the FASTA disagree rather than
+  silently emitting a short chrom.sizes. `ALPHA` stays per-experiment: it is a tuning parameter, not a
+  property of the genome.
+- **Negatives ratio.** GC-matched negatives are sampled at a low ratio (1/7 in `fit_bpnet.py`, 0.1 in the
+  JSON configs) rather than a balanced mix.
+- Windows are `in_window=2114` / `out_window=1000` throughout; `trimming` is always
+  `(in_window - out_window) // 2`.
+
+## Code patterns
+
+- **Deferred heavy imports.** Scripts import `torch`, `bpnetlite`, `cherimoya`, and `tangermeme` *inside*
+  `main()`, after argparse and after all config/path validation. This keeps `--help` and missing-file errors
+  near-instant on a login node. Keep new imports in the same place.
+- **Fail fast on paths.** Each script builds a `[(label, path), ...]` list and exits nonzero listing every
+  missing file before doing any work.
+- `load_config()` uses `yaml.safe_load` for both YAML and JSON configs (YAML is a JSON superset), so config
+  files can be either format.
+- `load_bed()` reads only columns 0–2 with `dtype={"chrom": str}` — chromosome names must stay strings
+  (S. cerevisiae uses roman numerals, dm has `4`/`X`).
+- Cherimoya optimization splits parameters: **Muon** for 2-D weight matrices except `linear.weight`, **AdamW**
+  for everything else, each with linear warmup (5 epochs) → cosine decay, trained in `bfloat16`.
+
+## Scope note
+
+Human K562 PRO-cap configs from the csRNANet workspace are deliberately excluded from this repo.
+`planning/nonhuman_capped_runon_manifest.xlsx` tracks candidate non-human datasets not yet wired into
+`config/`.
