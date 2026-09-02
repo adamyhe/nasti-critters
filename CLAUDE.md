@@ -440,6 +440,29 @@ Things that will bite you:
   never contribute to target labels; the driver warns, but splitting them off is not yet implemented.
 
 
+## Editing a QC script is INVISIBLE to Snakemake unless the script is an input
+
+Snakemake hashes a rule's own code and params — never the contents of a file those
+params merely name. So every rule that ran `python {params.script}` was immune to edits of
+that script, and `snakemake qc` reported **"Nothing to be done"** after the initiator measure
+changed and `rdna_regions` was added. Nothing was stale on disk by mistake; the DAG simply had no way
+to know.
+
+All six report scripts are now declared as `input:` as well as `params:` — `orientation_qc`,
+`umi_report`, `read_structure_qc`, `rrna_content`, `experiment_stats`, `stats_table`. Do the same for
+any new one, and remember it cuts both ways: editing a script now re-runs every rule that uses it.
+
+**That change also had to remove `merged.bam` from `experiment_stats`'s inputs.** It is `temp()` and
+normally already deleted, so invalidating the rule — which now happens on every script edit — made
+Snakemake rebuild all 38 via `merge_runs`. `peaks` already guarantees align/merge/pints ran, so
+merged.bam bought ordering that was guaranteed anyway. Same argument the rule already made for
+`Log.final.out`: an input whose only effect is to force expensive recreation is worse than a blank
+column.
+
+**And a local dry-run cannot tell you what the cluster will do.** `data/` is empty on a dev machine, so
+every job shows as pending and the totals are meaningless for judging what an edit invalidates. Reason
+about rerun-triggers from the rule definitions, or run the dry-run where the data is.
+
 ## Editing the `trim` rule re-runs everything — know this before you do it
 
 `trim` has two PERSISTENT outputs (`fastp.json`, `fastp.html`) alongside its `temp()` FASTQs. So unlike
@@ -1051,6 +1074,326 @@ Verified by running the exact command Snakemake emits against a fixture built to
 the SRA accession stripped. `AWK_DEINTERLEAVE` in `run_procap_pipeline.py` is the same program; keep them
 identical.
 
+## Read-structure QC: the untrimmed adapter
+
+**Nothing in this pipeline configured a sequencing adapter until now, and it cost most of the reads in
+14 of 38 experiments.** `src/qc/read_structure_qc.py` (rule `read_structure_qc`, in `all` and `qc`,
+output `qc/reads/{exp}.tsv`) surveys the raw FASTQs so this is visible before alignment burns the compute.
+
+The failure chain, established from `Log.final.out` plus the reads themselves:
+
+1. PRO-seq/ChRO-cap/CoPRO libraries carry the **Illumina small-RNA 3' adapter**,
+   `TGGAATTCTCGGGTGCCAAGG` — which is also proseq2.0's `ADAPT1` default. The repo cross-checked mate
+   handling against proseq2.0 and adopted `--RNA5`/`--map5`/`--opposite-strand` but never picked up its
+   adapter.
+2. Inserts are 20-45 bp inside a 74 bp read, so the adapter sits **mid-read at a different offset in
+   every read**. fastp's auto-detection looks for an overrepresented tail and therefore missed it:
+   `No adapter detected for read1`, `reads with adapter trimmed: 0`, and read length unchanged by
+   filtering (74.44 -> 74.45 bp).
+3. STAR aligns the short insert, soft-clips the adapter, and fails
+   `--outFilterMatchNminOverLread` (default **0.66 of read length**), which on a 74 bp read demands
+   >= 49 bp aligned. `M.musculus-liver-*` therefore reported **95-99.85% `unmapped: too short`** with
+   only 0.25-0.92% multimapping — so it was never rRNA, never the mismatch filter, and never read length.
+
+`C.griseus-CHO_GROcap` is the control that proves the parameters are not at fault: **76 bp reads, 5.21%
+too short**, under identical settings.
+
+Two further traps found in the same reads, both of which survive adapter trimming:
+
+- **A dead sequencing cycle.** Every read in one library had `N` at position 6, the preceding 5 bases
+  varying randomly. This matters out of proportion because **STAR counts an N as a mismatch** and
+  `--outFilterMismatchNmax 1` allows exactly one, so every read enters the aligner with its budget
+  already spent and any real variant is fatal. `dead_cycles` reports it. The fix is a length-scaled cap
+  (`--outFilterMismatchNoverLmax`) rather than `Nmax 1`, marked `DEVIATION` in
+  `config/procap_pipeline.yaml`.
+- **`--overlap_len_require 18` is paired-end only** and therefore inert for 35 of 40 experiments. The
+  ENCODE trim string is doing less than it looks.
+
+**Read `pct_short_untrimmed`, not `pct_adapter`.** Every library carries a few percent of adapter
+**dimers** (insert length 0) which cost nothing to leave in — `SRR826225/6` are 5.4%/5.0% adapter and
+need no action. `pct_short_untrimmed` is the share of reads STAR will actually discard, i.e. exactly what
+trimming recovers, and it is validated against STAR's own accounting: predicted 5.4%/4.9% against
+observed 4.72%/5.30% per run, and 92.9% on a synthetic library built to mimic the 95.29% real case.
+
+Survey everything at once, without Snakemake:
+
+    python src/qc/read_structure_qc.py --tsv qc/reads/read_structure.tsv
+
+### The fix, and what the survey decided
+
+**Two adapters, not one, assigned per experiment.** The survey over all 69 FASTQs found 37 needing
+trimming, split 27 `smallRNA_RA3` / 10 `truseq_universal`, and the split follows assay lineage exactly:
+
+| adapter | sequence | studies |
+| --- | --- | --- |
+| `smallRNA_RA3` | `TGGAATTCTCGGGTGCCAAGG` | PRO-cap / ChRO-cap / CoPRO (= proseq2.0's `ADAPT1`) |
+| `truseq_universal` | `AGATCGGAAGAGC` | 5'GRO / GRO-cap |
+
+Mechanism, mirroring how UMIs work — **measured evidence in the manifest, not a lookup table in code**:
+
+1. `planning/manifest_samples.tsv` gains an **`adapter`** column holding the NAME, set from the survey
+   and consistent within every project (which is why project granularity is right).
+2. `build_experiment_config.py::adapter_from_rows` propagates it to `raw.adapter`, raising on a
+   conflicting value within one project.
+3. `steps.trim.adapters` in `config/procap_pipeline.yaml` maps name -> sequence.
+4. Both drivers resolve it: `adapter_arg()` in `workflow/Snakefile` and in `run_procap_pipeline.py`.
+   Keep them in step.
+
+**Three guards, all verified to fire**: a conflicting adapter within one project fails the generator; an
+unknown adapter name fails DAG construction (`WorkflowError`) *and* fails the serial driver. An empty
+value means none was detected and fastp auto-detects — that is the honest default, and it is what every
+library silently got before this column existed.
+
+**A fourth guard, added after the cotton case slipped past the other three: the manifest's curated name
+is now checked against the reads.** All three guards above are *internal consistency* checks — they catch
+a name that conflicts with a project-mate, or a name with no sequence behind it. None of them asks whether
+the name is **true**, so `G.{arboreum,hirsutum}-ovule_GROcap` sat at `smallRNA_RA3` while every one of
+their runs is 97%+ `truseq_universal`, and both mapped and were reported clean.
+`experiment_stats.read_survey_flags` now compares `raw.adapter` against the survey's `best_adapter` and
+emits `FAIL:adapter_mismatch(config=X,reads=Y)` when a *different* adapter is detected in at least
+`ADAPTER_CONFLICT_PCT` (50%) of R1. Verified as a screen, not just on the known case: it fires on exactly
+the two cotton experiments and on none of the other 40, whose configured and detected names agree or
+whose configured value is deliberately blank.
+
+**One subtlety: the flag compares the config to the reads, so correcting the config clears it while the
+mapped output on disk is still stale.** Snakemake catches the staleness itself — the adapter reaches
+`trim` through both `params` and the `adapter_fasta` input, so changing it re-runs trim and everything
+below for the affected runs — but the table will look clean before that happens. A blank pipeline column
+means unmapped; a *populated* one does not mean populated by the current config.
+
+**A survey TSV that predates a column disables the check reading it, silently — so `report_flags` now
+verifies the schema.** `SURVEY_REQUIRED` lists the columns the read-level checks need
+(`best_adapter`, `interleave_suspect`, `declared_interleaved`) and every file under `qc/reads` is checked
+against it. This is the same class of failure as a missing survey, which was already reported, and it
+bites hardest on the corpus-wide `read_structure.tsv`: `read_survey_flags` falls back to that file when a
+per-experiment one is absent, so a stale copy there **satisfies the fallback and answers for every
+experiment** while quietly running fewer checks. Verified on the real tree — it names the stale
+`read_structure.tsv` and the two orphaned pre-sex-split liver files, and passes all 42 current ones.
+
+**`steps.trim.adapters` maps a name to a LIST, and both drivers pass `--adapter_fasta`, not
+`--adapter_sequence`.** A dimer can be deposited TRUNCATED, and fastp matches an adapter by looking for
+its *beginning* somewhere in the read — so a read that starts five bases into the adapter never matches,
+survives trimming as a full-length run of pure adapter, and STAR discards it as `unmapped: too short`.
+Measured per read on the raw FASTQs:
+
+| run | starts with the 5-truncated TruSeq form | pct_unique |
+| --- | --- | --- |
+| `SRR12774945` C. griseus KLA | **43.4%** | 28% |
+| `SRR6660402` Link2018 BMDM | **18.7%** | 38% |
+| `SRR12513906` mouse liver (control) | 0.0% | 91% |
+| `SRR639142` C. elegans (control) | 0.0% | 82% |
+
+Only the truseq lineage shows it; the small-RNA RA3 libraries deposit dimers with a variable 0-2 bp
+insert, which fastp already handles because the adapter's own start is still present.
+
+**Confirmed by isolation, and watch the right counter.** On a 2 M-read subsample of `SRR12774945`,
+counting `too_short_reads`:
+
+| config | `too_short` |
+| --- | --- |
+| `--adapter_sequence AGATCGGAAGAGC` (the old config) | 23,864 |
+| `--adapter_fasta`, full sequence only | 27,930 |
+| nothing — fastp auto-detects a 33-mer | 27,136 |
+| **`--adapter_fasta`, full + truncated** | **904,438** (45.2%) |
+| **both flags together** | **903,891** |
+
+Only the configs carrying the truncated entry move, so that entry is doing the work and auto-detection is
+irrelevant. `too_short` is the counter to watch, not `reads with adapter trimmed`: a read that is
+*entirely* adapter trims to length 0 and is booked as too short, so the adapter counter barely moves
+(10.27 M -> 10.43 M on the full run) even as 12.07 M reads are removed.
+
+**Do NOT verify this from fastp's `read1_adapter_counts`.** It reports **zero** for
+`GGAAGAGCACACGTCTGAAC` while that sequence is discarding 45% of the library, because it cannot attribute
+a trim that leaves nothing behind. That counter was read as proof of a no-op once already; the isolation
+test above is what settles it.
+
+**Both drivers pass `--adapter_sequence` (the first entry) as well as `--adapter_fasta`.** The fasta
+catches the variants; pinning the sequence suppresses fastp's auto-detection, so trimming is a pure
+function of the config rather than of the data. The last two rows above are the measurement showing that
+pinning costs nothing — worth keeping, because suppressing auto-detection is exactly the kind of change
+that could have silently undone the fix.
+
+**And the fix removes reads rather than recovering them.** For the small-RNA RA3 libraries trimming
+recovers real inserts (the 449 M -> ~1,300 M estimate). A truncated TruSeq dimer has no insert behind it,
+so for C. griseus and Link2018 `input_reads` roughly halves, `unique_reads` holds, and `pct_unique` rises
+from ~28% toward ~50% because the denominator stops counting unmappable reads. The gain is an honest
+mapping rate and about half the STAR compute, not depth.
+
+**The fix has to be a second sequence, not a shortened first one** — configuring `GGAAGAGCACACGTCTGAAC` alone would catch the
+truncated dimers but leave 5 bp of adapter on every *real* read, since fastp would then trim at
+`insert + 5`. fastp takes only one `--adapter_sequence`, so multiple sequences require a file: the
+`adapter_fasta` rule writes `{WORK}/adapters/{name}.fa` from the config (a rule, not an inline write, so
+many trim jobs sharing one adapter cannot race), and `run_procap_pipeline.py` writes the same content
+next to the run. A scalar config value is still accepted and wrapped, and a single-entry list behaves
+exactly as `--adapter_sequence` did.
+
+`--trim_poly_g --trim_poly_x` (`steps.trim.poly_params`) go to every library. fastp only trims a real
+poly-X tail so they are inert where there is none, but `SRR19034544`
+(`M.musculus-GCB_PROcap`, 150 bp, 200 M reads) is **65% poly-G** against under 1% everywhere else.
+
+**STAR was deliberately NOT relaxed.** A dead-cycle concern was raised from a hand-picked read sample and
+the survey refuted it: `deadCyc` is empty for all 69 files and N content never exceeds 1.1%. So no
+systematic N is consuming the mismatch budget and `--outFilterMismatchNmax 1` stays. Check `qc/reads/*.tsv`
+before revisiting.
+
+Expected recovery, from `pct_short_untrimmed`: roughly **449 M -> ~1,300 M mapped reads** over the affected
+experiments, with liver going 8.2 M -> ~190 M and CoPRO 3.5 M -> ~50 M. **That estimate is optimistic for
+dimer-heavy runs**: several Spt5/Ino80 R1 files have a median insert of only 4-8 bp, which trimming
+DISCARDS via `--length_required 18` rather than recovering. The solid gains are where median insert is
+comfortably above 18 — liver (29-32), CoPRO (28-30), Kim2018 (25-31), Booth2016 (21-29), hamster (37-52),
+Chlamydomonas (43-47), P. patens (50), GCB (51).
+
+Two things the survey explained that need no action: **C. elegans is 0% adapter at 30 bp** (the read is
+shorter than the insert, so the adapter never enters it — which is why worm maps at 75-83%), and
+**A. thaliana has 17% adapter at median insert 57**, above the ~49 bp threshold, so only 4.5% is lost.
+A. thaliana's 44% mapping rate therefore remains **unexplained** and is the open question.
+
+## Orientation QC — the two silent assumptions
+
+`src/qc/orientation_qc.py` exists because two things in this pipeline are conventions rather than
+documented facts, and **both are silent when wrong**: which mate of a paired library carries the RNA
+5' end (`steps.signal.five_prime_mate`), and which read strand becomes the plus track
+(`reverse_strand`). Get either backwards and the pipeline still runs, still calls peaks, and still
+trains — it just models 3' ends, or the wrong strand.
+
+**Readers are `pybigtools` and `pyfaidx`, matching tangermeme — not pyBigWig/pyfastx.** tangermeme's
+`extract_loci` is what reads sequence and signal for training, and it uses these two, so the QC sees the
+data through the same path the model does. pyBigWig and pyfastx are present only as transitive deps
+(`bam2bw`, `biodatatools`, and `pypints` needs pyBigWig itself), which is a bad reason to read data with
+them. They are also less portable: pyBigWig has no macOS arm64 wheel, so QC written against it cannot be
+developed or tested off-cluster, while pybigtools (Rust) and pyfaidx (pure Python) both install anywhere.
+
+**A stale conda env is the likeliest QC failure, and it surfaces late.** `pybigtools`, `pyfaidx`,
+`logomaker` and `matplotlib-base` are conda deps added after the env was first created, and the QC rules
+run at the END of the DAG -- so an environment predating them fails after ~600 jobs of real work with a
+bare `ModuleNotFoundError` from deep inside `peak_maxima`. `orientation_qc.py` now calls `require_deps()`
+right after argparse, which names the missing packages and the three ways to fix them. Nothing computed is
+lost when this happens (peaks and bigWigs persist), but update the env before a long run:
+`mamba env update -f environment.yml -n nasti-critters`.
+
+**Both QC steps are rules in the DAG**, so a normal `snakemake` run produces them; `snakemake qc -c8`
+runs only the QC against existing signal. Outputs land in `qc/orientation/` (PNG + a one-line verdict
+TSV) and `qc/umi/`. They stay inside the DAG only because `pybigwig`, `pyfastx`, `logomaker` and
+`matplotlib-base` are all available for linux-64 on conda — if any of them ever has to move to
+`pyproject.toml`, the QC rules must leave the DAG with it, exactly as `negatives` did.
+
+- **Initiator PWM + logo around in-peak signal maxima.** Real initiation carries a Py at −1 and a Pu at
+  0. A *flat* logo means the maxima are not initiation sites — the 5'/mate assignment is wrong.
+  **Information is RELATIVE ENTROPY against local base composition, not against a uniform background.**
+  The null is the composition of the same windows' own flanks (`|offset| >= 5`, outside the initiator but
+  inside the same promoter context), because the question is whether a base differs from a random base
+  *near a peak* — promoters are compositionally unlike genome average even in an AT-rich genome, so
+  genome-wide frequencies would credit that context as signal at every position and inflate the maximum
+  with it.
+  **The old uniform-background measure inflated skewed genomes rather than penalising them**, which is the
+  opposite of the intuitive guess and worth stating plainly: a position matching a 64% GC background
+  exactly still scored `2 - H(bg)` = 0.057 bits of pure artifact, visible as the 0.02–0.03 bit flanking
+  letters in the C. reinhardtii logo where mouse's flanks sit near 0.005. Verified on synthetic PWMs —
+  a completely flat PWM scores 0.057 (GC-rich) and 0.042 (AT-rich) under the old measure and **exactly
+  0.000 under the new one**, while a real initiator scores by how unexpected it is against its own
+  context. So `C.reinhardtii-liquidculture_5GRO` will move DOWN from 0.13 bits, not up; its flat logo is
+  about a thin, noisy peak set (8,789 peaks at 720 reads/peak, 90.6% unidirectional), not about GC.
+  Two consequences: the value is **no longer capped at 2 bits** (relative entropy is unbounded above), and
+  **the 0.15 FLAT threshold is provisional** — it was calibrated on the old measure, every value shifts
+  down by roughly `2 - H(background)`, and it should be recalibrated from a full run's output.
+  `information_content()` is shared by the plot and the printed verdict so the two cannot disagree; they
+  were separate copies of the same expression before.
+  **The FLAT flag needs LOW AMPLITUDE *and* a MISPLACED maximum — amplitude alone is not a fault.**
+  The first run using relative entropy flagged `D.melanogaster-S2_5GROcap` at 0.13 bits, and it was a
+  false positive: that logo is a textbook C at −1 and A at 0 with a sharp metaplot, so the motif is
+  present and correctly placed, merely diluted across 42,853 peak maxima of which many come from
+  low-confidence peaks whose maxima are random; `C.reinhardtii` at 0.23 bits is the same pattern.
+  **Amplitude measures peak-set quality; POSITION is what says whether the 5' assignment is right.** The
+  verdict now prints the offset of the maximum and flags only when it falls outside {−1, 0}; where it is
+  correctly placed and low, it prints an explicit dilution note instead. Verified on synthetic PWMs across
+  four regimes: flat → flagged, strong Inr at 0 → clean, *weak* Inr at 0 → clean with the note, weak
+  signal displaced to +7 → flagged. This is still a position check, not a score — do not grow it into one.
+- **Stranded metaplot around annotated TSSs. THE PLOT IS THE CHECK — look at it.** The purpose is to
+  see, by eye, whether 5' signal sits where it should relative to the annotated TSS. It is not a
+  measurement of antisense or divergent transcription, and it is deliberately not a scoring system.
+  **Each site is normalised by its own window total before averaging**, so every TSS carries equal
+  weight and the y-axis is "mean fraction of site signal". Summing raw profiles let one locus dominate:
+  in a numerical check, 1 outlier site out of 1001 (0.1% of the data) contributed **78.8%** of the raw
+  profile and inverted its argmax; normalised it contributes 1.9%. Sense and antisense share ONE
+  denominator per site — normalising them separately would equalise them and destroy the strand-swap
+  comparison. Adding more sites does not fix outlier dominance; only the statistic does.
+  `qc/orientation/{exp}.orientation_qc.png` has the dashed line at 0 and "expect sense peak just
+  downstream of 0" in the panel title; that is what you are verifying.
+  **Do not trust the printed notes as pass/fail.** The `sense downstream/upstream` ratio is descriptive
+  only, and is demonstrably not diagnostic: on synthetic profiles it scores **27.37 for a wrong-placement
+  case (signal displaced to +400) against 6.31 for the correct one** — i.e. better for the broken input,
+  because a ratio of two window halves says nothing about *where within* a half the signal sits. It is
+  kept because it is occasionally informative, not because it decides anything.
+  A numeric TSS-enrichment score was added here and then removed: deciding placement by eye is the
+  actual requirement, and a score invites trusting the number over the picture. **Do not reintroduce
+  one.**
+  **Divergent upstream antisense is NOT an expectation at all.** C. elegans promoters are predominantly
+  unidirectional — the same fact that makes PINTS' `unidirectional` class essential — so absent antisense
+  there is the expected result, and nothing flags it.
+  **Metaplot flags are gated on `annotation_tss_anchored` in `config/genomes.yaml`.** Where the annotated
+  gene start is not the TSS the metaplot measures the annotation, not the pipeline, so its lines are
+  printed as `(advisory: annotation is not TSS-anchored)` and raise no flag. Currently false for
+  **S.cerevisiae** (Ensembl `gene` start is the ATG), **C.elegans** (post-trans-splicing 5' end; a
+  biological limit, not fixable by changing annotation source) and **S.moellendorffii** (predicted CDS
+  models on a 2011 draft). The value is set from annotation PROVENANCE, not by fitting to observed
+  ratios. The PWM check is never gated — it is annotation-free.
+- **Neither panel is capped any more.** `--max-peaks`/`--max-tss` default to all. The old defaults
+  (20,000 / 5,000) took a **prefix of a sorted file, not a sample**: `combine_peaks` writes peaks
+  `sort -k1,1 -k2,2n`, so the logo for the 16 of 38 experiments that hit the cap was estimated from a
+  genomic prefix — `C.griseus-CHO_GROcap` used 30% of its peaks, roughly one third of the genome in
+  lexicographic chromosome order. The PWM's standard error at n=20,000 was already negligible, so this
+  buys freedom from that bias rather than precision. The TSS cap bound for **all 38** experiments
+  (`n_tss` was 5,000 everywhere); annotation files happen to interleave chromosomes so that subset was
+  less skewed, but it was still arbitrary and unstable against file reordering.
+
+The two are complementary, verified against synthetic data with known answers: correct orientation gives
+1.00 bits at both −1 and 0 and no flags; swapping the strands is caught by the metaplot (the PWM still
+looks fine, because it is strand-corrected using each maximum's own strand); moving signal to 3' ends is
+caught by the PWM going flat.
+
+Annotation (`annotation_url` in `config/genomes.yaml`, UCSC GTF for the chr-prefixed assemblies and
+Ensembl GFF3 for the bare-named ones, so naming always matches the FASTA) is used **for QC only** —
+never for training, peak calling or fold assignment, so no circularity reaches the model.
+
+**GTF exists for all 10 species, but the source split is not free to change.** Ensembl ships a parallel
+`gtf/` tree at the same release for all seven Ensembl species (probed 2026-08-30, all HTTP 200). Switching
+the three UCSC species to Ensembl GTF is nevertheless **wrong**: the annotation source is chosen so
+chromosome names match the FASTA, and Ensembl's fly GTF says `2L` where dm6 says `chr2L`. Literal name
+matching would then yield **zero TSSs, silently** — the same failure mode as a `chrom_style` mismatch.
+
+**The two format branches therefore select different things, and it is a known, deliberate asymmetry.**
+`orientation_qc.py` keeps `feat == "transcript"` for GTF and `feat == "gene"` for GFF3, and Ensembl types
+non-coding genes as `ncRNA_gene` rather than `gene`. So:
+
+| species | source | selection | distinct TSSs |
+| --- | --- | --- | --- |
+| D. melanogaster | UCSC GTF | per-transcript, all biotypes (31,515 NM_ + 4,779 NR_) | 22,610 |
+| M. musculus | UCSC GTF | per-transcript, all biotypes (37,727 NM_ + 6,719 NR_) | 30,757 |
+| C. elegans | UCSC GTF | per-transcript, all biotypes (28,944 NM_ + **25,200 NR_**) | 49,486 |
+| S. pombe | Ensembl GFF3 | per-gene, protein-coding only | 5,144 (7,030 if `ncRNA_gene` were added) |
+
+Left as-is on purpose: the metaplot is a coarse orientation check, both sets are dominated by real Pol II
+TSSs, and no label depends on it. But **do not read `n_tss` as comparable across species**, and in
+particular:
+
+**C. elegans is ~47% non-coding in refGene** (25,200 NR_ of 54,144 transcripts), much the worst of the
+three. Many NR_ entries are snoRNA/snRNA/misc_RNA — Pol III or intron-processed — so they dilute the worm
+metaplot for reasons unrelated to orientation. If this ever needs fixing, the fix is to filter the GTF
+branch to protein-coding (`NM_`/`gene_biotype "protein_coding"`), not to change the annotation source.
+
+**For worm this dilution flattens the metaplot without anything being wrong**, because ~half the
+annotated "TSSs" are snoRNA/snRNA/misc_RNA starts with no Pol II initiation there at all. C. elegans is
+also unidirectional, so its plot will look sparser than fly or mouse on both counts. If the worm plot
+looks unconvincing, look at fly or mouse before concluding anything about `reverse_strand` — those are
+the cleaner tests — and weigh the initiator logo more heavily than the metaplot for worm.
+
+**Mate handling was checked against [Danko-Lab/proseq2.0](https://github.com/Danko-Lab/proseq2.0) and agrees on every point:** its
+`--RNA5=R1_5prime` default matches `five_prime_mate: R1`; `--map5=TRUE` matches `genomecov -5`; its docs
+state that exactly one mate is reported, which is what makes the both-mates bug a bug and not a
+preference; `--opposite-strand` is our `reverse_strand`; and `UMI1=0/UMI2=0 -> no dedup` matches our
+default-deny. Note proseq2.0's Example 3 uses `--RNA3=R1_5prime`, the opposite assignment — so it is
+genuinely library-dependent and R1 stays a convention to validate.
+
 ## The 2026-08-30 manifest update: 3 projects, 12 experiments, 4 species
 
 `planning/nonhuman_capped_runon_manifest.xlsx` gained 3 projects / 14 sample rows, taking the repo from
@@ -1118,6 +1461,202 @@ addition. It reads `genomes.yaml` at runtime now.
 - **`P.patens` and `C.griseus` rDNA are unresolved** (see the rDNA table). Neither has a reference
   sequence available to use as a sink, so both are `null`; C. griseus is the one to watch, being a rodent
   like mouse.
+
+## Are any experiments replicates of each other? Should any be merged?
+
+Asked and answered 2026-08-30 over all 38 experiments then, and revised once on 2026-09-01.
+**Conclusion: merge nothing further, and UNMERGE the mouse liver pair by sex** — done, taking the repo to
+40 experiments. Two different questions hide in "replicate", and they have different answers.
+
+**Within an experiment, replicates are already pooled, and correctly.** `merge_runs` pools the BAMs of
+every n>1 experiment before `genomecov -5`, which is arithmetically identical to summing per-replicate
+count tracks. Checked against the manifest's own `replicate_group` column: **every experiment now maps to
+exactly one `replicate_group`**, and no group is split across two experiments.
+
+**The mouse liver experiments were the one exception, and were split by sex on 2026-09-01.** They had
+pooled `liver old female` + `liver old male`, and the young pair — collapsing sex within age, which
+overrode the manifest's own grouping. Now four experiments:
+
+| experiment | runs | archive reads |
+| --- | --- | --- |
+| `M.musculus-liver-old-female_ChROcap` | `SRR12513902`, `SRR12513903` | 96.9 M |
+| `M.musculus-liver-old-male_ChROcap` | `SRR12513904`, `SRR12513905` | 102.6 M |
+| `M.musculus-liver-young-female_ChROcap` | `SRR12513906`, `SRR12513907` | 115.5 M |
+| `M.musculus-liver-young-male_ChROcap` | `SRR12513908`, `SRR12513909` | 105.3 M |
+
+Three reasons it was the right way round. The manifest records sex as a distinct `replicate_group`, so
+pooling was overriding curated evidence. Mouse liver is one of the most strongly **sex-dimorphic**
+transcriptional programs known — driven by growth-hormone pulsatility — so pooling averaged over a bimodal
+program rather than over noise. And depth never justified it: each sex carries ~97–116 M archive reads and
+~84 M signal, deeper than every experiment in the corpus except GCB.
+
+**The split cost no re-alignment**, which is the general point about this pipeline's shape: run-level
+intermediates are keyed by RUN, so only `merge_runs` and downstream change. `align` stayed at 59 jobs.
+
+The mechanism is `SEX_SPLIT_PROJECTS` in `build_experiment_config.py`: a project listed there gets `sex`
+appended as a fifth field of the `experiment_key()` tuple. The key stays a 4-tuple elsewhere rather than
+carrying an empty fifth field for the 36 experiments where sex is meaningless (cell lines, pooled
+embryos) — an empty field only invites someone to fill it in. Adding another sex-split project means
+adding it to that set and giving its `EXPERIMENT_IDS` entries 5-tuples.
+
+**The numbers to argue from live in `qc/stats/experiment_stats.tsv`.** Archive read counts alone cannot
+support an exclude/merge decision -- a library can arrive deep and map badly -- so `src/qc/experiment_stats.py`
+reports what the pipeline actually produced, per experiment:
+
+| column | meaning |
+| --- | --- |
+| `archive_reads` | ENA `read_count`, summed over runs. What was deposited. |
+| `input_reads` | STAR "Number of input reads". POST-trim, so below `archive_reads`. |
+| `unique_reads` | STAR "Uniquely mapped reads number" -- exactly what the MAPQ 255 filter keeps. |
+| `pct_unique` | `unique/input`. Low means wrong assembly, contamination, or unsplit spike-in. |
+| `signal_reads` | reads in the merged BAM, i.e. what `genomecov -5` counts. **The number that matters.** |
+| `peaks_total` | PINTS uni + bi, matching the training locus set (`divergent` excluded). |
+| `reads_per_peak` | crude signal density; very low means peaks called from thin coverage. |
+| `pct_rrna` | rRNA + organellar share of the raw reads, from `src/qc/rrna_content.py`. Blank means NOT MEASURED, which is not the same as 0. |
+| `pct_unique_adj` | `unique / non-rRNA input`. **This is the mapping-quality number**; `pct_unique` is not. |
+| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. Advisory — exclusion stays a manual `tier` decision. |
+
+**`pct_unique` is not a quality metric, and reading it as one produced three wrong verdicts.** Where the
+rDNA array sits in the assembly in 2+ near-identical copies, every rRNA read is a multimapper, gets
+MAPQ ~3, and is correctly dropped by the `-q 255` filter — so the ceiling on `pct_unique` is set by the
+organism, not the library. Measured with `src/qc/rrna_content.py`:
+
+| experiment | rRNA + organellar | ceiling | observed `pct_unique` | `pct_unique_adj` | residual |
+| --- | --- | --- | --- | --- | --- |
+| `S.cerevisiae_PROcap` | **70.3%** | 29.7% | 16.3% | **54.8%** | +13 pts |
+| `S.pombe_PROcap` | 46.1% | 53.9% | 42.2% | **78.2%** | +12 pts |
+| `C.reinhardtii-liquidculture_5GRO` | 39.1% | 60.9% | 12.6% | 20.7% | **+48 pts** |
+| `P.patens-plateculture_5GRO` | 47.4% | 52.6% | 14.6% | 27.8% | **+38 pts** |
+
+On the raw number the first three were `FAIL:very_low_mapping`, which said little more than "this organism
+has rDNA in its assembly". On the adjusted number the two yeasts raise no mapping flag at all, and the two
+plants still do — correctly, because their residual is far too large for rRNA to explain. Every mapping
+flag carries a `,adj` or `,raw` suffix recording which basis it used.
+
+**These are the pipeline's own per-experiment numbers, and they replace an earlier version of this table
+whose rows were single-run probes labelled as libraries.** It mattered for one row.
+`C.reinhardtii-liquidculture_5GRO` was recorded at 67.4% rRNA and 33.1% adjusted, both measured on
+`SRR24798065` alone; the experiment pools two runs differing ~5x in depth, and at experiment level it is
+39.1% rRNA and **20.7% adjusted — below `VERY_LOW_MAPPING_PCT`, so it is now the corpus's one
+`FAIL:very_low_mapping`.** Its residual is 48 points, not the 22 the old row implied. The other three rows
+moved by under 2.5 points. **Quote `qc/stats/experiment_stats.tsv`, not a one-run spot check**, whenever
+an experiment has more than one run of unequal depth.
+
+Two measurement details that matter, both learned the hard way. rRNA features are type **`rRNA`**, not
+`rRNA_gene` — Ensembl files them under `ncRNA_gene`, and filtering on `rRNA_gene` returns nothing for
+S. pombe chromosome III. And the 35S components are **merged with a 5 kb gap tolerance** so the span
+covers the whole unit *including ITS1/ITS2*: a nascent assay reads the precursor, and the commonest read
+in the C. reinhardtii library spans the 5.8S/ITS2 junction. Cross-checked against an independent
+coordinate-based count on S. cerevisiae — 70.4% at k=20 with ITS, 63.6% at k=24 without.
+
+**`rdna_regions` in `config/genomes.yaml` makes the UCSC species measurable.** refGene GTF types
+everything exon/CDS/transcript and carries no `rRNA` feature, so `D. melanogaster` and `C. elegans` had no
+rRNA source at all — and once `organelle_contigs` was added they scored 0.88% and 0.54%, **organellar
+only, with nuclear rRNA silently unmeasured but looking like a real number**. Their arrays are in-assembly
+and their coordinates are already in the rDNA table above, so they are now configured directly:
+`chrUn_CP007120v1` for dm6 and `chrI:15062083-15071033` for ce11. M. musculus needs none — its sink
+already serves — and the seven Ensembl species are covered by their GFF3.
+
+**Note `chrI`, not `I`.** The rDNA table above writes C. elegans' array as `I:15062083-15071033`, which is
+the WormBase name; ce11 is chr-prefixed, so the bare form would have indexed **nothing** and reported 0%
+rRNA as though measured. `rrna_content.py` therefore **raises** on a configured region whose contig is
+absent from the FASTA, listing the contigs it did find — a config typo should fail, not degrade.
+
+**`rrna_indexed` distinguishes "measured 0%" from "never measured".** Adding `organelle_contigs` made
+`n_scored > 0` for the species with no rRNA source, which populated `pct_rrna` with an organellar-only
+figure and destroyed the blank-means-unmeasured signal the column depends on — so `pct_unique_adj` was
+computed from it. `experiment_stats.rrna_pct()` now returns `(entry_found, value)` rather than a bare
+value, because "the rrna output says there is no rRNA source" has to be distinguishable from "there is no
+rrna output"; conflating them let a stale organellar number resurrect through the `--combine` fallback.
+
+**`qc/rrna` and `qc/reads` ARE declared `stats_table` inputs, after the opportunistic version failed in
+an instructive way.** The argument for leaving them out was that declaring them forces the cheap
+`snakemake stats` target to depend on the ~120 GiB of raw FASTQ, with the `,raw`/`,adj` suffix as the
+safeguard. The suffix held, but the outcome was still wrong: nothing ordered the two, so `stats_table` ran
+before `rrna_content` finished for **one of 38** experiments, and `C.griseus-BMDM_GROcap` alone was judged
+on the raw rate while the other 37 were adjusted. A wholly unadjusted table would have been obvious; one
+row silently on a different basis is not. **Per-row races are worse than a coarse dependency.**
+`experiment_stats.py --combine` still reads both directories opportunistically, so a table can be rebuilt
+by hand from whatever survives.
+
+**But the fix that ordered them also broke the table, because the rule ran `--combine {input}`.**
+Naming the two new input groups was only half the job: `{input}` expands to *every* input, so
+`--combine` was handed the rrna TSVs, the reads TSVs and **this rule's own script** as well as the 42
+per-experiment TSVs. `csv.DictReader` absorbed all three silently — it takes whatever the first line of a
+file offers as `fieldnames` — so the committed table was **685 rows over 42 experiments** with every
+pipeline column blank: one duplicate row per rrna file carrying only `pct_rrna`, one row per *run* from
+the reads files, and **one blank row per line of Python** from `experiment_stats.py`. The markdown sorts
+by species, and a row with no species sorts first, so the file opened on ~500 empty rows.
+
+Two changes, because either alone would have left the trap:
+
+- The rule's inputs are **named** (`stats`/`rrna`/`reads`/`script`) and the shell passes
+  `--combine {input.stats}`, with the two directories passed as `params` instead. **Never `--combine
+  {input}`.**
+- `--combine` now **rejects any file whose header is not exactly `COLUMNS`**, naming the file and both
+  column counts. A too-broad glob has to fail, not average out — the whole failure was that a
+  plausible-looking table hid it.
+
+Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the only reason the garbage
+rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
+enough to be committed.
+
+**A handled interleaved deposit is not a defect, and `declared_interleaved` in the survey TSV is what says
+so.** `M.musculus-GCB_PROcap` was reported `FAIL:interleave_suspect` after the re-map even though its
+interleaving is declared and deinterleaved — the per-file printout said "(already declared)" but the
+column did not, so the flag had no way to know. The screen still fires on it, which is useful as a
+self-test that the check works; only undeclared suspicions become flags.
+
+**`long_for_project` cannot fire under the DAG when a project spans two experiments.** The rule runs
+`read_structure_qc.py -e {exp}`, so project-mates in another experiment are never in the same invocation —
+which is precisely GCB, whose only project-mate is priB. There it is caught by `polyg` alone, which is why
+having two independent tells mattered. Run the standalone sweep for the full screen:
+`python src/qc/read_structure_qc.py --tsv qc/reads/read_structure.tsv`.
+
+`signal_reads` sits below `unique_reads` by dedup (UMI libraries only, 3 of 40) and by the one-mate filter
+(paired libraries only, 5 of 40). For paired libraries it counts one mate per fragment, since that is what
+`final_bam` keeps.
+
+Built by two rules -- `experiment_stats` per experiment and `stats_table` to aggregate -- and included in
+both `all` and `qc`, plus a standalone `stats` target. Counting is essentially free: `samtools idxstats`
+reads the BAM index, not the reads. `experiment_stats` takes `merged.bam` as an explicit input so the count
+happens while that `temp()` file still exists, and falls back to summing the per-run `final.bam` files if it
+has already been cleaned up. `align` now declares STAR's `Log.final.out` as an output for the same reason:
+the BAM it sits beside is `temp()`, and the mapping rates have to outlive it.
+
+`qc/` is gitignored, tables included, and that is deliberate: `qc/stats/experiment_stats.{tsv,md}` are
+outputs of `stats_table`, so a committed copy makes Snakemake report **"Nothing to be done"** and never
+rebuild them. A tracked table that looks authoritative but is stale is worse than none. (This was tried
+briefly and reverted -- the committed copy had every pipeline column blank.) Read the tables where the
+pipeline ran, or refresh with `--all`.
+
+Blank pipeline columns mean that experiment has not been mapped yet.
+
+**Across projects, several experiments are the same biology — and they should stay separate.** The
+clusters, from `(species, biological_material)` with conditions inspected:
+
+| cluster | experiments | why not merge |
+| --- | --- | --- |
+| *D. melanogaster* S2 | `S2_PROcap` (Kwak2013, 47.8 M), `S2_5GROcap` (Duttke2017, 61.1 M), `S2-LacZKD_PROcap` (LacZ, 27.3 M) | three labs, three assay chemistries, and LacZ-KD is a knockdown control rather than untreated |
+| *M. musculus* BMDM | `BMDM_PROcap` (Kim2018, 26.0 M), `BMDM_GROcap` (Link2018, 25.5 M), `BMDM_5GRO-ctl` (Lam2013, 28.8 M) | PRO-cap vs GRO-cap vs 5'GRO, three labs; Lam2013's "control" is a biotin-tag control |
+| *S. cerevisiae* unperturbed | `S.cerevisiae_PROcap` (Booth2016 W303a, 42.3 M), `Ino80ctl_PROcap` (62.9 M), `Spt5EtOH_PROcap` (66.5 M) | different strain backgrounds (W303a vs Ino80-AID vs Spt5-AID) and different vehicle treatments |
+
+Three reasons to leave them alone:
+
+1. **Depth does not force it.** Every one of these is 25 M+ reads on its own, so merging buys little.
+   (The libraries that *are* thin are single ones with no partner to merge with: hamster
+   `Liver_GROCap1` at 5.4 M, C. reinhardtii 5'GRO r2 at 9.2 M, Lam2013 RevErb at 10.9 M. At the other
+   extreme `GCB_B18hi_cap` is a single 404.6 M-read run — verified 1:1, not a crosswalk error.)
+2. **Merging pools batch with biology.** Different cap-selection chemistry means different 5'-end
+   capture bias; different labs mean different batch effects. Uniform re-mapping fixes the *assembly*
+   differences, not the assay ones.
+3. **Separate is more useful.** These clusters are the only cross-assay, cross-lab held-out sets in the
+   repo — train on Kim2018 BMDM PRO-cap, evaluate on Link2018 BMDM GRO-cap. Merging destroys the one
+   honest generalisation test available and buys nothing measurable.
+
+This also matches the project's stated design (one experiment == one species x one condition == one
+model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
+replicate concordance before pooling; do not combine distinct conditions as replicates."*
 
 ## Data conventions to preserve
 
