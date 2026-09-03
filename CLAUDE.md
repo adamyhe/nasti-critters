@@ -850,9 +850,27 @@ Two consequences already applied:
 | S. moellendorffii | v1.0 | none published | — |
 | C. griseus | CriGri-PICRH-1.0 | none published | — |
 
-Boyle-Lab lists download as plain BEDs and are fetched by
-`run_procap_pipeline.py --fetch-genomes`; naming verified chr-prefixed for all three (`chr2L`, `chrI`,
-`chr1`).
+Boyle-Lab lists arrive **gzipped**, matching their `.bed.gz` names — `file` reports
+`gzip compressed data, was "ce11-blacklist.v2.bed"` despite the URL being raw.githubusercontent, so
+nothing gunzips them. An earlier version of this line called them plain BEDs; it was wrong. Naming
+verified chr-prefixed for all three (`chr2L`, `chrI`, `chr1`).
+
+**They were in NEITHER driver's DAG until 2026-09-03, and that silently cost 114 of 214 training jobs.**
+Only `run_procap_pipeline.py --fetch-genomes` fetched them, so a run driven by `workflow/Snakefile` — the
+preferred path — left all three absent, and `launch.py` then skipped every mouse, fly and worm experiment
+with `missing data — blacklist[0]: ...`. Three files under 60 KB gating 65 + 25 + 24 jobs. Same class of
+asymmetry as `rdna_accession`, which this driver used to ignore while the serial one read it.
+`rule fetch_blacklist` now covers it, and it is in `all`, in `fetch_only` and in a standalone
+`blacklists` target (`snakemake blacklists -c1`, the cheapest way to unblock an existing tree).
+
+**An exclusion list is a TRAINING input and is in the DAG anyway** — worth being precise about, because
+GC-matched negatives are also a training input and are deliberately *out*. The boundary that keeps the
+Snakefile runnable from the mamba env with no venv and no GPU stack is a **dependency** one, not a
+labels-versus-training one: fetching a list needs wget, where negatives need PyPI-only `tangermeme`. So
+this costs the boundary nothing. `BLACKLIST_FILES` is built only from species with a `blacklist_url`,
+which excludes A. thaliana's in-repo list and the eight species with none, and a `blacklist_url` pointing
+anywhere but `data/` **raises at DAG construction** rather than downloading into a path nothing reads
+(verified by pointing C. elegans at `elsewhere/`).
 
 Arabidopsis is the exception: excluderanges ships **only as R `.rds`**, so it is converted to BED and
 versioned at `config/blacklists/TAIR10.Klasfeld.Excludable.bed.gz` rather than fetched — no R dependency at
