@@ -2094,6 +2094,31 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   | D. melanogaster | 0.73-1.00 | 31-48% |
   | everything else | **1.00** | 0.7-16% |
 
+  **The predictor is PEAKS PER 2114 bp WINDOW, not genome size**, and the cutoff is sharp at 1.0:
+
+  | experiment | bp per peak | peaks per window | negatives per peak |
+  | --- | --- | --- | --- |
+  | `S.cerevisiae-Spt5IAA4h` | 512 | **4.13** | 0.01 |
+  | `S.cerevisiae-Ino80ctl` | 784 | **2.70** | 0.02 |
+  | `S.pombe_PROcap` | 1,358 | **1.56** | 0.03 |
+  | `S.cerevisiae_PROcap` | 1,790 | **1.18** | 0.07 |
+  | `C.elegans-L3` | 2,792 | 0.76 | 0.26 |
+  | `D.melanogaster-S2_PROcap` | 5,641 | 0.37 | 1.00 |
+
+  Everything at or above one peak per window collapses; everything below it is fine. **Small genomes are
+  not the problem** — C. reinhardtii is 13.2 kb per peak and P. patens 46 kb, the two sparsest in the
+  corpus. It is the two yeasts, where the spacing between peaks is at or below the training window itself,
+  so no 2114 bp window can avoid one.
+
+  Worth knowing where those yeast peak counts come from, since they drive this. Against annotated TSSs,
+  `S.cerevisiae_PROcap` (Booth, 4.9 M signal) calls **6,759 peaks = 1.04 per TSS**, which is a textbook
+  number. The Spt5 and Ino80 experiments call 10,811-23,642, i.e. **1.7-3.6 per TSS**, and are only 7-22%
+  unidirectional against Booth's 59%. The Spt5 series rises with depletion time (10,811 EtOH -> 21,591
+  IAA1h -> 23,642 IAA4h), which is the direction Spt5 loss should push cryptic initiation — **but
+  `signal_reads` rises with it too** (11.3 -> 16.7 -> 18.5 M), so depth and biology are confounded here
+  and neither reading is established. Either way the yeast peak sets are 2-3x denser than the annotation,
+  which is what breaks negative sampling.
+
   `extract_matching_loci` tiles each chromosome into NON-OVERLAPPING `in_window` blocks, so the entire
   candidate pool is `genome / 2114` — about **5,700 windows for a 12 Mb yeast genome**. Windows
   overlapping a peak are masked out, and `S.cerevisiae-Spt5IAA4h_PROcap` has **23,642 peaks, four times
