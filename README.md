@@ -380,7 +380,7 @@ worth knowing before trusting numbers:
 | Unexplained mapping residuals | *P. patens* 38 pts, *C. reinhardtii* 48 pts, *A. thaliana* ~50%, all **after** adjusting for rRNA. Not explained by adapter, assembly or rRNA content |
 | 18% of the cotton libraries in STAR's `unmapped: other` | not the match fraction, not the mismatch filter (0.00%), not multimapping — so no ENCODE parameter accounts for it. `--winAnchorMultimapNmax` is the untested guess |
 | `P.patens` / `C.griseus` rDNA unresolved | both `null`; no reference sequence exists to use as a sink. C. griseus is a rodent, so it is the one to watch |
-| `C.elegans` / `C.griseus` / both cottons folds originate here | push them to plant-design before using those species elsewhere, or a locus in test here becomes train there |
+| `C.elegans` / `C.griseus` / both cottons folds originate here | carry them across before using those species elsewhere, or a locus in test here becomes train there |
 | In-assembly rDNA in both yeasts | no published exclusion list and no outlier filter, so their rDNA arrays will be among the highest-signal PINTS calls. Real Pol I loci, not artifacts, and `log1p` compresses them — but check before publishing yeast numbers |
 
 Resolved since this list was written, kept here so they are not re-investigated:
@@ -399,7 +399,7 @@ Resolved since this list was written, kept here so they are not re-investigated:
 | `rdna_accession: null` for every species | mouse uses `BK000964.3`; the other five original species already carry their rDNA in-assembly, so they need none |
 | `Tome2018_mm_CoPRO` "paired-end" | curation error of the same kind as Liver: ENA reports both runs SINGLE (1 FASTQ, no `nominal_length`, 76.0 bp). The paired description is of CoPRO the assay, not of the deposit |
 | `Shamie2021_cg_5GRO` organism looked wrong | it is not: `BMDM/Brain/Kidney/Liver/Lung` read like Glass-lab mouse names, but ENA reports 72/72 runs as *Cricetulus griseus* — a Chinese hamster TSS atlas |
-| `C.reinhardtii` / `P.patens` folds | reused verbatim from plant-design, after checking it against the lab's own per-species CSV |
+| `C.reinhardtii` / `P.patens` folds | reused unchanged from earlier lab work, after checking the two copies we hold against each other |
 | `make_negatives.py` `CHROM_EXCLUDE` under-covered | replaced by `main_chromosomes` from `genomes.yaml`, applied to peaks, signal and chrom.sizes for every species. The old regexes were also actively wrong, not just sparse: matching `_` over the whole BED line dropped legitimate `chr2L` peaks whose name contained an underscore |
 | `biodatatools` subcommand unrecorded | immaterial — see below |
 | Booth2016 TAP+/TAP- "bundle" | curation error; the 2 runs per sample are technical replicates under one SRX, and no TAP- data was deposited. Both experiments now run |
@@ -548,12 +548,11 @@ For a species with **no** entry yet, the same flag reports peaks per
 verifies every fold member against the real contig names, because `extract_loci`
 matches literally and a readable-but-wrong name yields **zero loci in silence**.
 
-Fold assignments are copied verbatim from the canonical
-[adamyhe/plant-design](https://github.com/adamyhe/plant-design) `config/chrom_splits.yaml` wherever it has an
-entry (A. thaliana, D. melanogaster, M. musculus, S. cerevisiae, plus
-plus C. reinhardtii and P. patens) so models stay comparable across
-repos. Four entries **originate here** and should be pushed upstream before
-those species are used elsewhere:
+There is **no public source for any of these fold assignments** — they are all
+the lab's own. Six are reused unchanged from earlier projects (A. thaliana,
+D. melanogaster, M. musculus, S. cerevisiae, C. reinhardtii, P. patens) so
+models stay comparable with our other work. Four **originate here** and should
+be carried across before those species are used elsewhere:
 
 | species | folds | note |
 | --- | --- | --- |

@@ -779,7 +779,7 @@ Related: cotton is 77-86% poly-G in **every** file, the highest in the corpus by
 real work here.
 
 **Both are assigned now, chromosome-level, from peak counts (2026-09-02).** Both entries **originate
-here** — there was no prior cotton assignment — so push them to plant-design before using
+here** — there was no prior cotton assignment — so carry them across before using
 cotton beyond this repo, or a locus in test here becomes train there. Reproduce with
 `python config/write_split_csvs.py --peak-counts -e G.{arboreum,hirsutum}-ovule_GROcap`.
 
@@ -833,7 +833,7 @@ Two consequences already applied:
   also matches the lab's other mouse work, is what the peak-matched folds were tuned on, and is the
   only mouse assembly with a published exclusion list. Chromosome names are identical between the two
   assemblies, so the fold assignment transferred unchanged.
-- **dm6 names are chr-prefixed here** (`chr2L`), where the plant-design file writes `2L`.
+- **dm6 names are chr-prefixed here** (`chr2L`), where the earlier lab file writes `2L`.
   The fold *assignment* is identical; only naming differs, so models stay comparable. This resolves a
   long-standing unverified flag and is what makes the dm6 exclusion list usable at all.
 
@@ -1770,11 +1770,10 @@ peaks, so its absence is a to-do rather than drift. The CSVs are a legacy artifa
 pre-unification split; `src/experiments.py` reads the YAML, so the CSVs now exist only for external
 consumers and could be dropped once nothing outside this repo reads them.
 
-**Fold assignments are canonical, from [adamyhe/plant-design](https://github.com/adamyhe/plant-design)'s
-`config/chrom_splits.yaml`**, which uses this same species-keyed schema across 17 species. `A.thaliana`,
-`D.melanogaster`, `M.musculus`, `S.cerevisiae` and `S.pombe` are verified identical to it. Do not "improve"
-them: diverging folds make models incomparable across repos, since a locus in test here could be train
-there. **Folds are assigned by manually matching peak counts across folds — not sequence length.** bp totals are
+**Fold assignments are the lab's own, and several are reused UNCHANGED from earlier projects** —
+`A.thaliana`, `D.melanogaster`, `M.musculus`, `S.cerevisiae`, `C.reinhardtii` and `P.patens`. Do not
+"improve" a reused entry: the only thing it buys is that a locus in test here is in test everywhere else
+we train, and a divergence destroys that silently. **Folds are assigned by manually matching peak counts across folds — not sequence length.** bp totals are
 not expected to match and must not be "rebalanced": a fold can be tight in bp and badly skewed in loci, and
 loci are what affect training. Check any assignment against real peaks with
 `python config/write_split_csvs.py --peak-counts -e <experiment>`, which also flags chromosomes present in
@@ -1789,16 +1788,15 @@ made in this lab.** That matters for how to treat them. They are not standards t
 carry no external validation; their whole value is that the same assignment is used everywhere the lab
 trains, so a model here and a model in another of our repos are comparable. Read "canonical" throughout
 this file as "the shared lab assignment", never as "published". Anything reused from
-[adamyhe/plant-design](https://github.com/adamyhe/plant-design) is reused for consistency with our own
-prior work, not for authority.
+Anything reused is reused for consistency with our own prior work, not for authority.
 
 **Reuse checked 2026-08-30 for the species added then**, with the result that two of the four were
 already assigned in earlier lab work and two were not:
 
 | species | assigned before? | outcome |
 | --- | --- | --- |
-| C. reinhardtii | yes | **copied verbatim** from plant-design |
-| P. patens | yes | **copied verbatim** from plant-design |
+| C. reinhardtii | yes | **reused unchanged** |
+| P. patens | yes | **reused unchanged** |
 | S. moellendorffii | no | peak-level folds, permanently (no chromosomes exist); **built 2026-09-02** |
 | C. griseus | no | chromosome-level; **assigned here 2026-09-01** from CHO peak counts |
 
@@ -1807,10 +1805,9 @@ chromosome-level, and both were **assigned here 2026-09-02** from their own peak
 locally-originated entries — plus the retuned six-fold `C.elegans` — need pushing upstream before those
 species are used outside this repo.
 
-For both reused species the per-species CSV and plant-design's `chrom_splits.yaml` agree exactly, so
-there is one assignment rather than two candidates. Note plant-design also carries an `S.pombe` entry with
-**3** folds; this repo deliberately does not use it, because peak-level folds are S. pombe's single
-mechanism here.
+For both reused species the two copies we hold agree exactly, so there is one assignment rather than two
+candidates. Note an earlier assignment also exists for `S.pombe` with **3** folds; this repo deliberately
+does not use it, because peak-level folds are S. pombe's single mechanism here.
 
 **GSE233927 has been touched before in this lab, but for a different assay in the same series.** Only the
 genome URLs and the fold assignments carry over; this repo maps the series' **5'GRO-seq** FASTQs from
@@ -1874,8 +1871,8 @@ lists exactly 10 assembled molecules (`NC_048595.1`-`NC_048604.1`). Each is larg
 together they are 23% of the genome, so excluding them would discard all of chromosome 1. Same reasoning
 as S. pombe's MTR/AB325691: judge the sequence by what it is, not by the label the assembly gives it.
 
-**`C.elegans` is the one species on SIX folds, retuned 2026-09-01.** It originates here — plant-design
-has no entry — and it had been assigned by chromosome count rather than by matching peak
+**`C.elegans` is the one species on SIX folds, retuned 2026-09-01.** It originates here — no earlier
+assignment existed — and it had been assigned by chromosome count rather than by matching peak
 counts, the one entry in the file that did not follow the project's method.
 
 Retuning exposed a structural problem rather than a mis-tuned split. Worm has 6 chromosomes of near-equal
@@ -1889,8 +1886,8 @@ that fold then holds 31.4% of the peaks against 16.2% for the smallest:
 | **6 folds, one chromosome each** | **432** | **12%** |
 
 76% would have remained the worst balance in the repo by a wide margin, so worm now uses **6 folds**.
-`n_folds` is already per-species (`len(folds)`, with validation at `(f+1) % n`), plant-design itself
-carries a 3-fold `S.pombe` entry, and worm has no upstream assignment to stay compatible with. The four
+`n_folds` is already per-species (`len(folds)`, with validation at `(f+1) % n`), an earlier lab
+assignment uses 3 folds for `S.pombe`, and worm has no prior assignment to stay compatible with. The four
 worm experiments therefore contribute 24 (experiment × fold) jobs rather than 20.
 
 `D.melanogaster` has the same 6-units-into-5-folds shape and is fine, because dm6's `chr4` is tiny so
@@ -1946,9 +1943,9 @@ Consequences, none of which change the assignment:
   regions into an exclusion list is forbidden here for good reason.
 
 Chromosome naming follows the `chrom_style` in `config/genomes.yaml` and must match the actual FASTA.
-Note plant-design's `config/A.thaliana/chrom_splits.json` uses `chr1..chr5`, but that is a dataset-specific
-renaming for its own TAIR10 build (NCBI GCA_000001735.1 with organelles as `chrM`/`chrC`); the canonical
-form, and ours, is bare `1`-`5` as in the Ensembl Plants FASTA.
+Note an earlier lab config uses `chr1..chr5` for A. thaliana, but that is a dataset-specific renaming for
+a different TAIR10 build (NCBI GCA_000001735.1, organelles as `chrM`/`chrC`); ours is bare `1`-`5` as in
+the Ensembl Plants FASTA.
 - *Peak-level* (S. pombe): only 3 chromosomes, so `make_random_splits.py` assigns individual peaks to
   5 folds, grouping peaks whose training windows could overlap (centers within `in_window + 2*max_jitter`
   = 2514 bp) so they never straddle a split — this is the leakage guard, preserve it if you touch that script.
@@ -2003,7 +2000,7 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   signal quantiles only in *diagnostics* (`locus_diagnostics`, `generate_warning_flags.py`), never to drop
   training data. Artifact removal is the exclusion lists' job, and those are canonical published lists —
   **do not hand-curate regions into them**, or folds and preprocessing stop being comparable with
-  plant-design and procap-atlas.
+  procap-atlas.
 - **The real gap this leaves:** S. cerevisiae and S. pombe have no published exclusion list *and* no
   outlier filter, so their only guards are non-ACGT filtering and the fold structure. Their in-assembly
   rDNA arrays (`XII:451786-489469`; `III:1-23130` and `III:2440994-2452883`) will be among the

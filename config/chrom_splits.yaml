@@ -1,11 +1,13 @@
 # Per-species chromosome fold assignments derived from config/splits/*.csv
 #
-# CANONICAL SOURCE: adamyhe/plant-design config/chrom_splits.yaml, which uses
-# this same species-keyed schema and covers 17 species. Entries below that exist
-# there are copied verbatim -- do not "improve" them, since diverging folds make
-# models incomparable across repos (a locus in test here could be train there).
-# Verified identical as of this commit: A.thaliana, D.melanogaster, M.musculus,
-# S.cerevisiae, and cross-checked against the lab's own per-species CSVs.
+# THESE ARE THE LAB'S OWN ASSIGNMENTS. There is no public or authoritative
+# source for any of them. Several were made for earlier projects and are reused
+# here UNCHANGED -- A.thaliana, D.melanogaster, M.musculus, S.cerevisiae,
+# C.reinhardtii, P.patens -- and the rest originate in this repo.
+#
+# Do not "improve" a reused entry. The only thing they buy is that a locus in
+# test here is in test everywhere else we train, so models stay comparable; a
+# divergence silently destroys that and nothing will warn you.
 #
 # ENCODE publishes no mouse folds. chrombpnet ships only
 # helpers/make_chr_splits/splits.py, which is a formatter -- you pass
@@ -14,7 +16,7 @@
 # convention below is therefore the authoritative source.
 
 # dm6 names are chr-prefixed, following the ENCODE/modENCODE reference (UCSC
-# dm6). The canonical plant-design file writes these unprefixed (2L,
+# dm6). The earlier lab file writes these unprefixed (2L,
 # X); the FOLD ASSIGNMENT here is identical to it, only the naming differs, so
 # models stay comparable. chr-prefixing is required for this repo because the
 # FASTA, peaks, bigWigs and the dm6 exclusion list are all chr-prefixed --
@@ -46,7 +48,7 @@ S.cerevisiae:
 # FASTAs use. Every name here must match the FASTA in config/genomes.yaml
 # exactly, because extract_loci compares them literally.
 
-# mm10: canonical assignment, copied verbatim from plant-design. chrY is absent -- small, repeat-dense, and not present in
+# mm10: reused unchanged from earlier lab work. chrY is absent -- small, repeat-dense, and not present in
 # female samples in Liver_ChROcap_mm.
 #
 # Folds here are assigned by matching PEAK COUNTS across folds, not sequence
@@ -62,9 +64,8 @@ M.musculus:
 
 # ce11: 6 chromosomes, so folds 0-3 hold one each and fold 4 holds chrV + chrX.
 #
-# NOT CANONICAL, AND NOT PEAK-MATCHED: plant-design has no entry for
-# C.griseus (CriGri-PICRH-1.0). ORIGINATES HERE, so if hamster is used
-# beyond this repo push this
+# NO EARLIER ASSIGNMENT EXISTED for C.griseus (CriGri-PICRH-1.0), and none is
+# published. ORIGINATES HERE, so if hamster is used beyond this repo carry this
 # assignment upstream first, or a locus in test here becomes train there. That is
 # the mistake the C.elegans entry below embodies.
 #
@@ -105,8 +106,8 @@ C.griseus:
   3: ['6', '7', X]
   4: [RAZU02000001.1, RAZU02000002.1]
 
-# C.elegans (ce11). ORIGINATES HERE -- plant-design has no entry -- so push it
-# upstream before worm models travel.
+# C.elegans (ce11). ORIGINATES HERE -- no earlier assignment existed -- so carry
+# it across before worm models travel.
 #
 # SIX FOLDS, not the repo's usual five, and one chromosome each. Worm has 6
 # chromosomes of near-equal peak count (3,294-3,726 in C.elegans-embryo_GROcap),
@@ -160,9 +161,8 @@ A.thaliana:
 
 # ---------------------------------------------------------------------------
 # Species added with the McDonald2024 manifest update. Both entries below are
-# CANONICAL: taken from plant-design (configs/chrom_splits.yaml) and copied
-# unchanged after cross-checking against the lab's own per-species CSVs --
-# same peak-matched assignment. Names are quoted strings, like A.thaliana above:
+# Reused UNCHANGED from earlier lab work, after cross-checking the two copies of
+# it we hold against each other -- same peak-matched assignment. Names are quoted strings, like A.thaliana above:
 # bare-numeric YAML keys would parse as ints and extract_loci compares
 # chromosome names literally against the FASTA.
 #
@@ -184,9 +184,9 @@ P.patens:
   4: ["13", "18", "19", "22", "23", "24", "25"]
 
 # ---------------------------------------------------------------------------
-# The two cottons (Wen et al. 2026). Both ORIGINATE HERE -- plant-design has no
-# entry -- so push them upstream before using cotton beyond this repo, or a
-# locus in test here becomes train there.
+# The two cottons (Wen et al. 2026). Both ORIGINATE HERE -- no earlier
+# assignment existed -- so carry them across before using cotton beyond this
+# repo, or a locus in test here becomes train there.
 #
 # Names are NCBI RefSeq ACCESSIONS, not the community Chr01 / A01-D13 labels,
 # because FASTA and annotation both come from the same RefSeq release and
