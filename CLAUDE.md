@@ -2183,9 +2183,23 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   that is unremarkable, because at 1.18 peaks per window essentially every window contains one and the
   informative peaks are in the tail. So the filter was discarding 4.3x more negatives that are three times
   quieter than average genome and never overlap a called peak.
-  `NO_SIGNAL_FILTER` in `make_negatives.py` records the choice per species. It is **still empty**: only
-  `S.cerevisiae_PROcap` has been measured, and the other six yeast experiments are 1.5-4x denser, so
-  measure before switching a species on.
+  **Every run now also reports the RANDOM-GENOME baseline**, from 2,000 random windows, because the peak
+  median is the misleading comparator wherever the peak set saturates the genome. Read
+  `negatives are Nx genome`, not the percentage against peaks.
+
+  **Whether to do this per species is the wrong question — prefer a uniform rule.** Sorting the corpus by
+  negatives per peak splits it cleanly: **9 experiments sit at the peak cap (1.00)**, where GC matching
+  already found a partner for every peak, so removing the filter cannot raise the count and in a synthetic
+  at that density changes neither the count nor the selection. The other 14 are constrained — fly embryo
+  0.75-0.80, fly 5GROcap 0.73, worm 0.26-0.70, yeasts 0.01-0.07.
+  Toggling this per species is exactly the per-species tuning this repo refuses elsewhere: it would mean
+  yeast negatives are drawn from one distribution and mouse negatives from another, which is a systematic
+  between-species difference in a repo whose point is between-species comparison — the same objection
+  raised against the outlier filter's data-dependent threshold. Since the filter appears inert wherever
+  the count is capped, **off everywhere is both the simpler rule and the more comparable one**, and on
+  everywhere is the only other defensible choice. `NO_SIGNAL_FILTER` is per-species because that is the
+  cheapest thing to experiment with; if the decision lands on uniform, collapse it to a single default.
+  It is **still empty**: only `S.cerevisiae_PROcap` is measured on real data.
   **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
   yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
   eight times over and the GC match is thin. Two honest readings, and the choice has not been made:

@@ -362,6 +362,32 @@ def median_window_signal(bigwig: Path, regions: pd.DataFrame, window: int) -> fl
     return float(np.median(totals)) if totals else float("nan")
 
 
+def median_random_window_signal(bigwig: Path, chrom_sizes: Path, window: int,
+                                n: int = 2000, seed: int = 0) -> float:
+    """Median signal in `n` random `window` bp windows -- the genome baseline.
+
+    The comparator that matters. Reporting negatives against the PEAK median is
+    misleading wherever the peak set saturates the genome: in
+    `S.cerevisiae_PROcap` the median peak window carries 961 reads against 853
+    in an average window, i.e. 1.13x, because at 1.18 peaks per window nearly
+    every window contains one and the informative peaks are all in the tail.
+    Against that baseline the same negatives that look like "28% of peaks" are
+    0.32x a random window -- three times quieter than genome.
+    """
+    sizes = pd.read_csv(chrom_sizes, sep="\t", header=None,
+                        names=["chrom", "size"], dtype={"chrom": str})
+    sizes = sizes[sizes["size"] > window]
+    if not len(sizes):
+        return float("nan")
+    rng = np.random.default_rng(seed)
+    weights = sizes["size"].to_numpy() / sizes["size"].to_numpy().sum()
+    picks = rng.choice(len(sizes), size=n, p=weights)
+    starts = (rng.random(n) * (sizes["size"].to_numpy()[picks] - window)).astype(int)
+    df = pd.DataFrame({"chrom": sizes["chrom"].to_numpy()[picks],
+                       "start": starts, "end": starts + window})
+    return median_window_signal(bigwig, df, window)
+
+
 def peak_overlap_fraction(matched: pd.DataFrame, loci: pd.DataFrame,
                           window: int) -> float:
     """Share of negatives whose IN_WINDOW training window overlaps any peak.
@@ -395,8 +421,8 @@ def peak_overlap_fraction(matched: pd.DataFrame, loci: pd.DataFrame,
 
 def sample_negatives(
     peaks: Path, sequences: Path, bigwig: Path, out_path: Path,
-    keep: list[str], alpha: float | None, species: str, dry_run: bool,
-    signal_filter: bool = True,
+    keep: list[str], alpha: float | None, species: str, chrom_sizes: Path,
+    dry_run: bool, signal_filter: bool = True,
 ) -> None:
     """GC-matched negatives, restricted to `keep`.
 
@@ -512,12 +538,15 @@ def sample_negatives(
     overlap = peak_overlap_fraction(matched, loci, IN_WINDOW)
     neg_sig = median_window_signal(bigwig, matched, IN_WINDOW)
     pk_sig = median_window_signal(bigwig, loci, IN_WINDOW)
+    bg_sig = median_random_window_signal(bigwig, chrom_sizes, IN_WINDOW)
     matched.to_csv(out_path, header=False, sep="\t", index=False)
-    ratio = (neg_sig / pk_sig) if pk_sig else float("nan")
     print(f"  wrote {len(matched):,} negatives "
           f"({len(matched) / max(len(loci), 1):.2f} per peak, "
-          f"{overlap:.1%} of their {IN_WINDOW} bp windows overlap a peak, "
-          f"median signal {neg_sig:,.0f} vs {pk_sig:,.0f} in peaks = {ratio:.1%})")
+          f"{overlap:.1%} overlap a peak)")
+    print(f"    median {IN_WINDOW} bp signal: negatives {neg_sig:,.0f} | "
+          f"peaks {pk_sig:,.0f} | random genome {bg_sig:,.0f}"
+          + (f"  -> negatives are {neg_sig / bg_sig:.2f}x genome"
+             if bg_sig else ""))
 
 
 def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool,
@@ -575,7 +604,7 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool,
 
         print(f"Matching GC-content negatives over {len(keep)} chromosomes...")
         sample_negatives(peaks_input, sequences, us_bw, out_path, keep,
-                         ALPHA.get(exp_id), exp["species"], dry_run,
+                         ALPHA.get(exp_id), exp["species"], chrom_sizes, dry_run,
                          signal_filter=signal_filter)
 
     return True
