@@ -120,8 +120,8 @@ species:
     # reference is mm10_no_alt_analysis_set_ENCODE.fasta, so mm10 is the standard
     # to remap onto. This overrides the manifest's recommended_realign_assembly
     # column, which says mm39. Consequences of the choice, all favourable:
-    #   * coordinates match csRNANet (data/mm10.fa), so mouse models there and
-    #     here are directly comparable;
+    #   * coordinates match the lab's other mouse work, so those models and
+    #     these are directly comparable;
     #   * the canonical peak-matched fold assignment was tuned on mm10;
     #   * exclusion lists exist for mm10 and not for mm39 in Boyle-Lab or ENCODE.
     # Chromosome names are identical between mm10 and mm39 (chr1-chr19, chrX/Y),
@@ -262,8 +262,8 @@ species:
     blacklist: null
     blacklist_source: >-
       None published. Neither Boyle-Lab/Blacklist nor excluderanges has a
-      sacCer3/R64-1-1 set, and yeast is not an ENCODE/modENCODE organism. csRNANet's
-      convention is likewise to use exclusion lists for H.sapiens and
+      sacCer3/R64-1-1 set, and yeast is not an ENCODE/modENCODE organism. The
+      lab convention is likewise to use exclusion lists for H.sapiens and
       M.musculus only.
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
@@ -314,8 +314,8 @@ species:
     blacklist: null
     blacklist_source: >-
       None published. Neither Boyle-Lab/Blacklist nor excluderanges has a
-      ASM294v2 set, and yeast is not an ENCODE/modENCODE organism. csRNANet's
-      convention is likewise to use exclusion lists for H.sapiens and
+      ASM294v2 set, and yeast is not an ENCODE/modENCODE organism. The
+      lab convention is likewise to use exclusion lists for H.sapiens and
       M.musculus only.
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
@@ -402,15 +402,15 @@ species:
   # ---------------------------------------------------------------------------
 
   C.reinhardtii:
-    # Fold assignment is CANONICAL: identical in csRNANet
-    # (configs/splits/C.reinhardtii_data_fold_assignments.csv) and plant-design
-    # (configs/chrom_splits.yaml), verified equal to each other and copied
-    # unchanged. Do not retune -- diverging folds make models incomparable.
+    # Fold assignment is CANONICAL: taken from plant-design
+    # (configs/chrom_splits.yaml) and copied unchanged, after checking it
+    # against the lab's own per-species CSV. Do not retune -- diverging folds
+    # make models incomparable across repos.
     assembly: Chlamydomonas_reinhardtii_v5.5
     n_chromosomes: 17   # 1-17; caps PINTS --thread
     main_chromosomes: [1, 10, 11, 12, 13, 14, 15, 16, 17, 2, 3, 4, 5, 6, 7, 8, 9]
     # NOTE the division: Chlamydomonas moved from Ensembl **protists** to
-    # **plants**. csRNANet's download_genomes.sh still points at
+    # **plants** as of release-63. Older download scripts point at
     # protists/release-55, which now 404s. The assembly (v5.5) is unchanged, so
     # chromosome names and the fold assignment are unaffected.
     annotation_url: http://ftp.ensemblgenomes.org/pub/plants/release-63/gff3/chlamydomonas_reinhardtii/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.63.gff3.gz
@@ -464,8 +464,8 @@ species:
       decoys; they are outside main_chromosomes so they cannot enter a fold.
 
   P.patens:
-    # Fold assignment is CANONICAL: identical in csRNANet and plant-design,
-    # verified equal to each other and copied unchanged.
+    # Fold assignment is CANONICAL: taken from plant-design and copied
+    # unchanged, after checking it against the lab's own per-species CSV.
     assembly: Phypa_V3
     n_chromosomes: 27   # 1-27; caps PINTS --thread
     main_chromosomes: [1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 22, 23, 24, 25, 26, 27, 3, 4, 5, 6, 7, 8, 9]

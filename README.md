@@ -31,7 +31,7 @@ model** — conditions and assay families are not multi-tasked into shared heads
 
 Dataset selection, accessions, and caveats come from the curated manifest in
 `planning/` (also exported as TSVs there). Human K562 PRO-cap configs from the
-csRNANet workspace are intentionally not included here.
+lab's other workspaces are intentionally not included here.
 
 ## Install
 
@@ -399,7 +399,7 @@ Resolved since this list was written, kept here so they are not re-investigated:
 | `rdna_accession: null` for every species | mouse uses `BK000964.3`; the other five original species already carry their rDNA in-assembly, so they need none |
 | `Tome2018_mm_CoPRO` "paired-end" | curation error of the same kind as Liver: ENA reports both runs SINGLE (1 FASTQ, no `nominal_length`, 76.0 bp). The paired description is of CoPRO the assay, not of the deposit |
 | `Shamie2021_cg_5GRO` organism looked wrong | it is not: `BMDM/Brain/Kidney/Liver/Lung` read like Glass-lab mouse names, but ENA reports 72/72 runs as *Cricetulus griseus* — a Chinese hamster TSS atlas |
-| `C.reinhardtii` / `P.patens` folds | reused verbatim from csRNANet and plant-design, after verifying the two upstream copies are identical |
+| `C.reinhardtii` / `P.patens` folds | reused verbatim from plant-design, after checking it against the lab's own per-species CSV |
 | `make_negatives.py` `CHROM_EXCLUDE` under-covered | replaced by `main_chromosomes` from `genomes.yaml`, applied to peaks, signal and chrom.sizes for every species. The old regexes were also actively wrong, not just sparse: matching `_` over the whole BED line dropped legitimate `chr2L` peaks whose name contained an underscore |
 | `biodatatools` subcommand unrecorded | immaterial — see below |
 | Booth2016 TAP+/TAP- "bundle" | curation error; the 2 runs per sample are technical replicates under one SRX, and no TAP- data was deposited. Both experiments now run |
@@ -551,7 +551,7 @@ matches literally and a readable-but-wrong name yields **zero loci in silence**.
 Fold assignments are copied verbatim from the canonical
 [adamyhe/plant-design](https://github.com/adamyhe/plant-design) `config/chrom_splits.yaml` wherever it has an
 entry (A. thaliana, D. melanogaster, M. musculus, S. cerevisiae, plus
-C. reinhardtii and P. patens via csRNAnet) so models stay comparable across
+plus C. reinhardtii and P. patens) so models stay comparable across
 repos. Four entries **originate here** and should be pushed upstream before
 those species are used elsewhere:
 
