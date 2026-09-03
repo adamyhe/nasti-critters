@@ -65,7 +65,31 @@ def main():
     parser.add_argument("--n-layers", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--early-stopping", type=int, default=None)
+    parser.add_argument(
+        "--warmup-epochs", type=int, default=None,
+        help="linear LR warmup length (default 5, from "
+             "config/cherimoya_params.json). Upstream's historical "
+             "max_epochs=20 config used 2",
+    )
+    parser.add_argument(
+        "--decay-epochs", type=int, default=None,
+        help="decouple the cosine decay's length from --max-epochs (default: "
+             "decay across the whole run past warmup, so it finishes exactly "
+             "when training ends). Setting it shorter anneals the LR to its "
+             "floor early and then holds flat -- e.g. --max-epochs 50 "
+             "--decay-epochs 18 decays as fast as upstream's historical "
+             "max_epochs=20 config while still training 50 epochs",
+    )
+    parser.add_argument(
+        "--early-stopping", type=int, default=None,
+        help="stop after this many consecutive epochs without a new best "
+             "valid_count_corr (default: None, training the full --max-epochs "
+             "budget). Deliberately OFF: procap-atlas re-enabled it at 5 "
+             "against both decay_epochs=None and decay_epochs=15 and both "
+             "underperformed on every benchmark metric, profile and count "
+             "alike. Note fit() selects checkpoints on valid_count_corr too, "
+             "so stopping on the same metric compounds validation overfitting",
+    )
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
     parser.add_argument("--negative-ratio", type=float, default=None)
@@ -108,6 +132,8 @@ def main():
         "n_layers": args.n_layers,
         "batch_size": args.batch_size,
         "max_epochs": args.max_epochs,
+        "warmup_epochs": args.warmup_epochs,
+        "decay_epochs": args.decay_epochs,
         "early_stopping": args.early_stopping,
         "max_jitter": args.max_jitter,
         "random_state": args.random_state,
@@ -158,9 +184,9 @@ def main():
     # negatives per peak, so a pool smaller than peaks * ratio recycles. This is
     # NOT inert: an earlier version of this comment claimed so on the grounds
     # that the script ran D. melanogaster only, which was never true of the
-    # script itself. Fly sits at 0.73-1.00 per peak against a configured 1/4 and
-    # is unaffected, but the dense yeast experiments are 0.013-0.28, so the cap
-    # engages hard there -- Spt5IAA4h would recycle each negative 18x at 1/4.
+    # script itself. Fly sits at 0.73-1.00 per peak against the configured 1/7
+    # and is unaffected, but the dense yeast experiments are 0.013-0.28, so the
+    # cap engages hard there -- Spt5IAA4h would recycle each negative 10.3x.
     configured_ratio = params["negatives_ratio"]
     available_ratio = len(negatives) / max(len(peaks), 1)
     if args.no_ratio_cap:
@@ -299,27 +325,44 @@ def main():
         momentum=params["lw_momentum"],
     )
 
-    num_warmup_epochs = 5
+    # Warmup + cosine decay, ported from procap-atlas. `decay_epochs` decouples
+    # the cosine decay's length from max_epochs (default None, i.e. decay across
+    # the whole run past warmup, which is what this script did when warmup was
+    # hard-coded at 5 and there was no decay knob -- so defaults are a no-op).
+    # When decay_epochs is shorter, a third ConstantLR stage holds the LR flat
+    # at eta_min for the remaining epochs: CosineAnnealingLR is PERIODIC, so
+    # without that stage the LR would start rising again past T_max instead of
+    # staying at its floor.
+    num_warmup_epochs = params["warmup_epochs"]
     max_epochs = params["max_epochs"]
+    eta_min = 1e-5
+    decay_epochs = params["decay_epochs"] or max(1, max_epochs - num_warmup_epochs)
+    hold_epochs = max(0, max_epochs - num_warmup_epochs - decay_epochs)
     num_warmup_iters = len(train_data_loader) * num_warmup_epochs
-    num_decay_iters = len(train_data_loader) * max(1, max_epochs - num_warmup_epochs)
+    num_decay_iters = len(train_data_loader) * decay_epochs
+    num_hold_iters = len(train_data_loader) * hold_epochs
 
-    muon_scheduler = SequentialLR(
-        muon_optimizer,
-        schedulers=[
-            LinearLR(muon_optimizer, start_factor=0.01, total_iters=num_warmup_iters),
-            CosineAnnealingLR(muon_optimizer, T_max=num_decay_iters, eta_min=1e-5),
-        ],
-        milestones=[num_warmup_iters],
-    )
-    adam_scheduler = SequentialLR(
-        adam_optimizer,
-        schedulers=[
-            LinearLR(adam_optimizer, start_factor=0.01, total_iters=num_warmup_iters),
-            CosineAnnealingLR(adam_optimizer, T_max=num_decay_iters, eta_min=1e-5),
-        ],
-        milestones=[num_warmup_iters],
-    )
+    def build_lr_scheduler(optimizer, base_lr):
+        schedulers = [
+            LinearLR(optimizer, start_factor=0.01, total_iters=num_warmup_iters),
+            CosineAnnealingLR(optimizer, T_max=num_decay_iters, eta_min=eta_min),
+        ]
+        milestones = [num_warmup_iters]
+        if num_hold_iters > 0:
+            # ConstantLR reverts to the optimizer's base_lr once total_iters is
+            # reached -- it is designed for warmup, not an indefinite hold -- so
+            # total_iters must comfortably exceed num_hold_iters. Setting it to
+            # exactly num_hold_iters would snap the LR back up to base_lr on the
+            # last step of training.
+            schedulers.append(
+                ConstantLR(optimizer, factor=eta_min / base_lr,
+                           total_iters=num_hold_iters * 10 + 10**6)
+            )
+            milestones.append(num_warmup_iters + num_decay_iters)
+        return SequentialLR(optimizer, schedulers=schedulers, milestones=milestones)
+
+    muon_scheduler = build_lr_scheduler(muon_optimizer, params["muon_lr"])
+    adam_scheduler = build_lr_scheduler(adam_optimizer, params["adam_lr"])
     # Linear warmup then flat (no cosine decay) for the Kendall loss weights.
     lw_scheduler = SequentialLR(
         lw_optimizer,

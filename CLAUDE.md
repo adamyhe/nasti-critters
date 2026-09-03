@@ -556,6 +556,47 @@ It is the source of truth for **io, sampling, and training standards**; this rep
 multi-species: per-species FASTA from `experiment_config.yaml`, species-keyed `chrom_splits.yaml`, and
 peak-level random folds for S. pombe. **Never** replace that logic with a wholesale copy of theirs.
 
+**Training hyperparameters were NOT synced until 2026-09-03, and both families diverged.** Asked
+directly ("does early stopping match upstream?") and the answer was no, on more than early stopping.
+Upstream's defaults live in each fit script's `params` dict; ours in `config/{family}_params.json`. What
+differed, now aligned:
+
+| | upstream | was here | note |
+| --- | --- | --- | --- |
+| bpnet `max_epochs` | 50 | 100 | |
+| bpnet `early_stopping` | **None** | 20 | |
+| cherimoya `max_epochs` | 50 | 100 | |
+| cherimoya `early_stopping` | **None** | 15 | |
+| cherimoya `max_jitter` | 500 | **50** | a 10x augmentation difference |
+| cherimoya `muon_wd` | 0.03 | 0.01 | |
+| cherimoya `adam_lr` | 0.001 | 0.004 | |
+| cherimoya `adam_wd` | 0.0 | **0.2** | |
+| cherimoya `negatives_ratio` | 1/7 | 1/4 | upstream defaults both families to `gc:0.1429` |
+| cherimoya `warmup_epochs` | 5, `--warmup-epochs` | hard-coded 5 | now configurable |
+| cherimoya `decay_epochs` | None, `--decay-epochs` | absent | now present |
+
+Everything else already matched: bpnet's `max_jitter` 200, `n_filters` 512, `n_layers` 8,
+`count_loss_weight` 100, `learning_rate` 0.0005, `batch_size` 64, `negatives_ratio` 1/7, `n_shuffles` 20;
+cherimoya's `n_filters` 128, `n_layers` 9, `batch_size` 64, `muon_lr` 0.025 and all three `lw_*`.
+
+**`early_stopping: null` is a decision with evidence behind it, so do not "restore" a value.** Upstream
+swept it — `performance_metrics/cherimoya/{20_5_2,100_None_5,50_None_5,50_None_5_15decay}` — and settled
+on `50_None_5` (50 epochs, no early stopping, 5 warmup). Re-enabling it at 5, against both
+`decay_epochs=None` and `decay_epochs=15`, **underperformed on every benchmark metric, profile and count
+alike** — not a profile/count tradeoff. The proposed mechanism is architecture-independent and applies to
+bpnet-lite identically: `fit()` checkpoints whenever `valid_count_corr > best_corr`, a bare validation
+count-correlation comparison, so more epochs give that rule more chances to overfit the validation set —
+and stopping on the *same* metric compounds it.
+
+**Upstream states the caveat itself and it should travel with the number**: none of those comparisons
+control for random initialization. `--random-state` only makes negative sampling and data-loader order
+reproducible, and no `torch.manual_seed` is set anywhere in either script, so run-to-run noise is not
+separated from the hyperparameter effect. Treat it as upstream's considered default, weakly evidenced —
+not a settled result. A seed-controlled repeat would be needed to do better.
+
+Aligning cost nothing here: no model in this repo has trained yet, so there were no checkpoints to stay
+comparable with. Had there been, this would have been a re-train.
+
 Already synced:
 
 - `src/bpnet/fit/data_loader.py` — byte-identical to theirs; do not fork it.
@@ -2397,12 +2438,13 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
   `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
   log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
-- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya, i.e. negatives are 1/8 and 1/5 of a batch.**
-  An earlier version of this line had it backwards, as "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs".
-  It is the other way round: `config/bpnet_params.json` sets `negatives_ratio: 0.142857…` and
-  `config/cherimoya_params.json` sets `0.25`, while **0.1 is only `PeakGenerator`'s default and never
-  applies**, because `fit_bpnet.py` passes `params["negatives_ratio"]`. The ratio is negatives per peak,
-  so 1/7 means one negative for every seven peaks.
+- **Negatives ratio is 1/7 for BOTH families, i.e. negatives are 1/8 of a batch.** Two corrections have
+  landed on this line. It first read "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs", which was
+  backwards — the JSON is where 1/7 lives, and **0.1 is only `PeakGenerator`'s default and never
+  applies**, because both fit scripts pass `params["negatives_ratio"]`. It then read 1/7 for BPNet and
+  **1/4 for Cherimoya**, which was true of this repo and *not* of upstream: procap-atlas defaults both
+  families to `gc:0.1429`. Aligned 2026-09-03, so `config/cherimoya_params.json` is 0.142857… too. The
+  ratio is negatives per peak, so 1/7 means one negative for every seven peaks.
   It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
   the pool available with the signal filter off:
 
@@ -2536,7 +2578,15 @@ every non-yeast experiment alone.
 - `load_bed()` reads only columns 0–2 with `dtype={"chrom": str}` — chromosome names must stay strings
   (S. cerevisiae uses roman numerals, dm has `4`/`X`).
 - Cherimoya optimization splits parameters: **Muon** for 2-D weight matrices except `linear.weight`, **AdamW**
-  for everything else, each with linear warmup (5 epochs) → cosine decay, trained in `bfloat16`.
+  for everything else, each with linear warmup → cosine decay, trained in `bfloat16`. Warmup was
+  hard-coded at 5 epochs and is now `warmup_epochs` in the config with a `--warmup-epochs` flag, plus
+  `decay_epochs` / `--decay-epochs` to decouple the decay's length from `max_epochs` — both ported from
+  upstream, both no-ops at their defaults (5 and None give exactly the previous schedule, verified: 4,500
+  decay iterations either way and no third stage). Setting `decay_epochs` shorter adds a **`ConstantLR`
+  hold at `eta_min`**, which is load-bearing rather than cosmetic: `CosineAnnealingLR` is *periodic*, so
+  without it the LR would start climbing again past `T_max`. Its `total_iters` is deliberately far larger
+  than the hold (`num_hold_iters * 10 + 10**6`) because `ConstantLR` reverts to the optimizer's base LR
+  once reached — sized exactly, it would snap the LR back up on the last step of training.
 
 ## Scope note
 

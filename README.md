@@ -555,7 +555,7 @@ peak-free background rather than the silent tail of the genome — so treat yeas
 negatives-derived metrics as not strictly comparable with the other ten.
 
 **Training caps `negatives_ratio` at the pool that actually exists.** The
-configured ratio is 1/7 for BPNet and 1/4 for Cherimoya (negatives per peak), and
+configured ratio is 1/7 for both families (negatives per peak), and
 the dense yeast experiments have far fewer negatives than that implies, so both
 fit scripts lower it to `len(negatives) / len(peaks)` and say so. No negative is
 then drawn more than once per epoch. Pass `--no-ratio-cap` to keep the configured

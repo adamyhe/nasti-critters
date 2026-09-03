@@ -83,7 +83,14 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--early-stopping", type=int, default=None)
+    parser.add_argument(
+        "--early-stopping", type=int, default=None,
+        help="stop after this many consecutive epochs without improvement "
+             "(default: None, from config/bpnet_params.json, training the full "
+             "--max-epochs budget). Deliberately OFF, matching procap-atlas: "
+             "re-enabling it there consistently made benchmark metrics worse, "
+             "including profile metrics, not just a profile/count tradeoff",
+    )
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
     parser.add_argument(
