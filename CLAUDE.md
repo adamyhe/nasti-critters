@@ -2199,7 +2199,35 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   the count is capped, **off everywhere is both the simpler rule and the more comparable one**, and on
   everywhere is the only other defensible choice. `NO_SIGNAL_FILTER` is per-species because that is the
   cheapest thing to experiment with; if the decision lands on uniform, collapse it to a single default.
-  It is **still empty**: only `S.cerevisiae_PROcap` is measured on real data.
+
+  **All seven yeast experiments measured (2026-09-03), and the gain decays monotonically with density:**
+
+  | experiment | peaks/window | filter on | filter off | gain | negs/peak | median negative | median peak |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `S.cerevisiae_PROcap` | 1.18 | 440 | 1,905 | **4.3x** | 0.28 | 271 | 961 |
+  | `S.pombe_PROcap` | 1.56 | 311 | 947 | **3.0x** | 0.10 | 831 | 3,518 |
+  | `Spt5EtOH` | 1.89 | 257 | 738 | **2.9x** | 0.07 | 316 | 1,873 |
+  | `Ino80ctl` | 2.70 | 310 | 579 | 1.9x | 0.04 | 90 | 4,701 |
+  | `Ino80KD` | 2.95 | 313 | 520 | 1.7x | 0.03 | 95 | 4,975 |
+  | `Spt5IAA1h` | 3.78 | 348 | 419 | 1.2x | 0.02 | 41 | 2,956 |
+  | `Spt5IAA4h` | 4.14 | 301 | 327 | **1.1x** | 0.01 | 16 | 3,264 |
+
+  Two conclusions, and they point different ways.
+
+  **Turning the filter off is safe.** Zero peak overlap everywhere, and the recovered negatives are not
+  merely acceptable but very quiet — median 16 to 831 reads per 2114 bp against peak medians of
+  1,873-4,975. The densest experiment's negatives sit at 16 against a peak median of 3,264. There is no
+  contamination to trade against, so the earlier worry was unfounded at every density measured.
+
+  **But it does not rescue the dense experiments, and the crossover is near 2 peaks per window.** Below
+  it the signal threshold is what binds and removing it gains 3-4x; above it the supply of peak-free tiles
+  binds and removing it gains 10-20%. `Spt5IAA4h` goes 301 -> 327, still 0.014 negatives per peak, using
+  5.7% of all tiles in the genome — which is simply the peak-free fraction at 4.14 peaks per window.
+  **This corrects an earlier note here that `NEGATIVE_WINDOW` was probably unnecessary.** That was true
+  for `S.cerevisiae_PROcap`, where the filter bound; it is false for the four densest, where only finer
+  tiling could help and finer tiling costs the peak contamination measured above. For those four there is
+  no good option — with `negatives ratio 0.1` and 23,642 peaks, `Spt5IAA4h` draws ~2,364 negatives an
+  epoch from a pool of 327.
   **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
   yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
   eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
