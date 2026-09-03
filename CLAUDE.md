@@ -1687,7 +1687,35 @@ report, not findings about the data.** It now resolves the mate through the same
 than defaulting. Verified: `5' adaptor -> mate 1`, `3' adaptor -> mate 2`, and `declared` now sits on R1
 for Spt5.
 
-**Fixing it requires no re-mapping, but it does re-run against the raw FASTQs.** `umi_report.py` is pure
+**But the `detected` column is BLIND for most of this corpus, so do not re-fetch FASTQs to populate it.**
+`candidate_len` counts the leading run of positions whose per-base entropy is at or above
+`UNIFORM_BITS = 1.95` and needs `MIN_RUN = 4`. A uniform random UMI is 2.000 bits, and random genomic
+sequence at *f* GC is `H(f)` — so the signal to resolve is `2.000 - H(f)`, which is tiny wherever base
+composition is near-even:
+
+| species | %GC | genomic H | vs 1.95 | can the screen see a UMI? |
+| --- | --- | --- | --- | --- |
+| P. patens | 33.4 | 1.9190 | −0.031 | yes |
+| G. arboreum / G. hirsutum | 33.5 / 34.5 | 1.920 / 1.930 | −0.030 / −0.021 | yes |
+| C. elegans, S. pombe, A. thaliana, C. reinhardtii | 35-36 / 64 | 1.938-1.943 | −0.012 to −0.007 | marginal |
+| S. moellendorffii | 37.5 | 1.9544 | **+0.004** | **no** |
+| **S. cerevisiae** | 38.2 | 1.9594 | **+0.009** | **no** |
+| C. griseus, M. musculus, D. melanogaster | 41.5-41.8 | 1.979-1.981 | **+0.029 to +0.031** | **no** |
+
+For S. cerevisiae the target signal is **0.041 bits** against observed position-to-position scatter of
+**~0.13 bits**, and genomic entropy (1.959) is *above* the 1.95 threshold — so genomic sequence itself
+counts as "random" and whether a position passes is sampling noise. That is exactly what happened: the
+Spt5 R1 profile reads `1.98 1.93 1.90 1.95 …`, the run breaks at position 1, and the verdict is
+`no UMI signature` for a library that demonstrably has a 10-nt UMI.
+**So a `-` or a `0` in `detected` is not evidence against a declared UMI here.** The real evidence for the
+Spt5 UMI is the genomic k-mer offset test recorded above, not this screen. And the screen's *primary*
+purpose — catching an UNDECLARED UMI — is unavailable for 6 of 12 species including all three of mouse,
+fly and hamster, which leaves the default-deny policy resting entirely on manifest curation with no
+working automated backstop. Fixing it properly needs a different statistic (the k-mer offset test, or
+per-position base *composition* against the genome's own rather than against uniform), not a threshold
+tweak.
+
+**Fixing the mate requires no re-mapping, but it does re-run against the raw FASTQs.** `umi_report.py` is pure
 reporting — its only output is `qc/umi/{exp}.tsv`, consumed by nothing but the `all` and `qc` targets, and
 the pipeline's UMI handling never came from it. No BAM, bigWig, peak or negative changes. But the script
 is a declared `input:` of the `umi_report` rule, so editing it re-runs that rule for all 42 experiments,
