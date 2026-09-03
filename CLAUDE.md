@@ -2370,10 +2370,26 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
     the configured 200. Enabling it would add **+19%** unique sequence (2114 -> 2514 bp per locus), which
     is augmentation rather than diversity, and it means forking a file that is byte-identical to
     procap-atlas's. Not worth it for 19%.
-  - **Stricter peak calling.** The only lever that moves the number materially, because peak-free space
-    and peak count are the same quantity: fewer calls means more free windows. It also bears directly on
-    whether the yeast peak sets are over-called at 1.7-3.6 calls per annotated TSS against Booth's 1.04.
-    **The diversity problem and the possible over-calling are one problem seen twice.**
+  - **Stricter peak calling — NOT available through `--min-mu-percent`, checked 2026-09-03.** The
+    `Spt5IAA4h` PINTS log ends with *"To reduce false positives, PINTS overrided your current
+    --min-mu-percent value… consider increasing (current: 0.10) to 0.15"*, which reads like an untaken
+    opportunity and is not one. In `calling_engine.py` the override is **applied in place** before the
+    calls are made — `if bkg_mu_threshold < 0.5 and len(all_peak_mus) > 1000: bkg_mu_threshold =
+    np.quantile(all_peak_mus, suggest_val)` — and the `.mmp` file it writes exists only so
+    `on_the_fly_qc` can print that message afterwards. The log shows it firing: chromosome IV reports
+    `Minimum mu in local environment 0.500000`, exactly the floor. So passing `0.15` would silence the
+    message and reproduce roughly the thresholds already used. (Verified against the 1.2.1 source while
+    the run used the pinned 1.1.10; the message text is identical, so the logic almost certainly is, but
+    that is inference.)
+    **What the log does show is that saturation is a depth-versus-genome-size effect, not loose
+    settings.** The per-chromosome candidate thresholds are densities of **1.92-2.82**, while the library
+    averages **1.53 reads/bp** across the genome (18.5 M over 12.07 Mb) — so the bar for a candidate peak
+    sits at 1.3-1.8x the genome-wide mean. Nearly everything clears it because nearly everything is
+    covered.
+    Also worth recording as a **negative** result: PINTS' own cap-selection check, which warns that "the
+    proportion of significant short peaks is relatively high, which usually indicates the cap-selection
+    process didn't work well" and suggests `--disable-small`, **did not fire**. So the library is not
+    failing cap selection, despite `keep_sticks: True` and `disable_small: False`.
   - **Accept it**, and treat yeast negatives-derived numbers as weakly supported.
 
 **Should the signal filter be loosened for the other experiments where negatives < peaks? No.** That is
