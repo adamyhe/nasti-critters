@@ -1733,6 +1733,60 @@ This also matches the project's stated design (one experiment == one species x o
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
 
+## Should the S. cerevisiae perturbation experiments be dropped?
+
+Asked 2026-09-03, on the grounds that Ino80/Spt5 depletion produces massive widespread transcription and
+that even their controls look poor. **Answer: no — keep and train them.** The evidence points the other
+way, and the framing has the yeast libraries ranked backwards.
+
+**The extra peaks carry the strongest initiator motif in the corpus's yeast set.** Ranked with every other
+S. cerevisiae experiment:
+
+| experiment | %rRNA | %uniq_adj | Inr bits | offset | orientation flags |
+| --- | --- | --- | --- | --- | --- |
+| `Spt5IAA1h` | 17.8 | 88.7 | **1.18** | −1 | 0 |
+| `Spt5IAA4h` | 4.5 | 79.8 | **1.18** | −1 | 0 |
+| `Ino80KD` | 8.9 | 77.2 | 1.09 | −1 | 0 |
+| `Ino80ctl` | 14.0 | 82.4 | 1.00 | −1 | 0 |
+| `Spt5EtOH` | **49.7** | 82.4 | 0.61 | +0 | 0 |
+| `S.cerevisiae_PROcap` (Booth WT) | **70.3** | **54.8** | **0.45** | −1 | 0 |
+
+A depleted sample calling 23,642 peaks at 1.18 bits is not calling noise — that is a stronger, correctly
+placed Inr than any other yeast library here. Adjusted mapping is 77-89% across all five; the raw 41.4%
+for `Spt5EtOH` is entirely its rRNA. **Dropping this study would remove the best yeast data and leave the
+worst**, since the independent Booth WT baseline is the weakest S. cerevisiae library in the corpus on
+rRNA, depth and motif alike.
+
+**And they are not the corpus's worst libraries — not close.** Ranked worst-first on rRNA, adjusted
+mapping, depth and motif together, the six below all sit beneath `Spt5EtOH`, and the four Ino80/Spt5
+depletion experiments sit in the better half:
+
+| experiment | %rRNA | %uniq_adj | signal | Inr |
+| --- | --- | --- | --- | --- |
+| `P.patens-plateculture_5GRO` | 47.4 | 27.8 | 2.4 M | 0.39 |
+| `C.reinhardtii-liquidculture_5GRO` | 39.1 | **20.7** | 6.3 M | 0.23 |
+| `S.cerevisiae_PROcap` | **70.3** | 54.8 | 4.9 M | 0.45 |
+| `S.moellendorffii-stemleaf_5GRO` | 26.1 | 36.8 | 6.9 M | 0.78 |
+| `M.musculus-BMDM_GROcap` | 30.7 | 84.2 | **4.0 M** | 0.42 |
+| `C.griseus-BMDM_GROcap` | 15.5 | 49.7 | 5.3 M | 0.65 |
+
+**Do not rank on Inr bits alone.** It is diluted by peak-set size, so `G.hirsutum` (0.11 over 171,640
+peaks) and `D.melanogaster-S2_5GROcap` (0.13 over 42,854) score low while being fine — both correctly
+placed at +0. Bits are only interpretable against a comparable peak count.
+
+**The real caveat is narrower than "these experiments are bad".** It is that *within-study, cross-condition*
+comparison in the Spt5 series is confounded: the vehicle control is 49.7% rRNA against 4.5% at IAA 4 h, an
+11-fold difference in cap-selection quality running in the same direction as the peak counts
+(10,811 -> 21,591 -> 23,642). That gradient is what Spt5 loss should do biologically, and it is also what
+differing library quality would do, and these data cannot separate them — note the rRNA difference runs
+*opposite* to the biology, since depleting Pol II elongation should raise the rRNA fraction, not cut it by
+11-fold. A depth-matched subsample would settle it.
+**That confound does not touch a per-experiment model**, which is all this repo builds — one experiment,
+one model, no multi-tasking. So: train them, and deprioritise any analysis that reads *across* the Spt5
+conditions. The `tier` column already encodes this — controls `include`, perturbations `conditional`.
+The Ino80 pair is much better matched (14.0% vs 8.9% rRNA, 35.4 vs 33.3 M signal) and shows almost no
+peak-count difference, which is itself a useful negative result.
+
 ## Cross-validation splits
 
 Convention everywhere: **test = fold `i`, validation = fold `(i+1) % n_folds`, train = the rest.**
