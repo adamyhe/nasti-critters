@@ -760,8 +760,19 @@ messages and the summary go to **stderr**, so stdout stays pipeable; the env
 setup block is not included, so activate the mamba env and uv venv first. These
 are GPU jobs, so `| bash` runs them serially — use
 `| xargs -P N -I{} bash -c '{}'` only if N models are known to fit in VRAM.
-Cherimoya has no launcher (one experiment set, folds only):
-`for f in 0 1 2 3 4; do python src/cherimoya/fit/fit_cherimoya.py -f $f; done`.
+Cherimoya has the same launcher, over the same selection rule:
+
+```bash
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --print-commands | bash
+```
+
+Both are thin wrappers over `src/launcher.py`. The selection logic — which
+(experiment, fold) pairs exist, which finished, which lack inputs — is
+family-agnostic because `src/experiments.py` is keyed by family, so there is one
+implementation rather than two that can drift. The only family difference is
+`--controls`, which exists on the BPNet launcher and not the Cherimoya one,
+because `fit_cherimoya.py` has no such flag.
 
 A fold counts as done only when `{experiment}.fold{f}.final.torch` exists.
 bpnet-lite also writes `{experiment}.fold{f}.torch` whenever validation loss

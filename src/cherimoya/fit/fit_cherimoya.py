@@ -72,8 +72,7 @@ def main():
     parser.add_argument(
         "--no-ratio-cap", action="store_true",
         help="do not cap negatives_ratio at the available pool. Same flag and "
-             "same meaning as fit_bpnet.py's; inert here while this script runs "
-             "D. melanogaster only, but the two paths must not diverge",
+             "same meaning as fit_bpnet.py's. The two paths must not diverge",
     )
     parser.add_argument("--muon-lr", type=float, default=None)
     parser.add_argument("--muon-wd", type=float, default=None)
@@ -156,10 +155,12 @@ def main():
     print(f"Fold {args.fold}: test={test_chroms}, valid={valid_chroms}")
     print(f"Training chroms: {train_chroms}")
     # Same cap as fit_bpnet.py -- see the long note there. negative_ratio is
-    # negatives per peak, so a pool smaller than peaks * ratio recycles. Inert
-    # for every experiment this script currently runs (D. melanogaster only,
-    # where the pool is 0.73-1.00 per peak against a configured 1/4), but it
-    # must not silently differ from the BPNet path.
+    # negatives per peak, so a pool smaller than peaks * ratio recycles. This is
+    # NOT inert: an earlier version of this comment claimed so on the grounds
+    # that the script ran D. melanogaster only, which was never true of the
+    # script itself. Fly sits at 0.73-1.00 per peak against a configured 1/4 and
+    # is unaffected, but the dense yeast experiments are 0.013-0.28, so the cap
+    # engages hard there -- Spt5IAA4h would recycle each negative 18x at 1/4.
     configured_ratio = params["negatives_ratio"]
     available_ratio = len(negatives) / max(len(peaks), 1)
     if args.no_ratio_cap:

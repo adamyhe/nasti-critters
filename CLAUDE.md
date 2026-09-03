@@ -22,8 +22,18 @@ multi-task conditions or assay families into shared heads.
 Two model families are trained on the same data:
 
 - **BPNet** (`bpnetlite.BPNet`) — the main, multi-species path.
-- **Cherimoya** — newer architecture, *D. melanogaster* only. Training and benchmarking work, but per
+- **Cherimoya** — newer architecture. Training and benchmarking work, but per
   `src/cherimoya/README.md` the models are **not deployment-ready**.
+  **It is NOT D. melanogaster-only, and this file said so until 2026-09-03.** `fit_cherimoya.py` takes
+  `-e` and resolves paths, species and folds through `src/experiments.py` exactly as `fit_bpnet.py` does,
+  and `config/cherimoya_params.json` holds no species-specific value — it has been corpus-capable since
+  `f9f60cf` ported it onto the unified config. What made it *look* single-species was that the surrounding
+  scripts were left at the pre-unification interface: `src/cherimoya/fit/slurm.sh` ran `-f
+  $SLURM_ARRAY_TASK_ID` with **no `-e`**, so every array task exited 2; `benchmark/cmd.sh` hard-coded
+  `D.melanogaster-S2_PROcap.json` as its already-done check while passing `"$@"` through, so once fly was
+  benchmarked every other experiment printed "Skipping" and exited 0; and there was no launcher at all.
+  All fixed, and `src/bpnet/fit/slurm.sh` had the same missing `-e` (plus a relative path and a
+  `--job-name=s2_fit` from the dm3 era).
 
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
@@ -171,8 +181,12 @@ python src/bpnet/fit/launch.py --time 12:00:00 --mem 32G
 # Same selection, no SLURM: bare commands on stdout, skips and summary on stderr
 python src/bpnet/fit/launch.py --print-commands | bash
 
-# Train Cherimoya (D. melanogaster / dm3 config set only)
-python src/cherimoya/fit/fit_cherimoya.py -f 0
+# Train Cherimoya, one experiment/fold -- any experiment, same interface as BPNet
+python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0
+
+# Submit all (experiment x fold) Cherimoya jobs; same launcher as BPNet
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --print-commands | bash
 
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
@@ -274,7 +288,8 @@ Two drivers, same steps:
   unconstrained, which is why the default is set rather than merely declared.
   Run-level intermediates are keyed by *run*, not experiment, so a run shared by two experiments is
   mapped once. Scope is fetch -> negatives; `resolve_runs.py`/`build_experiment_config.py` stay outside
-  (metadata, not DAG work) and training stays on `launch.py`.
+  (metadata, not DAG work) and training stays on `launch.py` — one per family, both thin wrappers over
+  `src/launcher.py`.
 - **`src/data_preprocessing/run_procap_pipeline.py`** — single-experiment path, serial, caches on output
   existence. Useful for `-e <one>` debugging and `--fetch-genomes`/`--index-only`.
 
