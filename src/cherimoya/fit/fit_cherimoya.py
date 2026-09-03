@@ -1,11 +1,13 @@
 """
-Fit a Cherimoya model for the D. melanogaster S2 PRO-cap project.
+Fit a Cherimoya model for one experiment/fold.
 
-Training parameters and data paths are read from configs/. The background is
-restricted to the GC-matched negative loci specified by data_paths["negatives"].
+Experiment paths, species and folds resolve through src/experiments.py, the same
+way fit_bpnet.py does; hyperparameters come from config/cherimoya_params.json.
+The background is restricted to that experiment's GC-matched negatives.
 
 Usage:
-    python src/cherimoya/fit/fit_cherimoya.py -f 0
+    python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0
+    python src/cherimoya/fit/fit_cherimoya.py -e S.cerevisiae-Ino80ctl_PROcap -f 0
 """
 
 import argparse
@@ -17,34 +19,15 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "cherimoya_params.json"
-DEFAULT_DATA_PATHS_PATH = REPO_ROOT / "configs" / "data_paths.json"
-DEFAULT_FOLD_ASSIGNMENTS_PATH = (
-    REPO_ROOT / "configs" / "D.melanogaster_data_fold_assignments.csv"
+
+sys.path.insert(0, str(REPO_ROOT / "src"))
+from experiments import (  # noqa: E402
+    IGNORE,
+    Experiment,
+    load_params,
+    model_dir,
+    model_name,
 )
-DEFAULT_RUN_NAME = "D.melanogaster-S2_PROcap"
-
-
-def load_config(path: str | Path) -> dict:
-    with open(path) as f:
-        config = yaml.safe_load(f)
-    return config or {}
-
-
-def resolve_path(value: str | Path | None) -> str | None:
-    if value is None:
-        return None
-
-    path = Path(value)
-    if path.is_absolute():
-        return str(path)
-    return str((REPO_ROOT / path).resolve())
-
-
-def resolve_path_list(values: list[str] | None) -> list[str] | None:
-    if values is None:
-        return None
-    return [resolve_path(value) for value in values]
 
 
 def load_bed(path: str | Path) -> pd.DataFrame:
@@ -59,80 +42,16 @@ def load_bed(path: str | Path) -> pd.DataFrame:
     )
 
 
-def load_fold_assignments(path: str | Path) -> pd.DataFrame:
-    folds = pd.read_csv(path)
-    required = {"chrom", "fold"}
-    missing = required - set(folds.columns)
-    if missing:
-        raise ValueError(
-            f"Fold assignments missing required column(s): {sorted(missing)}"
-        )
-
-    folds = folds.copy()
-    folds["chrom"] = folds["chrom"].astype(str)
-    folds["fold"] = folds["fold"].astype(int)
-    return folds
-
-
-def split_chroms(folds: pd.DataFrame, fold: int) -> tuple[list[str], list[str], list[str]]:
-    fold_ids = sorted(folds["fold"].unique())
-    if fold not in fold_ids:
-        raise ValueError(f"Fold {fold} not found. Available folds: {fold_ids}")
-
-    n_folds = len(fold_ids)
-    validation_fold = (fold + 1) % n_folds
-    if validation_fold not in fold_ids:
-        raise ValueError(
-            "Fold IDs must support modulo validation split; "
-            f"computed validation fold {validation_fold}, available folds: {fold_ids}"
-        )
-
-    test_chroms = folds.loc[folds["fold"] == fold, "chrom"].to_list()
-    validation_chroms = folds.loc[
-        folds["fold"] == validation_fold, "chrom"
-    ].to_list()
-    training_chroms = folds.loc[
-        ~folds["fold"].isin([fold, validation_fold]), "chrom"
-    ].to_list()
-    return training_chroms, validation_chroms, test_chroms
-
-
-def resolve_config_paths(params: dict) -> dict:
-    resolved = dict(params)
-    for key in ("loci", "sequences", "negatives"):
-        if key in resolved:
-            resolved[key] = resolve_path(resolved[key])
-
-    for key in ("signals", "controls", "blacklist"):
-        if key in resolved and resolved[key] is not None:
-            values = resolved[key]
-            resolved[key] = resolve_path_list(values if isinstance(values, list) else [values])
-
-    return resolved
-
-
-def validate_paths(params: dict) -> None:
-    path_fields = [
-        ("loci", params["loci"]),
-        ("sequences", params["sequences"]),
-        ("negatives", params["negatives"]),
-    ]
-    path_fields.extend((f"signals[{i}]", p) for i, p in enumerate(params["signals"]))
-    if params["controls"] is not None:
-        path_fields.extend((f"controls[{i}]", p) for i, p in enumerate(params["controls"]))
-    if params["blacklist"] is not None:
-        path_fields.extend((f"blacklist[{i}]", p) for i, p in enumerate(params["blacklist"]))
-
-    missing = [(label, path) for label, path in path_fields if not Path(path).exists()]
-    if missing:
-        for label, path in missing:
-            print(f"Error: {label} not found: {path}", file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "-e",
+        "--experiment",
+        type=str,
+        required=True,
+        help="experiment ID as it appears in config/experiment_config.yaml",
     )
     parser.add_argument(
         "-f",
@@ -140,24 +59,6 @@ def main():
         type=int,
         required=True,
         help="fold to hold out for testing (validation = (fold+1) %% n_folds)",
-    )
-    parser.add_argument(
-        "--params",
-        type=str,
-        default=str(DEFAULT_PARAMS_PATH),
-        help="shared training parameter config",
-    )
-    parser.add_argument(
-        "--data-paths",
-        type=str,
-        default=str(DEFAULT_DATA_PATHS_PATH),
-        help="shared data path config",
-    )
-    parser.add_argument(
-        "--fold-assignments",
-        type=str,
-        default=str(DEFAULT_FOLD_ASSIGNMENTS_PATH),
-        help="CSV assigning chromosomes to folds",
     )
     parser.add_argument("-o", "--output-dir", type=str, default=None)
     parser.add_argument("--n-filters", type=int, default=None)
@@ -172,24 +73,32 @@ def main():
     parser.add_argument("--muon-wd", type=float, default=None)
     parser.add_argument("--adam-lr", type=float, default=None)
     parser.add_argument("--adam-wd", type=float, default=None)
+    parser.add_argument("--lw-lr", type=float, default=None)
+    parser.add_argument("--lw-wd", type=float, default=None)
+    parser.add_argument("--lw-momentum", type=float, default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    config_params = load_config(args.params)
-    data_paths = load_config(args.data_paths)
-    folds = load_fold_assignments(args.fold_assignments)
-    train_chroms, valid_chroms, test_chroms = split_chroms(folds, args.fold)
-
-    params = {**config_params, **data_paths}
-    params.update(
-        {
-            "training_chroms": train_chroms,
-            "validation_chroms": valid_chroms,
-            "test_chroms": test_chroms,
-        }
+    try:
+        exp = Experiment.load(args.experiment)
+    except (KeyError, ValueError) as err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    if exp.missing:
+        for m in exp.missing:
+            print(f"Error: missing {m}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        split = exp.fold_split(args.fold)
+    except (KeyError, ValueError) as err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    output_dir = Path(args.output_dir) if args.output_dir else model_dir(
+        "cherimoya", args.experiment
     )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    cli_overrides = {
+    params = load_params("cherimoya", {
         "n_filters": args.n_filters,
         "n_layers": args.n_layers,
         "batch_size": args.batch_size,
@@ -202,30 +111,42 @@ def main():
         "muon_wd": args.muon_wd,
         "adam_lr": args.adam_lr,
         "adam_wd": args.adam_wd,
-    }
-    for key, value in cli_overrides.items():
-        if value is not None:
-            params[key] = value
-    if args.verbose:
-        params["verbose"] = True
-
-    output_dir = Path(args.output_dir or (REPO_ROOT / "models" / "cherimoya"))
-    params["name"] = str(output_dir / f"{DEFAULT_RUN_NAME}_f{args.fold}")
-    params = resolve_config_paths(params)
-
-    required = ["loci", "sequences", "signals", "negatives"]
-    missing = [key for key in required if key not in params or params[key] is None]
-    if missing:
-        print(f"Error: missing required config key(s): {missing}", file=sys.stderr)
-        sys.exit(1)
-
-    validate_paths(params)
-    output_dir.mkdir(parents=True, exist_ok=True)
+        "lw_lr": args.lw_lr,
+        "lw_wd": args.lw_wd,
+        "lw_momentum": args.lw_momentum,
+        "verbose": True if args.verbose else None,
+    })
+    params.update({
+        "name": (
+            str(Path(args.output_dir) / f"{args.experiment}.fold{args.fold}")
+            if args.output_dir
+            else model_name("cherimoya", args.experiment, args.fold)
+        ),
+        "sequences": str(exp.sequences),
+        "signals": [str(x) for x in exp.signals],
+        "controls": [str(x) for x in exp.controls] if exp.controls else None,
+        "loci": str(exp.peaks),
+        "negatives": str(exp.negatives),
+        "blacklist": exp.blacklist,
+        "training_chroms": split["train_chroms"],
+        "validation_chroms": split["valid_chroms"],
+        "test_chroms": split["test_chroms"],
+    })
+    train_chroms = split["train_chroms"]
+    valid_chroms = split["valid_chroms"]
+    test_chroms = split["test_chroms"]
 
     peaks = load_bed(params["loci"])
     negatives = load_bed(params["negatives"])
 
-    print(f"Run: {DEFAULT_RUN_NAME}")
+    # Peak-level splits (species with too few chromosomes, e.g. S. pombe) filter
+    # the peak table instead of holding out chromosomes; fold_loci() returns the
+    # same shape either way.
+    loci = exp.fold_loci(peaks, args.fold)
+    params["training_chroms"] = train_chroms = loci["train_chroms"]
+    params["validation_chroms"] = valid_chroms = loci["valid_chroms"]
+
+    print(f"Experiment: {exp.id} ({exp.entry['biosample']}, {exp.species})")
     print(f"Fold {args.fold}: test={test_chroms}, valid={valid_chroms}")
     print(f"Training chroms: {train_chroms}")
     print(
@@ -237,19 +158,35 @@ def main():
     from cherimoya import Cherimoya
     from data_loader import PeakGenerator
     from tangermeme.io import extract_loci
-    from torch.optim import AdamW
-    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+    from torch.optim import SGD, AdamW
+    from torch.optim.lr_scheduler import (
+        ConstantLR,
+        CosineAnnealingLR,
+        LinearLR,
+        SequentialLR,
+    )
 
     try:
         from torch.optim import Muon
-    except ImportError:
-        from muon import Muon
+    except ImportError as exc:
+        raise ImportError(
+            "torch.optim.Muon requires torch >= 2.10 (pinned in pyproject.toml). "
+            "Do not install the PyPI `muon` package as a fallback -- it is an "
+            "unrelated multi-omics framework and does not provide this optimizer."
+        ) from exc
 
     train_data_loader = PeakGenerator(
-        peaks=peaks,
+        peaks=loci["train_loci"],
         negatives=negatives,
         sequences=params["sequences"],
-        signals=params["signals"],
+        # Nested so cherimoya's normalize_signal_groups treats this as one
+        # stranded 2-channel group (correct RC channel-swap behavior) instead of
+        # two independent unstranded groups -- the latter is what a flat
+        # 2-element list means as of cherimoya's signal-groups refactor.
+        # params["signals"] itself stays flat: extract_loci (used directly for
+        # validation below) and the model's signal_groups=[len(signals)] both
+        # need the flat form.
+        signals=[params["signals"]],
         controls=params["controls"],
         chroms=params["training_chroms"],
         in_window=params["in_window"],
@@ -270,7 +207,7 @@ def main():
 
     print(f"Loading validation data (chroms: {valid_chroms})...")
     val = extract_loci(
-        loci=peaks,
+        loci=loci["valid_loci"],
         sequences=params["sequences"],
         signals=params["signals"],
         in_signals=params["controls"],
@@ -278,7 +215,7 @@ def main():
         in_window=params["in_window"],
         out_window=params["out_window"],
         max_jitter=0,
-        ignore=list("QWERYUIOPSDFHJKLZXVBNM"),
+        ignore=IGNORE,
         exclusion_lists=params["blacklist"],
         verbose=params["verbose"],
     )
@@ -291,20 +228,38 @@ def main():
     y_valid = torch.abs(y_valid)
 
     n_control_tracks = 0 if params["controls"] is None else len(params["controls"])
+    # torch.compile has no Python 3.14 support below torch 2.10; the limit is
+    # Dynamo, not Triton itself. torch.__version__ is a TorchVersion, which
+    # supports PEP 440-aware comparison against a plain string.
+    compile_supported = sys.version_info < (3, 14) or torch.__version__ >= "2.10"
     model = Cherimoya(
         name=params["name"],
         n_filters=params["n_filters"],
-        n_outputs=len(params["signals"]),
+        # cherimoya >= 0.2 replaced n_outputs with signal_groups; a single
+        # 2-element group is one stranded (pl, mn) pair.
+        signal_groups=[len(params["signals"])],
         n_control_tracks=n_control_tracks,
         n_layers=params["n_layers"],
         trimming=(params["in_window"] - params["out_window"]) // 2,
         verbose=params["verbose"],
+        compile=compile_supported,
     )
     model = model.to("cuda")
 
-    muon_params, adam_params = [], []
+    # Separate parameters for Muon (2D projection weights), AdamW (everything
+    # else, including the 2D depth-wise conv_weight), and SGD (the lw0/lw1
+    # Kendall uncertainty loss weights, which cherimoya >= 0.2 optimizes with a
+    # dedicated optimizer passed to fit()).
+    muon_params, adam_params, lw_params = [], [], []
     for name, parameter in model.named_parameters():
-        if parameter.ndim == 2 and "weight" in name and name != "linear.weight":
+        if name in ("lw0", "lw1"):
+            lw_params.append(parameter)
+        elif (
+            parameter.ndim == 2
+            and "weight" in name
+            and name != "linear.weight"
+            and "conv_weight" not in name
+        ):
             muon_params.append(parameter)
         else:
             adam_params.append(parameter)
@@ -314,6 +269,12 @@ def main():
     )
     adam_optimizer = AdamW(
         adam_params, lr=params["adam_lr"], weight_decay=params["adam_wd"]
+    )
+    lw_optimizer = SGD(
+        lw_params,
+        lr=params["lw_lr"],
+        weight_decay=params["lw_wd"],
+        momentum=params["lw_momentum"],
     )
 
     num_warmup_epochs = 5
@@ -337,13 +298,24 @@ def main():
         ],
         milestones=[num_warmup_iters],
     )
+    # Linear warmup then flat (no cosine decay) for the Kendall loss weights.
+    lw_scheduler = SequentialLR(
+        lw_optimizer,
+        schedulers=[
+            LinearLR(lw_optimizer, start_factor=0.01, total_iters=num_warmup_iters),
+            ConstantLR(lw_optimizer, factor=1.0, total_iters=1),
+        ],
+        milestones=[num_warmup_iters],
+    )
 
     model.fit(
         training_data=train_data_loader,
         muon_optimizer=muon_optimizer,
         adam_optimizer=adam_optimizer,
+        lw_optimizer=lw_optimizer,
         muon_scheduler=muon_scheduler,
         adam_scheduler=adam_scheduler,
+        lw_scheduler=lw_scheduler,
         X_valid=X_valid,
         X_ctl_valid=X_valid_ctl,
         y_valid=y_valid,

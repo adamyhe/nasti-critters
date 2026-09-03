@@ -1,8 +1,8 @@
 """
 Calculate BPNet attributions on the configured PRO-cap loci.
 
-By default, parameters and data paths are read from configs/ and model paths are
-derived as models/bpnet/D.melanogaster-S2_PROcap_f{fold}.torch.
+Data, species and folds resolve through src/experiments.py; model paths are
+read from models/bpnet/{experiment}/{experiment}.fold{f}.torch.
 """
 
 import argparse
@@ -15,36 +15,13 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-DEFAULT_PARAMS_PATH = REPO_ROOT / "configs" / "bpnet_params.json"
-DEFAULT_DATA_PATHS_PATH = REPO_ROOT / "configs" / "data_paths.json"
-DEFAULT_FOLD_ASSIGNMENTS_PATH = (
-    REPO_ROOT / "configs" / "D.melanogaster_data_fold_assignments.csv"
+
+sys.path.insert(0, str(REPO_ROOT / "src"))
+from experiments import (  # noqa: E402
+    IGNORE,
+    Experiment,
+    load_params,
 )
-DEFAULT_RUN_NAME = "D.melanogaster-S2_PROcap"
-
-
-def load_config(path: str | Path | None) -> dict:
-    if path is None:
-        return {}
-    with open(path) as f:
-        config = yaml.safe_load(f)
-    return config or {}
-
-
-def resolve_path(value: str | Path | None) -> str | None:
-    if value is None:
-        return None
-
-    path = Path(value)
-    if path.is_absolute():
-        return str(path)
-    return str((REPO_ROOT / path).resolve())
-
-
-def resolve_path_list(values: list[str] | None) -> list[str] | None:
-    if values is None:
-        return None
-    return [resolve_path(value) for value in values]
 
 
 def load_bed(path: str | Path) -> pd.DataFrame:
@@ -59,133 +36,57 @@ def load_bed(path: str | Path) -> pd.DataFrame:
     )
 
 
-def load_fold_assignments(path: str | Path) -> pd.DataFrame:
-    folds = pd.read_csv(path)
-    required = {"chrom", "fold"}
-    missing = required - set(folds.columns)
-    if missing:
-        raise ValueError(
-            f"Fold assignments missing required column(s): {sorted(missing)}"
-        )
-
-    folds = folds.copy()
-    folds["chrom"] = folds["chrom"].astype(str)
-    folds["fold"] = folds["fold"].astype(int)
-    return folds
-
-
-def derive_model_paths(
-    folds: pd.DataFrame,
-    model_fnames: list[str] | None,
-    models_dir: str,
-    run_name: str,
-) -> list[str]:
-    fold_ids = sorted(folds["fold"].unique())
-    if model_fnames:
-        return resolve_path_list(model_fnames)
-
-    models_dir = resolve_path(models_dir)
-    return [
-        str(Path(models_dir) / f"{run_name}_f{fold}.torch")
-        for fold in fold_ids
-    ]
-
-
-def validate_paths(path_fields: list[tuple[str, str | None]]) -> None:
-    missing = [
-        (label, path)
-        for label, path in path_fields
-        if path is None or not Path(path).exists()
-    ]
-    if missing:
-        for label, path in missing:
-            print(f"Error: {label} not found: {path}", file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "-p",
-        "--parameters",
-        type=str,
-        default=None,
-        help="optional legacy attribution config; overrides shared configs",
-    )
-    parser.add_argument(
-        "--params",
-        type=str,
-        default=str(DEFAULT_PARAMS_PATH),
-        help="shared training parameter config",
-    )
-    parser.add_argument(
-        "--data-paths",
-        type=str,
-        default=str(DEFAULT_DATA_PATHS_PATH),
-        help="shared data path config",
-    )
-    parser.add_argument(
-        "--fold-assignments",
-        type=str,
-        default=str(DEFAULT_FOLD_ASSIGNMENTS_PATH),
-        help="CSV assigning chromosomes to folds",
+        "-e", "--experiment", type=str, required=True,
+        help="experiment ID as it appears in config/experiment_config.yaml",
     )
     parser.add_argument(
         "--attribute-type",
         choices=["counts", "profile"],
         default="profile",
     )
-    parser.add_argument("--models-dir", type=str, default="models/bpnet")
-    parser.add_argument("--run-name", type=str, default=DEFAULT_RUN_NAME)
-    parser.add_argument("--model-fnames", nargs="+", default=None)
+    parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument("--output-fname", type=str, default=None)
     parser.add_argument("--save-ohe", type=str, default=None)
     args = parser.parse_args()
 
-    config_params = load_config(args.params)
-    data_paths = load_config(args.data_paths)
-    legacy_params = load_config(args.parameters)
-
-    params = {**config_params, **data_paths, **legacy_params}
-
-    params["attribute_type"] = args.attribute_type
-    params["loci"] = resolve_path(params.get("loci"))
-    params["sequences"] = resolve_path(params.get("sequences"))
-    params["signals"] = resolve_path_list(params.get("signals"))
-    params["controls"] = resolve_path_list(params.get("controls"))
-    params["model_fnames"] = derive_model_paths(
-        folds=load_fold_assignments(args.fold_assignments),
-        model_fnames=args.model_fnames or params.get("model_fnames"),
-        models_dir=args.models_dir,
-        run_name=args.run_name,
-    )
-
-    output_fname = (
-        args.output_fname
-        or params.get("output_fname")
-        or f"attr/{args.run_name}_attr_{args.attribute_type}.npz"
-    )
-    params["output_fname"] = resolve_path(output_fname)
-    params["save_ohe"] = resolve_path(args.save_ohe or params.get("save_ohe"))
-
-    folds = load_fold_assignments(args.fold_assignments)
-    chroms = folds["chrom"].to_list()
-
-    required = ["loci", "sequences", "signals", "model_fnames", "output_fname"]
-    missing = [key for key in required if not params.get(key)]
-    if missing:
-        print(f"Error: missing required config key(s): {missing}", file=sys.stderr)
+    try:
+        exp = Experiment.load(args.experiment)
+    except (KeyError, ValueError) as err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    if exp.missing:
+        for m in exp.missing:
+            print(f"Error: missing {m}", file=sys.stderr)
         sys.exit(1)
 
-    path_fields = [
-        ("loci", params["loci"]),
-        ("sequences", params["sequences"]),
-    ]
-    path_fields.extend((f"signals[{i}]", p) for i, p in enumerate(params["signals"]))
-    if params["controls"] is not None:
-        path_fields.extend((f"controls[{i}]", p) for i, p in enumerate(params["controls"]))
-    path_fields.extend((f"model[{i}]", p) for i, p in enumerate(params["model_fnames"]))
-    validate_paths(path_fields)
+    params = load_params("bpnet", {})
+    params.update({
+        "loci": str(exp.peaks),
+        "sequences": str(exp.sequences),
+        "signals": [str(x) for x in exp.signals],
+        "controls": [str(x) for x in exp.controls] if exp.controls else None,
+        "blacklist": exp.blacklist,
+    })
+
+    folds = exp.all_folds("bpnet", models_dir=args.models_dir)
+    absent = [f for f in folds if not f["model"].exists()]
+    if absent:
+        for f in absent:
+            print(f"Error: model for fold {f['fold']} not found: {f['model']}",
+                  file=sys.stderr)
+        sys.exit(1)
+
+    params["attribute_type"] = args.attribute_type
+    params["model_fnames"] = [str(f["model"]) for f in folds]
+    chroms = [c for f in folds for c in f["test_chroms"]]
+    params["output_fname"] = str(
+        REPO_ROOT / (args.output_fname
+                     or f"attr/{exp.id}_attr_{args.attribute_type}.npz")
+    )
+    params["save_ohe"] = str(REPO_ROOT / args.save_ohe) if args.save_ohe else None
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
@@ -204,7 +105,7 @@ def main():
         verbose=params["verbose"],
         min_counts=None,
         max_counts=None,
-        ignore=list("QWERYUIOPSDFHJKLZXVBNM"),
+        ignore=IGNORE,
     ).to(torch.float32)
 
     if params["save_ohe"] is not None:

@@ -1,0 +1,262 @@
+# Per-species chromosome fold assignments derived from config/splits/*.csv
+#
+# CANONICAL SOURCE: adamyhe/plant-design config/chrom_splits.yaml, which uses
+# this same species-keyed schema and covers 17 species. Entries below that exist
+# there are copied verbatim -- do not "improve" them, since diverging folds make
+# models incomparable across repos (a locus in test here could be train there).
+# Verified identical as of this commit: A.thaliana, D.melanogaster, M.musculus,
+# S.cerevisiae. The same file also appears in csRNANet (this repo's
+# direct ancestor) with the same M.musculus assignment.
+#
+# ENCODE publishes no mouse folds. chrombpnet ships only
+# helpers/make_chr_splits/splits.py, which is a formatter -- you pass
+# --test_chroms/--valid_chroms and it writes train as the remainder. It contains
+# no assignment logic and no committed fold files for any genome. The lab
+# convention below is therefore the authoritative source.
+
+# dm6 names are chr-prefixed, following the ENCODE/modENCODE reference (UCSC
+# dm6). The canonical csRNANet/plant-design file writes these unprefixed (2L,
+# X); the FOLD ASSIGNMENT here is identical to it, only the naming differs, so
+# models stay comparable. chr-prefixing is required for this repo because the
+# FASTA, peaks, bigWigs and the dm6 exclusion list are all chr-prefixed --
+# extract_loci matches chromosome names literally, so mixing the two silently
+# yields zero loci (or an exclusion list that excludes nothing).
+D.melanogaster:
+  0: [chr2L]
+  1: [chr2R]
+  2: [chr3L]
+  3: [chr3R]
+  4: [chr4, chrX]
+
+S.cerevisiae:
+  0: [I, VII, XV]
+  1: [IV, XIV]
+  2: [II, III, V, VI, IX]
+  3: [VIII, XII, XIII]
+  4: [X, XI, XVI]
+
+# S.pombe is deliberately absent: 3 chromosomes cannot give 5 balanced folds,
+# so it uses peak-level splits only (config/splits/S.pombe_random_fold_assignments.csv,
+# written by src/data_preprocessing/make_random_splits.py). Declaring
+# chromosome folds here as well produced two disagreeing mechanisms for one species.
+
+# NAMING RULE: chromosome names follow the ENCODE/modENCODE reference assembly
+# for each organism, which is what this repo remaps onto -- dm6, mm10 and ce11
+# are UCSC-derived and therefore chr-prefixed. S.cerevisiae and
+# A.thaliana are not ENCODE organisms; they keep the Ensembl bare names their
+# FASTAs use. Every name here must match the FASTA in config/genomes.yaml
+# exactly, because extract_loci compares them literally.
+
+# mm10: canonical assignment, copied verbatim from csRNANet and plant-design
+# (identical in both). chrY is absent -- small, repeat-dense, and not present in
+# female samples in Liver_ChROcap_mm.
+#
+# Folds here are assigned by matching PEAK COUNTS across folds, not sequence
+# length; bp totals are not expected to match and should not be "rebalanced".
+# Check an assignment against real peaks with:
+#     python config/write_split_csvs.py --peak-counts -e <experiment>
+M.musculus:
+  0: [chr1, chr11, chr16, chrX]
+  1: [chr2, chr10, chr18, chr19]
+  2: [chr3, chr12, chr13, chr14, chr15]
+  3: [chr4, chr5, chr7]
+  4: [chr6, chr8, chr9, chr17]
+
+# ce11: 6 chromosomes, so folds 0-3 hold one each and fold 4 holds chrV + chrX.
+#
+# NOT CANONICAL, AND NOT PEAK-MATCHED: neither csRNANet nor plant-design has a
+# C.griseus (CriGri-PICRH-1.0). ORIGINATES HERE -- neither csRNANet nor
+# plant-design has an entry, so if hamster is used beyond this repo push this
+# assignment upstream first, or a locus in test here becomes train there. That is
+# the mistake the C.elegans entry below embodies.
+#
+# Assigned by MATCHING PEAK COUNTS, which is this project's method -- not by
+# sequence length. Counts are from C.griseus-CHO_GROcap, the deepest of the seven
+# hamster experiments (65,575 peaks; liver has 7,568). One assignment serves all
+# seven, so the thin libraries are necessarily less balanced than CHO.
+#
+#   fold  peaks   share   vs target
+#     0   13,009  19.8%     -106     2, 9
+#     1   12,796  19.5%     -319     3, 8, 10
+#     2   12,965  19.8%     -150     4, 5
+#     3   12,256  18.7%     -859     6, 7, X
+#     4   14,549  22.2%    +1434     RAZU02000001.1, RAZU02000002.1
+#
+# The 12 units are chromosomes 2-10 and X plus the two unplaced scaffolds
+# RAZU02000001.1 (275.7 Mb) and RAZU02000002.1 (274.4 Mb). Including scaffolds as
+# fold members breaks the usual rule deliberately: this assembly does not build
+# chromosome 1, each scaffold is larger than mouse chr1, and together they are
+# 23% of the genome, so excluding them would discard all of chromosome 1.
+#
+# THE TWO SCAFFOLDS SHARE A FOLD, because they are the two arms of the
+# unassembled chromosome 1 and one chromosome belongs to one fold. That
+# constraint costs balance and the cost is not hidden: spread is 2293 peaks
+# against a 13,115 target, where splitting them would give 699. Both figures are
+# provably optimal for their constraint -- exhaustive search over every set
+# partition of the units into 5 non-empty blocks, unique optimum in each case.
+#
+# Most of that spread is unavoidable rather than a bad assignment: chromosome 1
+# alone holds 22.2% of all peaks, so its fold exceeds a fifth of the data no
+# matter how the other 10 units are arranged. The floor given the constraint is
+# 1793 (14,549 minus a perfectly even 12,756 elsewhere); the remaining 500 is the
+# lumpiness of the other units, which cannot be divided more evenly.
+C.griseus:
+  0: ['2', '9']
+  1: ['3', '8', '10']
+  2: ['4', '5']
+  3: ['6', '7', X]
+  4: [RAZU02000001.1, RAZU02000002.1]
+
+# C.elegans (ce11). ORIGINATES HERE -- neither csRNANet nor plant-design has an
+# entry -- so push it upstream before worm models travel.
+#
+# SIX FOLDS, not the repo's usual five, and one chromosome each. Worm has 6
+# chromosomes of near-equal peak count (3,294-3,726 in C.elegans-embryo_GROcap),
+# so a 5-fold split must put two in one fold: that fold then holds 31.4% of the
+# peaks against 16.2% for the smallest, a spread of 3,188 or 76% of target, which
+# is the worst balance in the repo by a wide margin. One chromosome per fold
+# gives a spread of 432 (12%), in line with every other species.
+#
+# Compare D.melanogaster, which has the same 6-units-into-5-folds shape and gets
+# away with it because dm6's chr4 is tiny, so [chr4, chrX] is a natural pair.
+# Worm has no cheap pair.
+#
+# THIS REPLACES AN ASSIGNMENT MADE BY CHROMOSOME COUNT RATHER THAN PEAK COUNT --
+# the one case in this file that did not follow the project's method. Its spread
+# was 3,725 (89%).
+#
+# Folds are numbered in GENOMIC order, not by peak count. The membership is
+# forced -- 6 chromosomes into 6 folds -- so only the numbering is free, and
+# genomic order is stable across libraries where count order would shuffle if
+# reassigned from a deeper library.
+#
+# BALANCE HOLDS FOR TWO OF THE FOUR WORM LIBRARIES ONLY, and no assignment can
+# help: six chromosomes into six folds is forced. Spread as % of target --
+# embryo 12%, L1starved 13%, embryo-sdc2 46%, L3 102%. Both outliers are biology:
+# embryo-sdc2 derepresses chrX (dosage compensation; sdc-2 is the DCC master
+# regulator, X share 17.7% -> 21.3%), and L3's chrIV is 29.7% because the two
+# 21U-RNA/piRNA clusters at ~5-6 Mb and ~13-17 Mb add ~6,000 germline-dependent
+# peaks. So L3's fold 3 tests on 30% of its own peaks. See CLAUDE.md.
+#
+#   fold  chrom    peaks  share      (C.elegans-embryo_GROcap, 21,015 peaks)
+#     0   chrI     3,716  17.7%
+#     1   chrII    3,295  15.7%
+#     2   chrIII   3,583  17.0%
+#     3   chrIV    3,401  16.2%
+#     4   chrV     3,294  15.7%
+#     5   chrX     3,726  17.7%
+C.elegans:
+  0: [chrI]
+  1: [chrII]
+  2: [chrIII]
+  3: [chrIV]
+  4: [chrV]
+  5: [chrX]
+
+A.thaliana:
+  0: ["1"]
+  1: ["2"]
+  2: ["3"]
+  3: ["4"]
+  4: ["5"]
+
+# ---------------------------------------------------------------------------
+# Species added with the McDonald2024 manifest update. Both entries below are
+# CANONICAL and were verified identical in csRNANet
+# (configs/splits/{species}_data_fold_assignments.csv) and plant-design
+# (configs/chrom_splits.yaml) before being copied here -- same peak-matched
+# assignment, unchanged. Names are quoted strings, like A.thaliana above:
+# bare-numeric YAML keys would parse as ints and extract_loci compares
+# chromosome names literally against the FASTA.
+#
+# NOTE Chlamydomonas is in Ensembl **plants**, not protists, as of release-63;
+# the assembly (v5.5) is unchanged, so this assignment still applies.
+# ---------------------------------------------------------------------------
+C.reinhardtii:
+  0: ["3", "12"]
+  1: ["2", "5", "6"]
+  2: ["1", "13", "16"]
+  3: ["9", "10", "17"]
+  4: ["4", "7", "8", "11", "14", "15"]
+
+P.patens:
+  0: ["1", "2", "3", "27"]
+  1: ["4", "5", "6", "11", "21"]
+  2: ["7", "9", "10", "14", "16"]
+  3: ["8", "12", "15", "17", "20", "26"]
+  4: ["13", "18", "19", "22", "23", "24", "25"]
+
+# ---------------------------------------------------------------------------
+# The two cottons (Wen et al. 2026). Both ORIGINATE HERE -- neither csRNAnet nor
+# plant-design has an entry -- so push them upstream before using cotton beyond
+# this repo, or a locus in test here becomes train there.
+#
+# Names are NCBI RefSeq ACCESSIONS, not the community Chr01 / A01-D13 labels,
+# because FASTA and annotation both come from the same RefSeq release and
+# extract_loci matches literally. A readable-but-wrong name yields zero loci in
+# silence. The A/D mapping below is from the assembly report, not assumed.
+#
+# Assigned from peak counts as always:
+#     python config/write_split_csvs.py --peak-counts -e G.arboreum-ovule_GROcap
+#     python config/write_split_csvs.py --peak-counts -e G.hirsutum-ovule_GROcap
+# ---------------------------------------------------------------------------
+
+# G.arboreum -- diploid AA, 13 chromosomes, 95,714 peaks, target 19,143.
+# Exhaustively optimal: spread 2,694 (14.1% of target), which is in family with
+# C.griseus (17.5%) and C.elegans (12%). No pairing constraint applies.
+#   fold 0 19,968 (20.9%)   fold 1 19,607 (20.5%)   fold 2 20,356 (21.3%)
+#   fold 3 18,121 (18.9%)   fold 4 17,662 (18.5%)
+G.arboreum:
+  0: ["NC_069070.1", "NC_069073.1", "NC_069078.1"]
+  1: ["NC_069071.1", "NC_069076.1", "NC_069079.1"]
+  2: ["NC_069072.1", "NC_069075.1", "NC_069082.1"]
+  3: ["NC_069074.1", "NC_069081.1"]
+  4: ["NC_069077.1", "NC_069080.1"]
+
+# G.hirsutum -- tetraploid AD, 26 chromosomes, 171,640 peaks, target 34,328.
+#
+# HOMOEOLOGS SHARE A FOLD. A0i and D0i are ~96%+ identical, so splitting a pair
+# across train/test puts recognisably the same sequence on both sides (~85
+# differences per 2114 bp window). That would inflate the tetraploid side of the
+# diploid-vs-tetraploid comparison these two libraries exist to make. Same rule
+# as the C.griseus chromosome-1 arms: judge the sequence by what it is.
+#
+# The pairing is exact and was read from the assembly report for
+# GCF_007990345.1, not inferred: NC_053424.1-NC_053436.1 are A01-A13 and
+# NC_053437.1-NC_053449.1 are D01-D13, so the homoeolog of index i is i+13.
+#
+# It costs real balance and the cost is stated rather than hidden: spread 6,509
+# (19.0% of target), the worst in this file, against 950 (2.8%) if the 26
+# chromosomes were free. Both figures are optimal for their constraint --
+# exhaustive over every partition of the 13 pair-units into 5 non-empty blocks
+# for the former, extensive local search for the latter. Most of the excess is
+# structural: A05+D05 (18,113) and A11+D11 (16,700) are half a fold each.
+# DO NOT "rebalance" this by separating a pair.
+#
+#   fold 0 36,732 (21.4%)   fold 1 36,854 (21.5%)   fold 2 36,009 (21.0%)
+#   fold 3 31,700 (18.5%)   fold 4 30,345 (17.7%)
+G.hirsutum:
+  # A01 A02 A13 / D01 D02 D13
+  0: ["NC_053424.1", "NC_053425.1", "NC_053436.1", "NC_053437.1", "NC_053438.1", "NC_053449.1"]
+  # A03 A06 A07 / D03 D06 D07
+  1: ["NC_053426.1", "NC_053429.1", "NC_053430.1", "NC_053439.1", "NC_053442.1", "NC_053443.1"]
+  # A04 A09 A10 / D04 D09 D10
+  2: ["NC_053427.1", "NC_053432.1", "NC_053433.1", "NC_053440.1", "NC_053445.1", "NC_053446.1"]
+  # A05 A08 / D05 D08
+  3: ["NC_053428.1", "NC_053431.1", "NC_053441.1", "NC_053444.1"]
+  # A11 A12 / D11 D12
+  4: ["NC_053434.1", "NC_053435.1", "NC_053447.1", "NC_053448.1"]
+
+# S.moellendorffii is deliberately absent, for the same structural reason as
+# S.pombe but more starkly: v1.0 has NO chromosomes at all (759 scaffolds,
+# empty Ensembl karyotype), so chromosome folds do not exist to be assigned.
+# It uses peak-level folds only --
+# config/splits/S.moellendorffii_random_fold_assignments.csv, written by
+# src/data_preprocessing/make_random_splits.py (already generic; pass
+# --experiment/--output). Do NOT add an entry here.
+#
+# C.griseus WAS absent pending peaks and is now assigned above, from
+# C.griseus-CHO_GROcap. Reproduce with
+#     python config/write_split_csvs.py --peak-counts -e C.griseus-CHO_GROcap
+# Never fill an entry in by sequence length -- that is not this project's
+# method, and it is exactly how the C.elegans entry went wrong.

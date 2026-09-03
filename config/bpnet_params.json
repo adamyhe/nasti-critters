@@ -1,0 +1,21 @@
+{
+    "batch_size": 64,
+    "learning_rate": 0.0005,
+    "count_loss_weight": 100,
+    "max_epochs": 100,
+    "early_stopping": 20,
+    "n_filters": 512,
+    "n_layers": 8,
+    "in_window": 2114,
+    "out_window": 1000,
+    "random_state": null,
+    "max_jitter": 200,
+    "reverse_complement": true,
+    "shuffle": true,
+    "verbose": false,
+    "controls": null,
+    "blacklist": null,
+    "negatives_ratio": 0.14285714285714285,
+    "n_cpus": null,
+    "n_shuffles": 20
+}

@@ -1,0 +1,1247 @@
+"""ENCODE PRO-cap preprocessing as a DAG.
+
+Covers fetch -> map -> signal -> peaks, terminating at
+data/procap/{experiment}_{pl,mn}.bw and _peaks.bed.gz.
+
+GC-matched negatives are NOT part of this. They are a model-training input
+rather than a label, and are the only thing here that needs bpnet-lite (PyPI
+only, so it cannot go in environment.yml). Excluding them is what keeps the
+whole pipeline runnable from the mamba env with no venv. Run
+src/make_negatives.py separately before training.
+
+Out of scope by design:
+  * resolve_runs.py / build_experiment_config.py -- metadata generation, not DAG
+    work. Run them first; this workflow reads their output.
+  * training -- src/bpnet/fit/launch.py already fans out one model per
+    (experiment, fold) over SLURM.
+  * GC-matched negatives -- src/make_negatives.py, a model-prep step needing
+    the uv venv.
+
+src/data_preprocessing/run_procap_pipeline.py remains the single-experiment
+path and implements the same steps; this file is the parallel/resumable one.
+
+Usage:
+    snakemake -s workflow/Snakefile -n                     # dry run
+    snakemake -s workflow/Snakefile -c8                    # 8 cores, all targets
+    snakemake -s workflow/Snakefile -c8 --config tier=include
+    snakemake -s workflow/Snakefile -c8 experiments=S.cerevisiae-Ino80ctl_PROcap
+    snakemake -s workflow/Snakefile --dag | dot -Tsvg > dag.svg
+
+Config overrides (--config k=v):
+    tier=include|conditional        restrict to a manifest tier
+    experiments=A,B                 restrict to specific experiment IDs
+    fastq_dir=/scratch/.../fastq    where raw FASTQs live (or $PROCAP_FASTQ_DIR)
+    allow_bundled_tap=1             include experiments whose TAP+/TAP- split
+                                    is unresolved (almost never correct)
+    reverse_strand=A,B              experiments whose library is antisense
+"""
+
+import csv
+import os
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(workflow.basedir).parent
+CONFIGS = REPO_ROOT / "config"
+PLANNING = REPO_ROOT / "planning"
+
+
+def load_yaml(path):
+    import yaml
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+EXPERIMENTS = load_yaml(CONFIGS / "experiment_config.yaml")["experiments"]
+GENOMES = load_yaml(CONFIGS / "genomes.yaml")["species"]
+PIPELINE = load_yaml(CONFIGS / "procap_pipeline.yaml")
+STEPS = PIPELINE["steps"]
+FIVE_PRIME_MATE = STEPS["signal"].get("five_prime_mate", "R1")
+
+# Main chromosomes per species. PINTS parallelises across chromosomes, so this
+# is the ceiling on useful --thread. Sourced from genomes.yaml (genome
+# structure) rather than chrom_splits.yaml (fold assignment) -- S. pombe has no
+# entry in the latter, and the two are answering different questions anyway.
+N_CHROMS = {sp: g["n_chromosomes"] for sp, g in GENOMES.items()}
+
+# Which genomes are big enough to need mouse-sized alignment memory. Keyed off
+# star_sa_index_nbases (itself a function of genome length) rather than a
+# species name: `== "M.musculus"` was correct while mouse was the only
+# multi-gigabase genome, but C.griseus (CriGri-PICRH-1.0, 2.37 Gb) is the same
+# order of magnitude, and under the old test it would have been handed 16 GB and
+# a 3 GB index reserve -- reproducing the "not enough memory for BAM sorting"
+# failure the explicit --limitBAMsortRAM was added to prevent.
+LARGE_GENOME = {sp for sp, g in GENOMES.items() if g["star_sa_index_nbases"] >= 14}
+
+# Cap concurrent ENA transfers. `-c16` would otherwise start 16 wgets, which
+# ENA throttles; fetch_fastqs.py used -j 4 for the same reason. A custom
+# resource is unconstrained unless a limit exists, so set one by default and
+# let `--resources downloads=N` override it.
+DEFAULT_DOWNLOAD_SLOTS = 4
+try:
+    workflow.global_resources.setdefault("downloads", DEFAULT_DOWNLOAD_SLOTS)
+except AttributeError:  # internal API moved; the CLI flag still works
+    sys.stderr.write(
+        "warning: could not set a default download cap; "
+        f"pass --resources downloads={DEFAULT_DOWNLOAD_SLOTS} to limit "
+        "concurrent ENA transfers\n"
+    )
+
+FASTQ_DIR = Path(
+    config.get("fastq_dir")
+    or os.environ.get("PROCAP_FASTQ_DIR")
+    or (REPO_ROOT / "data" / "fastq")
+)
+WORK = REPO_ROOT / "data" / "procap_work"
+OUT = REPO_ROOT / "data" / "procap"
+QC = REPO_ROOT / "qc"
+
+ALLOW_BUNDLED_TAP = str(config.get("allow_bundled_tap", "")) in ("1", "true", "True")
+REVERSE_STRAND = set(
+    x for x in str(config.get("reverse_strand", "")).split(",") if x
+)
+
+
+# ---------------------------------------------------------------- target set
+def selected_experiments():
+    names = list(EXPERIMENTS)
+    if config.get("experiments"):
+        wanted = set(str(config["experiments"]).split(","))
+        unknown = wanted - set(names)
+        if unknown:
+            raise WorkflowError(f"unknown experiment(s): {sorted(unknown)}")
+        names = [n for n in names if n in wanted]
+    if config.get("tier"):
+        tiers = set(str(config["tier"]).split(","))
+        names = [n for n in names if EXPERIMENTS[n]["tier"] in tiers]
+
+    keep, skipped = [], []
+    for n in names:
+        raw = EXPERIMENTS[n]["raw"]
+        if not raw["runs"]:
+            skipped.append((n, "no resolved run accessions"))
+        elif raw.get("tap_bundled") and not ALLOW_BUNDLED_TAP:
+            skipped.append((n, "TAP+/TAP- run split unresolved"))
+        else:
+            keep.append(n)
+    for n, why in skipped:
+        logger.warning(f"skipping {n}: {why}")
+    return keep
+
+
+TARGETS = selected_experiments()
+
+# run -> experiment/species/layout/umi. Run-level intermediates are keyed by run,
+# not experiment, so a run shared by two experiments is mapped only once.
+RUN_SPECIES, RUN_LAYOUT, RUN_UMI, RUN_ADAPTER, EXP_RUNS = {}, {}, {}, {}, {}
+RUN_INTERLEAVED = {}
+for name in TARGETS:
+    entry = EXPERIMENTS[name]
+    raw = entry["raw"]
+    EXP_RUNS[name] = list(raw["runs"])
+    for run_id in raw["runs"]:
+        RUN_SPECIES[run_id] = entry["species"]
+        RUN_LAYOUT[run_id] = raw["library_layout"]
+        RUN_UMI[run_id] = raw.get("umi", {}) or {}
+        RUN_ADAPTER[run_id] = raw.get("adapter", "") or ""
+        RUN_INTERLEAVED[run_id] = bool(raw.get("interleaved"))
+
+
+#: Adapter name -> LIST of sequences, from steps.trim.adapters. Resolved here so
+#: a manifest typo fails at DAG construction rather than silently trimming
+#: nothing -- which is the failure mode this whole mechanism exists to prevent.
+#:
+#: A list, not a scalar, because a dimer can be deposited truncated: 43.4% of
+#: SRR12774945 begins five bases into the TruSeq adapter, and fastp matches an
+#: adapter by looking for its BEGINNING in the read, so those reads survive
+#: trimming as pure adapter and STAR drops them as `unmapped: too short`. A
+#: scalar is still accepted and wrapped, so an older config keeps working.
+ADAPTER_SEQS = {
+    name: ([seqs] if isinstance(seqs, str) else list(seqs))
+    for name, seqs in (STEPS["trim"].get("adapters", {}) or {}).items()
+}
+_unknown = sorted({a for a in RUN_ADAPTER.values() if a and a not in ADAPTER_SEQS})
+if _unknown:
+    raise WorkflowError(
+        f"unknown adapter name(s) in the manifest: {_unknown}. "
+        f"Known: {sorted(ADAPTER_SEQS)}. Add the sequence to "
+        f"steps.trim.adapters in config/procap_pipeline.yaml."
+    )
+
+#: Prose UMI location (manifest `umi_loc`) -> fastp --umi_loc value.
+UMI_LOCATIONS = STEPS["dedup"].get("umi_locations", {}) or {}
+
+
+def adapter_fasta(run_id):
+    """Path to the FASTA of adapter sequences for a run, or None to auto-detect.
+
+    fastp takes only ONE --adapter_sequence, so trimming more than one variant
+    needs --adapter_fasta and therefore a file. The `adapter_fasta` rule writes
+    it from ADAPTER_SEQS, which keeps config/procap_pipeline.yaml the single
+    source of truth and lets Snakemake serialise the write.
+    """
+    name = RUN_ADAPTER.get(run_id, "")
+    return f"{WORK}/adapters/{name}.fa" if name else None
+
+
+def umi_arg(run_id):
+    """fastp --umi flags for a run, or "" for the 35 libraries without a UMI.
+
+    --umi_loc comes from the MANIFEST via steps.dedup.umi_locations, not from
+    the library layout. It used to be `read2 if paired else read1`, which was
+    backwards for the only three experiments it applied to: the Spt5 UMI sits at
+    the start of READ 1, established by locating the first genome-matching
+    24-mer in each read (modal offset 10 in read 1, 0 in read 2).
+    """
+    if not has_umi(run_id):
+        return ""
+    umi = RUN_UMI[run_id]
+    loc = umi.get("loc", "")
+    if loc not in UMI_LOCATIONS:
+        raise WorkflowError(
+            f"run {run_id}: umi_loc {loc!r} has no fastp mapping. "
+            f"Known: {sorted(UMI_LOCATIONS)}. Add it to "
+            f"steps.dedup.umi_locations in config/procap_pipeline.yaml."
+        )
+    fastp_loc = UMI_LOCATIONS[loc]
+    if fastp_loc == "read2" and not is_paired(run_id):
+        raise WorkflowError(
+            f"run {run_id}: umi_loc {loc!r} maps to fastp read2, but the run is "
+            "single-end. A 3'-adaptor UMI on a single-end read sits at the "
+            "read's 3' END, which fastp --umi_loc cannot extract."
+        )
+    return f"--umi --umi_loc {fastp_loc} --umi_len {umi['len']}"
+
+
+#: chrom_style -> PINTS --chromosome-start-with. An explicit map rather than the
+#: `"chr" if ucsc else ""` it replaced, so adding a naming style forces a
+#: deliberate choice instead of silently falling through to "".
+#:
+#: "" is safe for the non-UCSC styles because every name starts with the empty
+#: string and the bigWigs PINTS reads are already restricted to
+#: main_chromosomes by `bedgraph`. It is NOT safe to default to "chr", which is
+#: PINTS' own default and matches nothing for these -- the silent-zero-peaks bug
+#: this map exists to prevent.
+PINTS_CHROM_PREFIX = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": ""}
+
+
+def pints_chrom_prefix(species):
+    style = GENOMES[species]["chrom_style"]
+    if style not in PINTS_CHROM_PREFIX:
+        raise WorkflowError(
+            f"{species}: chrom_style {style!r} has no PINTS prefix. Known: "
+            f"{sorted(PINTS_CHROM_PREFIX)}. Add it to PINTS_CHROM_PREFIX in "
+            "workflow/Snakefile and to run_procap_pipeline.py."
+        )
+    return PINTS_CHROM_PREFIX[style]
+
+
+def decoy_accessions(species):
+    """Non-assembly sequences concatenated into this species' STAR index.
+
+    Two rationales, one mechanism:
+
+    * `rdna_accession` -- a SINK. The decoy is the true, full-length rDNA, so
+      rDNA reads score better against it than against the degenerate rDNA-like
+      fragments scattered through the nuclear genome. Only where the array is
+      MISSING from the assembly; see the rDNA section in CLAUDE.md.
+    * `organelle_accessions` -- chloroplast/mitochondrion where the reference
+      omits them. Without these the reads are not merely mismapped, they are
+      unmappable: 12.2% of the C. reinhardtii library and 8.6% of P. patens are
+      organellar, and Ensembl's dna.toplevel for both holds no organelle contig.
+
+    Neither can reach a fold, because chrom_splits.yaml lists only main
+    chromosomes, and neither reaches the peak-calling space either -- `bedgraph`
+    greps to main_chromosomes before bedGraphToBigWig ever sees the counts.
+    """
+    g = GENOMES[species]
+    accs = [g["rdna_accession"]] if g.get("rdna_accession") else []
+    return accs + list(g.get("organelle_accessions") or [])
+
+
+def decoy_fastas(species, ext=""):
+    return [f"{REPO_ROOT}/data/decoy/{a}.fa{ext}" for a in decoy_accessions(species)]
+
+
+def annotation_path(species):
+    """Fetched annotation for a species. GFF3 for the Ensembl-named assemblies,
+    GTF for the UCSC ones -- the source is chosen so chromosome names match the
+    FASTA, and swapping it would silently yield zero features."""
+    return (f"{REPO_ROOT}/data/annotation/{species}."
+            f"{GENOMES[species]['annotation_format']}.gz")
+
+
+def is_interleaved(run_id):
+    """Deposited as one SINGLE file that actually holds interleaved mates.
+
+    An archive error, not a layout: SRA labels every read /1 when dumping a run
+    as single-end, so ENA reports SINGLE. Detected only from the reads --
+    SRR19034544 has each instrument name twice, consecutive reads sharing
+    flowcell:lane:tile:x:y, and mate2 the reverse complement of mate1.
+    """
+    return RUN_INTERLEAVED.get(run_id, False)
+
+
+def is_paired(run_id):
+    """Should this run be PROCESSED as paired?
+
+    True for a genuinely paired deposit and for an interleaved one. Left
+    deliberately distinct from RUN_LAYOUT, which records what the archive says
+    and stays SINGLE for the interleaved run.
+
+    This is what makes final_bam's `samtools view -f 64` fire. Without it every
+    R2 contributed its 5' end to the signal -- the RNA 3' end, on the opposite
+    strand, displaced downstream by the fragment length -- which showed up in
+    the orientation QC as an antisense peak just DOWNSTREAM of the TSS instead
+    of divergent upstream, with antisense/sense of exactly 1.00 (one R2 per R1).
+    """
+    return (str(RUN_LAYOUT.get(run_id, "")).upper().startswith("PAIRED")
+            or is_interleaved(run_id))
+
+
+def has_umi(run_id):
+    return bool(RUN_UMI.get(run_id, {}).get("enabled"))
+
+
+# --------------------------------------------------- FASTQ names and URLs
+# ENA-reported paths, not constructed: ENA's layout varies between
+# vol1/fastq/<prefix>/<run>/ and vol1/fastq/<prefix>/<padded>/<run>/.
+FASTQ_URL, FASTQ_MD5, RUN_FASTQS = {}, {}, {}
+_resolved = PLANNING / "manifest_runs_resolved.tsv"
+if _resolved.exists():
+    with _resolved.open() as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            runs = [r for r in (row["run_accession"] or "").split(";") if r]
+            ftps = [u for u in (row["fastq_ftp"] or "").split(";") if u]
+            md5s = [m for m in (row["fastq_md5"] or "").split(";") if m]
+            for run_id in runs:
+                for i, url in enumerate(ftps):
+                    base = Path(url).name
+                    if f"/{run_id}/" not in url and not base.startswith(run_id):
+                        continue
+                    FASTQ_URL[base] = url if url.startswith("http") else f"https://{url}"
+                    if i < len(md5s):
+                        FASTQ_MD5[base] = md5s[i]
+                    RUN_FASTQS.setdefault(run_id, [])
+                    if base not in RUN_FASTQS[run_id]:
+                        RUN_FASTQS[run_id].append(base)
+
+
+def run_fastqs(run_id):
+    """FASTQ basenames ON DISK for a run, ENA-reported where possible.
+
+    Keyed on RUN_LAYOUT, the DEPOSITED layout -- not is_paired(), which is the
+    processing decision and is True for an interleaved single file too. Using
+    is_paired() here would make the DAG look for two files that do not exist.
+    """
+    if RUN_FASTQS.get(run_id):
+        return sorted(RUN_FASTQS[run_id])
+    return ([f"{run_id}_1.fastq.gz", f"{run_id}_2.fastq.gz"]
+            if str(RUN_LAYOUT.get(run_id, "")).upper().startswith("PAIRED")
+            else [f"{run_id}.fastq.gz"])
+
+
+GENOME_FILES = {Path(g["fasta"]).name: sp for sp, g in GENOMES.items()}
+
+wildcard_constraints:
+    exp="|".join(re.escape(e) for e in EXPERIMENTS) if EXPERIMENTS else "$^",
+    run="[A-Z]RR[0-9]+",
+    # INSDC accessions come in several shapes and the narrow 2-letter+6-digit
+    # form was not enough: U03843 (the C. reinhardtii mitochondrion) is
+    # 1 letter + 5 digits and failed to match, which surfaced as a
+    # MissingInputException on star_index rather than as anything about
+    # wildcards. Covers the 1+5, 2+6 and 4+8 families, with an optional version.
+    accession="[A-Z]{1,4}[0-9]{5,8}(\\.[0-9]+)?",
+    ext="gtf|gff3",
+    species="|".join(re.escape(s) for s in GENOMES),
+    genome_file="|".join(re.escape(g) for g in GENOME_FILES) if GENOME_FILES else "$^",
+    strand="pl|mn",
+    fq=".+\\.fastq\\.gz",
+
+
+# ------------------------------------------------------------------- targets
+rule all:
+    """Label generation: bigWigs and peak calls.
+
+    GC-matched negatives are deliberately NOT here. They are a model-training
+    input, not a label, and the only thing in this repo that needs bpnet-lite --
+    a PyPI-only package that cannot go in environment.yml. Keeping them out is
+    what lets the whole pipeline run from the mamba env with no venv and no GPU
+    stack. Build them separately with src/make_negatives.py before training.
+    """
+    input:
+        expand(f"{OUT}/{{exp}}_pl.bw", exp=TARGETS),
+        expand(f"{OUT}/{{exp}}_mn.bw", exp=TARGETS),
+        expand(f"{OUT}/{{exp}}_peaks.bed.gz", exp=TARGETS),
+        expand(f"{QC}/orientation/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/umi/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/rrna/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/reads/{{exp}}.tsv", exp=TARGETS),
+        f"{QC}/stats/experiment_stats.tsv",
+
+
+rule qc:
+    """Just the QC, assuming signal and peaks already exist."""
+    input:
+        expand(f"{QC}/orientation/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/umi/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/rrna/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/reads/{{exp}}.tsv", exp=TARGETS),
+        f"{QC}/stats/experiment_stats.tsv",
+
+
+rule stats:
+    """Just the mapped-reads + peaks table. `snakemake stats -c8`.
+
+    Remember the target name must come BEFORE --config, or Snakemake reads it
+    as a config entry: `snakemake stats -c8 --config tier=include`.
+    """
+    input:
+        f"{QC}/stats/experiment_stats.tsv",
+        f"{QC}/stats/experiment_stats.md",
+
+
+rule fetch_only:
+    """Every input file, and nothing computed.
+
+    Fetching is capped at 4 concurrent transfers (the `downloads` resource), so
+    during this phase a big `-c` buys nothing -- the jobs are one thread each and
+    I/O bound. Run this on a transfer or login node first, then run the compute
+    phase with a large `-c` where it can actually parallelise.
+    """
+    input:
+        [f"{FASTQ_DIR}/{fq}" for exp in TARGETS for run in EXP_RUNS[exp]
+         for fq in run_fastqs(run)],
+        [f"{REPO_ROOT}/{g['fasta']}" for sp, g in GENOMES.items()
+         if sp in {EXPERIMENTS[e]["species"] for e in TARGETS}],
+
+
+rule signal_only:
+    """Stop after bigWigs -- useful for the strand-orientation QC gate."""
+    input:
+        expand(f"{OUT}/{{exp}}_pl.bw", exp=TARGETS),
+        expand(f"{OUT}/{{exp}}_mn.bw", exp=TARGETS),
+
+
+# ------------------------------------------------------------------ genomes
+rule fetch_genome:
+    output:
+        protected(f"{REPO_ROOT}/data/{{genome_file}}")
+    params:
+        url=lambda w: GENOMES[GENOME_FILES[w.genome_file]]["fasta_url"],
+    resources:
+        downloads=1,
+    log:
+        f"{WORK}/logs/fetch_genome/{{genome_file}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output}) $(dirname {log})
+        wget -nv -c --tries=3 --waitretry=10 --retry-connrefused \
+             --timeout=60 -O {output}.gz {params.url} > {log} 2>&1
+        gunzip -f {output}.gz >> {log} 2>&1
+        """
+
+
+rule faidx:
+    input:
+        f"{REPO_ROOT}/data/{{genome_file}}"
+    output:
+        f"{REPO_ROOT}/data/{{genome_file}}.fai"
+    log:
+        f"{WORK}/logs/faidx/{{genome_file}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) && samtools faidx {input} > {log} 2>&1"
+
+
+rule chrom_sizes:
+    """Main chromosomes only -- decoys are deliberately NOT listed.
+
+    An earlier docstring here (and CLAUDE.md) said the opposite: that the decoy
+    had to appear in chrom.sizes because genomecov would emit rows for it and
+    bedGraphToBigWig aborts on an unlisted contig. That reasoning is sound but
+    the premise is not, because `bedgraph` greps to main_chromosomes BEFORE
+    writing, so decoy rows never reach bedGraphToBigWig. The rule also declared
+    the decoy .fai as an input that its shell never used. Both fixed; if you
+    ever remove the filter from `bedgraph`, this has to change with it.
+    """
+    input:
+        fai=lambda w: f"{REPO_ROOT}/{GENOMES[w.species]['fasta']}.fai",
+    output:
+        f"{WORK}/genome/{{species}}.chrom.sizes"
+    log:
+        f"{WORK}/logs/chrom_sizes/{{species}}.log"
+    params:
+        keep=lambda w: "|".join(f"^{c}\t" for c in GENOMES[w.species]["main_chromosomes"]),
+    shell:
+        # Main chromosomes only. Scaffolds cannot reach a fold, and their sparse
+        # coverage makes the pl and mn bigWigs carry different contig sets, which
+        # PINTS rejects ("bw_pl and bw_mn should have the same chromosomes").
+        # The rDNA sink is excluded here for the same reason -- it belongs in the
+        # STAR index, not in the peak-calling space.
+        "mkdir -p $(dirname {output}) $(dirname {log}) && "
+        "cut -f1,2 {input.fai} | grep -E '{params.keep}' > {output} 2> {log}"
+
+
+rule fetch_decoy:
+    """rDNA decoy sequence from ENA.
+
+    Run-on assays capture Pol I as well as Pol II, so PRO-cap libraries carry
+    abundant rDNA reads. Where the assembly has no rDNA (mm10, dm6 and ce11 have
+    none at all), those reads mismap onto rDNA-like fragments in the nuclear
+    genome; a decoy contig absorbs them instead. This is why ENCODE aligns to
+    genome + rDNA.
+    """
+    output:
+        f"{REPO_ROOT}/data/decoy/{{accession}}.fa"
+    params:
+        url=lambda w: f"https://www.ebi.ac.uk/ena/browser/api/fasta/{w.accession}",
+    resources:
+        downloads=1,
+    retries: 2
+    log:
+        f"{WORK}/logs/fetch_decoy/{{accession}}.log"
+    shell:
+        "mkdir -p $(dirname {output}) $(dirname {log}) && "
+        "wget -nv --tries=3 --waitretry=10 --retry-connrefused "
+        "--timeout=60 -O {output} {params.url} > {log} 2>&1 && test -s {output}"
+
+
+rule star_index:
+    """One index per species: genome + every decoy (rDNA sink, organelles).
+
+    Keep this in step with star_index() in run_procap_pipeline.py: an index
+    built from a different contig set silently gives the two drivers different
+    alignments.
+    """
+    input:
+        fasta=lambda w: f"{REPO_ROOT}/{GENOMES[w.species]['fasta']}",
+        decoy=lambda w: decoy_fastas(w.species),
+    output:
+        directory(f"{REPO_ROOT}/data/star/{{species}}")
+    params:
+        nbases=lambda w: GENOMES[w.species]["star_sa_index_nbases"],
+    threads: 16
+    resources:
+        # mm10/CriGri genomeGenerate needs ~32 GB; compact genomes need far less.
+        mem_mb=lambda w: 40000 if w.species in LARGE_GENOME else 16000,
+        runtime=240,
+    log:
+        f"{WORK}/logs/star_index/{{species}}.log"
+    shell:
+        r"""
+        mkdir -p {output} $(dirname {log})
+        STAR --runThreadN {threads} --runMode genomeGenerate \
+             --genomeDir {output} --genomeFastaFiles {input.fasta} {input.decoy} \
+             --genomeSAindexNbases {params.nbases} > {log} 2>&1
+        """
+
+
+# -------------------------------------------------------------------- fetch
+rule fetch_fastq:
+    """One ENA FASTQ, md5-verified, staged then renamed so a truncated
+    transfer can never be mistaken for a complete one."""
+    output:
+        protected(f"{FASTQ_DIR}/{{fq}}")
+    params:
+        url=lambda w: FASTQ_URL[w.fq],
+        md5=lambda w: FASTQ_MD5.get(w.fq, ""),
+    retries: 2
+    resources:
+        downloads=1,
+        runtime=180,
+    log:
+        f"{WORK}/logs/fetch_fastq/{{fq}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output}) $(dirname {log})
+        tmp=$(dirname {output})/.incoming
+        mkdir -p "$tmp"
+        # -nv not -q: quiet suppresses the error text too, so a failed
+        # transfer left an empty log. Retry because ENA throttles by
+        # refusing connections. Keep in step with fetch_fastqs.py.
+        wget -nv -c --tries=3 --waitretry=10 --retry-connrefused \
+             --timeout=60 -P "$tmp" {params.url} > {log} 2>&1
+        if [ -n "{params.md5}" ]; then
+            actual=$(md5sum "$tmp/{wildcards.fq}" 2>/dev/null | cut -d' ' -f1 \
+                     || md5 -q "$tmp/{wildcards.fq}")
+            if [ "$actual" != "{params.md5}" ]; then
+                echo "md5 mismatch: $actual != {params.md5}" >> {log}
+                exit 1
+            fi
+        fi
+        mv "$tmp/{wildcards.fq}" {output}
+        """
+
+
+# ---------------------------------------------------------------------- map
+rule deinterleave:
+    """Split a deposited-SINGLE file that actually holds interleaved mates.
+
+    Mates alternate record-by-record, so odd records are mate 1 and even mate 2.
+    Verified interleaved 200 M reads deep, not just at the head.
+
+    Read names are REWRITTEN to the instrument name with the /1 suffix removed,
+    so both mates share a name and downstream tools see a real pair. SRA gives
+    the two mates different accession-based names (SRR19034544.1 and .2) while
+    labelling both /1, which is exactly what hid the pairing. Nothing here uses
+    the SRA-style name -- this run carries no UMI, so fastp's ':'-appended UMI
+    convention and umi_tools' --umi-separator are not in play.
+
+    Single pass: awk holds both gzip pipes open. Two passes over a 21 GB file
+    would be the obvious alternative and costs twice the I/O for nothing.
+    """
+    input:
+        lambda w: f"{FASTQ_DIR}/{run_fastqs(w.run)[0]}"
+    output:
+        r1=temp(f"{WORK}/runs/{{run}}/mate_1.fastq.gz"),
+        r2=temp(f"{WORK}/runs/{{run}}/mate_2.fastq.gz"),
+    resources:
+        runtime=180,
+    log:
+        f"{WORK}/logs/deinterleave/{{run}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output.r1}) $(dirname {log})
+        exec 2> {log}
+        set -o pipefail
+        # Single line on purpose: the awk program must reach the shell with
+        # backslash-n intact, so it cannot be written across source lines.
+        # Identical to AWK_DEINTERLEAVE in run_procap_pipeline.py.
+        zcat {input} | paste - - - - \
+          | awk -F'\t' -v o1="{output.r1}" -v o2="{output.r2}" '{{ name = $1; sub(/^@[^ \t]+[ \t]+/, "", name); sub(/\/[12]$/, "", name); rec = "@" name "\n" $2 "\n+\n" $4; if (NR % 2 == 1) print rec | ("gzip > " o1); else print rec | ("gzip > " o2) }}'
+        """
+
+
+rule adapter_fasta:
+    """Write a named adapter's sequences to a FASTA for fastp --adapter_fasta.
+
+    A rule rather than an inline write so Snakemake owns the file: many trim
+    jobs share one adapter, and a write inside the trim shell would race.
+    """
+    output:
+        f"{WORK}/adapters/{{adapter}}.fa"
+    run:
+        seqs = ADAPTER_SEQS[wildcards.adapter]
+        out = Path(output[0])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("".join(
+            f">{wildcards.adapter}_{i}\n{seq}\n" for i, seq in enumerate(seqs)
+        ))
+
+
+rule trim:
+    """fastp: adapter trimming, plus UMI extraction for libraries that have one.
+
+    The adapter is passed EXPLICITLY per run, as a FASTA (see params.adapter).
+    Relying on fastp's auto-detection is what let 37 of 69 FASTQs reach STAR
+    with the adapter still attached, costing up to 95.9% of a library to
+    `unmapped: too short`.
+
+    A FASTA rather than --adapter_sequence because one name can carry several
+    sequences, and it has to: 43.4% of SRR12774945 and 18.7% of SRR6660402
+    begin FIVE BASES INTO the TruSeq adapter, and fastp looks for an adapter's
+    beginning, so those reads are never trimmed at all.
+    """
+    input:
+        # An interleaved deposit is split first; everything else is read as
+        # fetched.
+        fastq=lambda w: (
+            [f"{WORK}/runs/{w.run}/mate_1.fastq.gz",
+             f"{WORK}/runs/{w.run}/mate_2.fastq.gz"]
+            if is_interleaved(w.run)
+            else [f"{FASTQ_DIR}/{fq}" for fq in run_fastqs(w.run)]
+        ),
+        # [] for a run with no recorded adapter, which lets fastp auto-detect.
+        adapter=lambda w: (lambda f: [f] if f else [])(adapter_fasta(w.run)),
+    output:
+        trimmed=temp([f"{WORK}/runs/{{run}}/trim_1.fastq.gz",
+                      f"{WORK}/runs/{{run}}/trim_2.fastq.gz"]),
+        json=f"{WORK}/runs/{{run}}/fastp.json",
+        html=f"{WORK}/runs/{{run}}/fastp.html",
+    params:
+        encode=STEPS["trim"]["encode_params"],
+        # Explicit adapter, from the manifest via raw.adapter. fastp's
+        # auto-detection cannot find these: it looks for an overrepresented
+        # TAIL, and a PRO-cap adapter starts at a different offset in every read
+        # because inserts vary from 4 to 55 bp. It reported
+        # `No adapter detected` and trimmed 0 reads on libraries that are 96%
+        # adapter. Empty means no adapter was recorded, which is the honest
+        # default: fastp then auto-detects, as every library did before this
+        # mechanism existed.
+        # BOTH flags, deliberately. --adapter_fasta carries every variant and is
+        # what catches a truncated dimer; --adapter_sequence pins the canonical
+        # one and, as a side effect, SUPPRESSES fastp's auto-detection, so
+        # trimming is a pure function of the config rather than of the data.
+        # Verified on SRR12774945 that pinning does not cost the fix: with the
+        # fasta's truncated entry present, too_short is 904,438 (fasta alone) vs
+        # 903,891 (fasta + pinned sequence) on a 2 M subsample, against ~27,000
+        # for every config lacking that entry.
+        adapter=lambda w, input: (
+            f"--adapter_sequence {ADAPTER_SEQS[RUN_ADAPTER[w.run]][0]} "
+            f"--adapter_fasta {input.adapter[0]}" if input.adapter else ""
+        ),
+        poly=STEPS["trim"].get("poly_params", ""),
+        io=lambda w, input, output: (
+            f"-i {input.fastq[0]} -I {input.fastq[1]} "
+            f"-o {output.trimmed[0]} -O {output.trimmed[1]}"
+            if is_paired(w.run)
+            else f"-i {input.fastq[0]} -o {output.trimmed[0]}"
+        ),
+        umi=lambda w: umi_arg(w.run),
+        # Snakemake requires every declared output to exist; single-end runs
+        # never produce a second file, so create an empty placeholder.
+        touch_r2=lambda w, output: (
+            "" if is_paired(w.run) else f"touch {output.trimmed[1]}"
+        ),
+    threads: 8
+    log:
+        f"{WORK}/logs/trim/{{run}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output.json}) $(dirname {log})
+        fastp {params.encode} {params.adapter} {params.poly} {params.io} {params.umi} \
+              --json {output.json} --html {output.html} \
+              --thread {threads} > {log} 2>&1
+        {params.touch_r2}
+        """
+
+
+rule align:
+    input:
+        trimmed=lambda w: (
+            [f"{WORK}/runs/{w.run}/trim_1.fastq.gz",
+             f"{WORK}/runs/{w.run}/trim_2.fastq.gz"]
+            if is_paired(w.run) else [f"{WORK}/runs/{w.run}/trim_1.fastq.gz"]
+        ),
+        index=lambda w: f"{REPO_ROOT}/data/star/{RUN_SPECIES[w.run]}",
+    output:
+        bam=temp(f"{WORK}/runs/{{run}}/Aligned.sortedByCoord.out.bam"),
+        # Declared so it is a tracked product rather than a file that merely
+        # happens to survive: the bam above is temp(), and experiment_stats
+        # reads its mapping rates from here after the bam is gone.
+        log_final=f"{WORK}/runs/{{run}}/Log.final.out",
+    params:
+        encode=STEPS["align"]["encode_params"],
+        prefix=lambda w: f"{WORK}/runs/{w.run}/",
+        reads=lambda w, input: " ".join(input.trimmed),
+        # --limitBAMsortRAM defaults to the size of the GENOME INDEX, not to
+        # anything about the library. On a small genome that budget is tiny, so
+        # a deep library fails at the sort step with
+        #   "EXITING because of fatal ERROR: not enough memory for BAM sorting"
+        # -- counter-intuitively, small genomes are the ones that break. Give it
+        # the rule's own memory minus a reserve for the loaded index.
+        sort_ram=lambda w, resources: int(
+            (resources.get("mem_mb", 16000)
+             - (30000 if RUN_SPECIES[w.run] in LARGE_GENOME else 3000)) * 1e6
+        ),
+    threads: 12
+    resources:
+        mem_mb=lambda w: 40000 if RUN_SPECIES[w.run] in LARGE_GENOME else 16000,
+        runtime=360,
+    log:
+        f"{WORK}/logs/align/{{run}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {log})
+        STAR --genomeDir {input.index} --runThreadN {threads} \
+             --readFilesIn {params.reads} --readFilesCommand zcat \
+             --outFileNamePrefix {params.prefix} \
+             --outSAMtype BAM SortedByCoordinate \
+             --limitBAMsortRAM {params.sort_ram} \
+             {params.encode} > {log} 2>&1
+        """
+
+
+rule filter_unique:
+    """STAR gives uniquely mapped reads MAPQ 255, which is the ENCODE filter."""
+    input:
+        f"{WORK}/runs/{{run}}/Aligned.sortedByCoord.out.bam"
+    output:
+        bam=temp(f"{WORK}/runs/{{run}}/unique.bam"),
+        bai=temp(f"{WORK}/runs/{{run}}/unique.bam.bai"),
+    params:
+        encode=STEPS["filter"]["encode_params"],
+    threads: 4
+    log:
+        f"{WORK}/logs/filter_unique/{{run}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {log})
+        samtools view -b {params.encode} -@ $(({threads} - 1)) -o {output.bam} {input} > {log} 2>&1
+        samtools index {output.bam} >> {log} 2>&1
+        """
+
+
+rule dedup:
+    """umi_tools, only for libraries carrying a UMI. PRO-cap legitimately stacks
+    many reads on one initiation base, so non-UMI libraries are never deduped."""
+    input:
+        bam=f"{WORK}/runs/{{run}}/unique.bam",
+        bai=f"{WORK}/runs/{{run}}/unique.bam.bai",
+    output:
+        temp(f"{WORK}/runs/{{run}}/dedup.bam")
+    params:
+        # --paired says the BAM is paired-end; --method picks the UMI clustering
+        # algorithm. They are orthogonal -- the old code returned one OR the
+        # other, so paired runs silently used the default method while
+        # single-end runs were forced onto "unique".
+        mode=lambda w: " ".join(filter(None, [
+            f"--method={STEPS['dedup']['method']}",
+            f"--umi-separator={STEPS['dedup']['umi_separator']}",
+            "--paired" if is_paired(w.run) else "",
+        ])),
+    resources:
+        mem_mb=16000,
+    log:
+        f"{WORK}/logs/dedup/{{run}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) && "
+        "umi_tools dedup -I {input.bam} -S {output} {params.mode} > {log} 2>&1"
+
+
+rule final_bam:
+    """The reads that contribute signal. For paired-end runs, ONE MATE ONLY.
+
+    `bedtools genomecov -5` reports the 5' end of every alignment record, so on
+    a paired BAM it counts R1's 5' end (the initiation site) and R2's 5' end
+    (the RNA 3' end, on the opposite strand) alike -- about half of each track
+    would be strand-flipped 3'-end signal. The mate is chosen by
+    steps.signal.five_prime_mate; see the warning there, it is a convention for
+    the paired S.cerevisiae libraries rather than something their metadata
+    states.
+
+    Filtering happens HERE, after dedup, because umi_tools --paired needs both
+    mates.
+    """
+    input:
+        lambda w: (f"{WORK}/runs/{w.run}/dedup.bam" if has_umi(w.run)
+                   else f"{WORK}/runs/{w.run}/unique.bam")
+    output:
+        bam=f"{WORK}/runs/{{run}}/final.bam",
+        bai=f"{WORK}/runs/{{run}}/final.bam.bai",
+    params:
+        # -f 64 = first in pair, -f 128 = second. Single-end reads have neither
+        # bit set, so this must only be applied to paired runs.
+        select=lambda w: (
+            f"samtools view -b -f {64 if FIVE_PRIME_MATE == 'R1' else 128}"
+            if is_paired(w.run) else ""
+        ),
+    log:
+        f"{WORK}/logs/final_bam/{{run}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {log})
+        if [ -n "{params.select}" ]; then
+            {params.select} -o {output.bam} {input} > {log} 2>&1
+        else
+            ln -f {input} {output.bam}
+        fi
+        samtools index {output.bam} >> {log} 2>&1
+        """
+
+
+rule merge_runs:
+    """Pool technical/biological replicate runs for one experiment."""
+    input:
+        lambda w: [f"{WORK}/runs/{r}/final.bam" for r in EXP_RUNS[w.exp]]
+    output:
+        bam=temp(f"{WORK}/exp/{{exp}}/merged.bam"),
+        bai=temp(f"{WORK}/exp/{{exp}}/merged.bam.bai"),
+    threads: 4
+    log:
+        f"{WORK}/logs/merge_runs/{{exp}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output.bam}) $(dirname {log})
+        exec > {log} 2>&1
+        if [ $(echo {input} | wc -w) -gt 1 ]; then
+            samtools merge -f -@ $(({threads} - 1)) -o {output.bam} {input}
+        else
+            ln -f {input} {output.bam}
+        fi
+        samtools index {output.bam}
+        """
+
+
+# ------------------------------------------------------------------- signal
+rule bedgraph:
+    """Single-base 5'-end counts per strand. `-5` keeps only the read 5' end,
+    which for PRO-cap is the initiation base. Which read strand becomes the plus
+    track depends on library orientation -- see reverse_strand in the config."""
+    input:
+        bam=f"{WORK}/exp/{{exp}}/merged.bam",
+        bai=f"{WORK}/exp/{{exp}}/merged.bam.bai",
+    output:
+        temp(f"{WORK}/exp/{{exp}}/{{strand}}.bg")
+    params:
+        keep=lambda w: "|".join(
+            f"^{c}\t" for c in GENOMES[EXPERIMENTS[w.exp]["species"]]["main_chromosomes"]
+        ),
+        read_strand=lambda w: (
+            {"pl": "-", "mn": "+"} if w.exp in REVERSE_STRAND
+            else {"pl": "+", "mn": "-"}
+        )[w.strand],
+    # GNU sort multithreads by default (up to 8) and auto-sizes its buffer from
+    # free memory, so an undeclared `sort` silently costs far more than the 1
+    # core Snakemake would budget. Both are pinned to match this declaration.
+    threads: 4
+    log:
+        f"{WORK}/logs/bedgraph/{{exp}}_{{strand}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) && set -o pipefail && "
+        "bedtools genomecov -5 -bg -strand {params.read_strand} -ibam {input.bam} "
+        "2> {log} | grep -E '{params.keep}' "
+        "| sort --parallel={threads} -S 2G -k1,1 -k2,2n > {output}"
+
+
+rule bigwig:
+    input:
+        bg=f"{WORK}/exp/{{exp}}/{{strand}}.bg",
+        sizes=lambda w: f"{WORK}/genome/{EXPERIMENTS[w.exp]['species']}.chrom.sizes",
+    output:
+        f"{OUT}/{{exp}}_{{strand}}.bw"
+    log:
+        f"{WORK}/logs/bigwig/{{exp}}_{{strand}}.log"
+    shell:
+        "mkdir -p $(dirname {output}) $(dirname {log}) && "
+        "bedGraphToBigWig {input.bg} {input.sizes} {output} > {log} 2>&1"
+
+
+# -------------------------------------------------------------------- peaks
+rule pints:
+    input:
+        pl=f"{OUT}/{{exp}}_pl.bw",
+        mn=f"{OUT}/{{exp}}_mn.bw",
+    output:
+        directory(f"{WORK}/exp/{{exp}}/PINTS")
+    params:
+        encode=STEPS["peaks"]["encode_params"],
+        exp_type=STEPS["peaks"]["exp_type"],
+        # PINTS defaults --chromosome-start-with to "chr", which silently matches
+        # NOTHING for the Ensembl-named species (S.cerevisiae I..XVI, S.pombe
+        # I..III, A.thaliana 1..5) and would yield zero peaks with no error.
+        chrom_prefix=lambda w: pints_chrom_prefix(EXPERIMENTS[w.exp]["species"]),
+    # PINTS parallelises across chromosomes; asking for more threads than the
+    # genome has just reserves scheduler slots that sit idle (S. pombe has 3).
+    threads: lambda w: min(8, N_CHROMS.get(EXPERIMENTS[w.exp]["species"], 8))
+    resources:
+        runtime=240,
+    log:
+        f"{WORK}/logs/pints/{{exp}}.log"
+    shell:
+        r"""
+        mkdir -p {output} $(dirname {log})
+        pints_caller --save-to {output} --file-prefix {wildcards.exp} \
+            --bw-pl {input.pl} --bw-mn {input.mn} --thread {threads} \
+            --chromosome-start-with '{params.chrom_prefix}' \
+            --exp-type {params.exp_type} {params.encode} > {log} 2>&1
+        """
+
+
+rule combine_peaks:
+    """Concatenate PINTS unidirectional + bidirectional calls and sort.
+
+    Deliberately NOT `bedtools merge`. Upstream (kundajelab/ProCapNet's
+    _merge_uni_bi_peaks.py, via procap-atlas) does `sorted(uni + bi)` and nothing
+    more: collapsing overlapping intervals would destroy the one-row-per-called-peak
+    structure and merge unidirectional calls into overlapping bidirectional ones.
+
+    PINTS `divergent` calls are excluded -- they are a subset of the bidirectional
+    set, so including them duplicates loci.
+
+    Many non-human species have a large fraction of unidirectional TSSs, so both
+    classes are needed; this union is the locus set for training, validation and
+    testing.
+    """
+    input:
+        f"{WORK}/exp/{{exp}}/PINTS"
+    output:
+        f"{OUT}/{{exp}}_peaks.bed.gz"
+    params:
+        classes=lambda w, input: " ".join(
+            f"{input}/*{c}_peaks.bed" for c in STEPS["peaks"]["peak_classes"]
+        ),
+    threads: 2
+    log:
+        f"{WORK}/logs/combine_peaks/{{exp}}.log"
+    shell:
+        r"""
+        set -o pipefail
+        mkdir -p $(dirname {output}) $(dirname {log})
+        exec 2> {log}
+        shopt -s nullglob
+        files=( {params.classes} )
+        if [ ${{#files[@]}} -eq 0 ]; then
+            echo "no PINTS peak files in {input}" >&2
+            exit 1
+        fi
+        cat "${{files[@]}}" | sort --parallel={threads} -S 1G -k1,1 -k2,2n | bgzip > {output}
+        """
+
+
+# --------------------------------------------------------------------- QC
+rule fetch_annotation:
+    """Gene annotation for the TSS metaplot. QC ONLY -- never used for
+    training, peak calling or fold assignment, so no annotation-derived
+    circularity reaches the model. Owned by the DAG rather than downloaded
+    inside the QC script, so parallel jobs for one species cannot race."""
+    output:
+        protected(f"{REPO_ROOT}/data/annotation/{{species}}.{{ext}}.gz")
+    params:
+        url=lambda w: GENOMES[w.species]["annotation_url"],
+    resources:
+        downloads=1,
+    retries: 2
+    log:
+        # {ext} must appear here too: Snakemake requires output, log and
+        # benchmark to carry the SAME wildcards, so that two jobs cannot write
+        # one file. With only {species} this rule failed at DAG construction
+        # with "Not all output, log and benchmark files ... contain the same
+        # wildcards", which took the whole workflow down, not just QC.
+        f"{WORK}/logs/fetch_annotation/{{species}}.{{ext}}.log"
+    shell:
+        "mkdir -p $(dirname {output}) $(dirname {log}) && "
+        "wget -nv --tries=3 --waitretry=10 --retry-connrefused --timeout=60 "
+        "-O {output} {params.url} > {log} 2>&1 && test -s {output}"
+
+
+rule orientation_qc:
+    """Initiator logo + stranded TSS metaplot: the read-out that catches a wrong
+    five_prime_mate or reverse_strand. Both are silent failures otherwise."""
+    input:
+        peaks=f"{OUT}/{{exp}}_peaks.bed.gz",
+        pl=f"{OUT}/{{exp}}_pl.bw",
+        mn=f"{OUT}/{{exp}}_mn.bw",
+        fasta=lambda w: f"{REPO_ROOT}/{EXPERIMENTS[w.exp]['processed']['sequences']}",
+        annotation=lambda w: annotation_path(EXPERIMENTS[w.exp]["species"]),
+        # Declared as an INPUT, not only as params.script: Snakemake
+        # hashes a rule's own code and params, never the contents of a
+        # file named by them, so a QC script edit was completely
+        # invisible -- `snakemake qc` reported "Nothing to be done"
+        # after the logo measure and the rRNA regions changed.
+        script=f"{REPO_ROOT}/src/qc/orientation_qc.py",
+    output:
+        tsv=f"{QC}/orientation/{{exp}}.tsv",
+        png=f"{QC}/orientation/{{exp}}.orientation_qc.png",
+    params:
+        script=f"{REPO_ROOT}/src/qc/orientation_qc.py",
+        outdir=f"{QC}/orientation",
+    resources:
+        mem_mb=8000,
+        runtime=60,
+    log:
+        f"{WORK}/logs/orientation_qc/{{exp}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) {params.outdir} && "
+        "python {params.script} -e {wildcards.exp} --outdir {params.outdir} "
+        "--annotation {input.annotation} --tsv {output.tsv} > {log} 2>&1"
+
+
+rule umi_report:
+    """Entropy screen for an undeclared UMI. Cross-checks the manifest's
+    umi_len, which cannot be verified against the archives -- ENA's
+    library_construction_protocol mentions a UMI for none of these runs."""
+    input:
+        fastqs=lambda w: [f"{FASTQ_DIR}/{fq}" for run in EXP_RUNS[w.exp]
+                          for fq in run_fastqs(run)],
+        # Declared as an INPUT, not only as params.script: Snakemake
+        # hashes a rule's own code and params, never the contents of a
+        # file named by them, so a QC script edit was completely
+        # invisible -- `snakemake qc` reported "Nothing to be done"
+        # after the logo measure and the rRNA regions changed.
+        script=f"{REPO_ROOT}/src/data_preprocessing/umi_report.py",
+    output:
+        f"{QC}/umi/{{exp}}.tsv"
+    params:
+        script=f"{REPO_ROOT}/src/data_preprocessing/umi_report.py",
+        fastq_dir=str(FASTQ_DIR),
+    resources:
+        runtime=30,
+    log:
+        f"{WORK}/logs/umi_report/{{exp}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) $(dirname {output}) && "
+        "python {params.script} -e {wildcards.exp} "
+        "--fastq-dir {params.fastq_dir} --tsv {output} > {log} 2>&1"
+
+
+rule read_structure_qc:
+    """Adapter content, insert length and dead cycles in the RAW reads.
+
+    Exists because the first full run lost most of its reads in 14 of 38
+    experiments to STAR's `unmapped: too short`, and the cause was an
+    untrimmed Illumina small-RNA 3' adapter that fastp's auto-detection missed
+    -- nothing in this pipeline configured an adapter at all. `pct_adapter`
+    and `pct_short_untrimmed` make that visible before the alignment step
+    wastes the compute, and `dead_cycles` catches a systematic N, which
+    matters out of proportion because STAR counts N as a mismatch and
+    --outFilterMismatchNmax 1 allows exactly one.
+    """
+    input:
+        fastqs=lambda w: [f"{FASTQ_DIR}/{fq}" for run in EXP_RUNS[w.exp]
+                          for fq in run_fastqs(run)],
+        # Declared as an INPUT, not only as params.script: Snakemake
+        # hashes a rule's own code and params, never the contents of a
+        # file named by them, so a QC script edit was completely
+        # invisible -- `snakemake qc` reported "Nothing to be done"
+        # after the logo measure and the rRNA regions changed.
+        script=f"{REPO_ROOT}/src/qc/read_structure_qc.py",
+    output:
+        f"{QC}/reads/{{exp}}.tsv"
+    params:
+        script=f"{REPO_ROOT}/src/qc/read_structure_qc.py",
+        fastq_dir=str(FASTQ_DIR),
+    resources:
+        runtime=30,
+    log:
+        f"{WORK}/logs/read_structure_qc/{{exp}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) $(dirname {output}) && "
+        "python {params.script} -e {wildcards.exp} "
+        "--fastq-dir {params.fastq_dir} --tsv {output} > {log} 2>&1"
+
+
+rule rrna_content:
+    """How much of the library is rRNA or organellar, from the RAW reads.
+
+    Exists because `pct_unique` was being read as a quality metric and is not
+    one for every species. Where the rDNA array sits in the assembly in 2+
+    near-identical copies, every rRNA read is a multimapper, gets MAPQ ~3, and
+    is correctly dropped by the -q 255 filter -- which caps pct_unique at a
+    level that says nothing about the library. Booth2016 S. cerevisiae is 70.4%
+    rRNA, so its ceiling is 29.6% and its observed 16.3% is not a failure.
+    `experiment_stats` divides by this to get pct_unique_adj and flags on that.
+
+    Needs the genome, the annotation (Ensembl GFF3 types these `rRNA`, not
+    `rRNA_gene`) and any decoy, so all three are declared inputs.
+    """
+    input:
+        fastqs=lambda w: [f"{FASTQ_DIR}/{fq}" for run in EXP_RUNS[w.exp]
+                          for fq in run_fastqs(run)],
+        fasta=lambda w: f"{REPO_ROOT}/{GENOMES[EXPERIMENTS[w.exp]['species']]['fasta']}",
+        annotation=lambda w: annotation_path(EXPERIMENTS[w.exp]["species"]),
+        decoy=lambda w: decoy_fastas(EXPERIMENTS[w.exp]["species"]),
+        # Declared as an INPUT, not only as params.script: Snakemake
+        # hashes a rule's own code and params, never the contents of a
+        # file named by them, so a QC script edit was completely
+        # invisible -- `snakemake qc` reported "Nothing to be done"
+        # after the logo measure and the rRNA regions changed.
+        script=f"{REPO_ROOT}/src/qc/rrna_content.py",
+    output:
+        f"{QC}/rrna/{{exp}}.tsv"
+    params:
+        script=f"{REPO_ROOT}/src/qc/rrna_content.py",
+        fastq_dir=str(FASTQ_DIR),
+    resources:
+        runtime=30,
+    log:
+        f"{WORK}/logs/rrna_content/{{exp}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) $(dirname {output}) && "
+        "python {params.script} -e {wildcards.exp} "
+        "--fastq-dir {params.fastq_dir} -o {output} > {log} 2>&1"
+
+
+# ------------------------------------------------------------------- stats
+rule experiment_stats:
+    """Mapped reads and peak counts for one experiment.
+
+    The table this feeds is for exclude/merge decisions, which archive read
+    counts alone cannot support -- a library can arrive deep and map badly. The
+    script counts from merged.bam when it is still around and otherwise sums the
+    per-run final.bam files, which is the same number: merged.bam is exactly the
+    merge of those, and idxstats counts are additive.
+
+    Counting is cheap: `samtools idxstats` reads the BAM index, not the reads.
+    """
+    input:
+        # merged.bam is deliberately NOT an input, by the same argument as the
+        # logs below. It is temp() and normally already deleted, so declaring it
+        # means that invalidating this rule -- which now happens whenever its
+        # script changes -- makes Snakemake rebuild all 38 via merge_runs.
+        # `peaks` already guarantees that align, merge and pints ran, so
+        # merged.bam bought ordering that was guaranteed anyway and nothing else.
+        peaks=f"{OUT}/{{exp}}_peaks.bed.gz",
+        pints=f"{WORK}/exp/{{exp}}/PINTS",
+        # STAR's Log.final.out is deliberately NOT an input, even though the
+        # script reads it. merged.bam already guarantees `align` ran, so
+        # declaring the logs buys no ordering -- but it does make them
+        # MANDATORY, and a run whose log is absent (aligned by
+        # run_procap_pipeline.py, which writes {work}/{run}.Log.final.out
+        # instead, or cleaned by hand) would then force a full re-alignment of
+        # that run plus everything downstream. Verified with a scratch
+        # workflow: deleting a consumed Log.final.out re-runs align. A blank
+        # mapping-rate column is a far better outcome than a surprise re-align,
+        # so the script reads the logs opportunistically and reports "" when
+        # they are missing.
+        # Declared as an INPUT, not only as params.script: Snakemake
+        # hashes a rule's own code and params, never the contents of a
+        # file named by them, so a QC script edit was completely
+        # invisible -- `snakemake qc` reported "Nothing to be done"
+        # after the logo measure and the rRNA regions changed.
+        script=f"{REPO_ROOT}/src/qc/experiment_stats.py",
+    output:
+        f"{QC}/stats/per_experiment/{{exp}}.tsv"
+    params:
+        script=f"{REPO_ROOT}/src/qc/experiment_stats.py",
+        work=str(WORK),
+    resources:
+        runtime=15,
+    log:
+        f"{WORK}/logs/experiment_stats/{{exp}}.log"
+    shell:
+        "mkdir -p $(dirname {log}) $(dirname {output}) && "
+        "python {params.script} -e {wildcards.exp} --work {params.work} "
+        "--peaks {input.peaks} --pints-dir {input.pints} -o {output} > {log} 2>&1"
+
+
+rule stats_table:
+    """One sorted table over every experiment, as TSV and as markdown.
+
+    qc/reads and qc/rrna ARE declared inputs, after an attempt at reading them
+    opportunistically failed in a way worth recording. The argument for leaving
+    them out was that declaring them makes the cheap standalone `snakemake stats`
+    target depend on the raw FASTQs (~202 GiB, routinely deleted after mapping),
+    with the `,adj`/`,raw` suffix on each mapping flag as the safeguard.
+
+    That safeguard held but the outcome was still wrong: because nothing ordered
+    them, `stats_table` ran before `rrna_content` had finished for ONE of 38
+    experiments, so C.griseus-BMDM_GROcap alone was judged on the raw rate while
+    the other 37 were adjusted. A whole table computed unadjusted would have been
+    obvious; a single row silently on a different basis is not. Per-row races are
+    worse than a coarse dependency.
+
+    The escape hatch survives: `experiment_stats.py --combine` still reads both
+    directories opportunistically, so a table can be rebuilt by hand from
+    whatever survives without touching the FASTQs.
+    """
+    input:
+        # NAMED, and --combine takes only `stats`. `--combine {input}` swept in
+        # the rrna and reads TSVs and this rule's own script as well, and
+        # DictReader absorbed all three: 685 rows over 42 experiments, every
+        # pipeline column blank. rrna and reads are read from their
+        # directories, not from argv.
+        stats=expand(f"{QC}/stats/per_experiment/{{exp}}.tsv", exp=TARGETS),
+        rrna=expand(f"{QC}/rrna/{{exp}}.tsv", exp=TARGETS),
+        reads=expand(f"{QC}/reads/{{exp}}.tsv", exp=TARGETS),
+        # Declared as an INPUT, not only as params.script: Snakemake
+        # hashes a rule's own code and params, never the contents of a
+        # file named by them, so a QC script edit was completely
+        # invisible -- `snakemake qc` reported "Nothing to be done"
+        # after the logo measure and the rRNA regions changed.
+        script=f"{REPO_ROOT}/src/qc/experiment_stats.py",
+    output:
+        tsv=f"{QC}/stats/experiment_stats.tsv",
+        md=f"{QC}/stats/experiment_stats.md",
+    params:
+        script=f"{REPO_ROOT}/src/qc/experiment_stats.py",
+        qc_rrna=f"{QC}/rrna",
+        qc_reads=f"{QC}/reads",
+    log:
+        f"{WORK}/logs/experiment_stats/_table.log"
+    shell:
+        "mkdir -p $(dirname {log}) $(dirname {output.tsv}) && "
+        "python {params.script} --combine {input.stats} "
+        "--qc-rrna {params.qc_rrna} --qc-reads {params.qc_reads} "
+        "-o {output.tsv} --markdown {output.md} > {log} 2>&1"

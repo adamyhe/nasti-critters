@@ -1,0 +1,76 @@
+# Non-Python dependencies, installed with mamba/conda.
+#
+# Python packages are NOT declared here -- they are managed by uv via
+# pyproject.toml. This env therefore contains no Python at all; uv provides the
+# interpreter. Activate both, venv last so its python wins:
+#
+#     mamba env create -f environment.yml
+#     mamba activate nasti-critters
+#     uv sync
+#     source .venv/bin/activate
+#
+# Versions are pinned to the ENCODE PRO-cap spec
+# (planning/20240501_PRO-cap_Computational_Pipeline.pdf) where the spec names
+# one. Relax a pin if your platform cannot solve it, but record the change.
+name: nasti-critters
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # --- ENCODE PRO-cap pipeline, versions per the spec ---
+  - fastp=0.23.4
+  - star=2.7.11a
+  - samtools=1.18
+  # umi_tools and pypints are CLI tools here, never imported -- the repo only
+  # runs `umi_tools dedup` / `pints_caller` via subprocess and probes for them
+  # with shutil.which, so they belong with the binaries above rather than in
+  # pyproject.toml. umi_tools additionally has no wheel at any version, so under
+  # uv it was the last sdist build in the tree. bioconda has umi_tools 1.1.5 for
+  # linux-64/aarch64 and osx-64/arm64, and pypints 1.1.10 as noarch.
+  #
+  # Note the version pins here are the ENCODE spec's; the parameters that
+  # actually determine the peaks live in config/procap_pipeline.yaml.
+  - umi_tools=1.1.5
+  - pypints=1.1.10           # provides pints_caller; NOT `pints`, unrelated
+
+  # --- peak merging, indexing, signal conversion ---
+  - bedtools                 # genomecov -5, merge
+  - htslib                   # bgzip, tabix
+  - ucsc-bedgraphtobigwig
+  - ucsc-bigwigtobedgraph    # make_negatives.py
+  - ucsc-bigwigmerge         # make_negatives.py, legacy download scripts
+  - wget
+
+  # NO C/C++ toolchain is needed. Every Python dep now resolves to a wheel:
+  # macs3 and cykhash are blocked outright (nothing here imports macs3 -- see
+  # [tool.uv] override-dependencies in pyproject.toml), and umi_tools moved up
+  # to conda above. If you add a Python dep that builds from sdist, add
+  # c-compiler/cxx-compiler back here rather than to pyproject.toml.
+
+  # --- the preprocessing path runs entirely from this env, no uv involved ---
+  # snakemake drives the DAG; the scripts under src/data_preprocessing/ (plus
+  # experiments.py and config/write_split_csvs.py) import nothing beyond these
+  # three. Verified by dumping the import surface of every one of them: no
+  # torch, bpnet-lite, cherimoya or tangermeme anywhere in that path. Keeping
+  # them here means label generation needs no GPU stack and no venv, so it can
+  # run on a CPU or transfer node.
+  - snakemake>=9.0
+  - pyyaml
+  - pandas
+  - numpy
+
+  # --- QC diagnostics (src/qc/orientation_qc.py, umi_report.py) ---
+  # pybigtools/pyfaidx, not pyBigWig/pyfastx: those are the readers tangermeme's
+  # extract_loci uses, so QC sees the data through the same path the model does.
+  # All available for linux-64, which is what keeps the QC rules inside the
+  # Snakemake DAG without dragging in the uv venv. If any of these ever has to
+  # move to pyproject.toml, the QC rules must leave the DAG with it -- see the
+  # negatives step for why.
+  - pybigtools
+  - pyfaidx
+  - logomaker
+  - matplotlib-base
+
+  # uv itself, so the env is self-contained. Drop this if you install uv
+  # separately (e.g. via pipx or the standalone installer).
+  - uv

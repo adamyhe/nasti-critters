@@ -1,0 +1,110 @@
+# Python dependencies, managed by uv.
+#
+#     uv sync                          # create .venv and install (writes uv.lock)
+#     uv run python src/data_preprocessing/resolve_runs.py
+#
+# Non-Python tools (fastp, STAR, samtools, bedtools, bedops, htslib, UCSC) come
+# from environment.yml via mamba. See that file for the activation order.
+#
+# This is not an installable package -- `[tool.uv] package = false` keeps uv
+# from trying to build it. The repo is a set of scripts run in place.
+
+[project]
+name = "nasti-critters"
+version = "0.0.0"
+description = "Sequence-to-function models of PRO-cap initiation profiles in non-human species"
+requires-python = ">=3.11"
+
+dependencies = [
+    # --- modelling ---
+    "bpnet-lite>=1.0.0",
+    "tangermeme>=1.0.0",
+    # Pinned by commit via [tool.uv.sources] below, not by version: the version this project needs (0.2.1) was never
+    # released to PyPI. Note: 0.2.1 differs from the published 0.2.0 only by the
+    # addition of a __version__ attribute in __init__.py -- cheri.py,
+    # cherimoya.py, io.py, losses.py, performance.py and wrappers.py are
+    # byte-identical between the two (verified by installing both). The pin is
+    # for exact agreement with the container image and immunity to tag movement,
+    # NOT because 0.2.0 trains differently.
+    "cherimoya",
+    # torch.optim.Muon landed in torch 2.10. fit_cherimoya.py falls back to
+    # `from muon import Muon`, but PyPI `muon` is a multi-omics framework, not
+    # the optimizer -- installing it would import the wrong package. Pinning
+    # torch >= 2.10 keeps the fallback from ever firing, so `muon` is
+    # deliberately NOT a dependency here.
+    "torch>=2.10",
+
+    # NOTE: the ENCODE pipeline's Python-side tools are NOT here. pyPINTS
+    # (pints_caller) and umi-tools are both CLI tools that this repo only ever
+    # shells out to -- never imports -- so they live in environment.yml with
+    # fastp/STAR/samtools. Moving either back would also reintroduce their
+    # dependency tails (biopython, pybedtools, statsmodels for pyPINTS) and, for
+    # umi-tools, the only sdist build in the tree.
+
+    # --- workflow ---
+
+    # --- data handling used across src/ ---
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "joblib",    # benchmark_predictions.py
+    # pyfaidx and pybigtools come via tangermeme, which is what its
+    # extract_loci uses; do not add pyfastx or pyBigWig back.
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# NO encode-exact extra. ENCODE converts BAM -> bigWig and merges replicates
+# with biodatatools 0.0.7, but the source document does not record the
+# subcommand, so that path was never implemented -- nothing imports
+# biodatatools and no code reads a backend switch. An extra that installs an
+# unused package is a promise the repo cannot keep, so it is gone; the pin is
+# kept here as provenance for whoever implements it.
+
+[tool.uv]
+
+# macs3 is a transitive dependency of both bpnet-lite and cherimoya, and NOTHING
+# in this repo imports it. It ships no wheels at any version, so uv builds it
+# from sdist -- dragging in cykhash, also sdist-only -- which is the slowest part
+# of a clean install and pure waste here. The upstream sherlock image drops it
+# the same way, with `pip install --no-deps`.
+#
+# An unsatisfiable marker is how a transitive dependency is excluded in uv: the
+# override replaces the requirement coming from bpnet-lite/cherimoya, and the
+# marker is never true, so it resolves to nothing rather than to a version.
+# If something here ever imports macs3, delete these two lines -- do not "fix"
+# it by pinning a version.
+override-dependencies = [
+    "macs3 ; sys_platform == 'nonexistent'",
+    "cykhash ; sys_platform == 'nonexistent'",
+]
+package = false
+
+[tool.uv.sources]
+# Match the authoritative Apptainer image at
+# https://github.com/adamyhe/sherlock (cherimoya/cherimoya.def), which installs
+# this exact commit (the 0.2.1 version bump, 2026-07-28). PyPI only ever
+# published 0.2.0 (2026-07-14), so 0.2.1 is reachable from git only.
+#
+# The functional difference is nil: every module except __init__.py is
+# byte-identical between the git commit and the PyPI wheel, and the addition is
+# just a __version__ attribute. The EMA / valid_count_corr rewrite that the
+# upstream image comment attributes to this commit landed *before* 0.2.0 was
+# published -- both artifacts contain valid_count_corr and swa identically.
+#
+# Keep the pin anyway: it guarantees byte agreement with the image, and the
+# upstream v0.2.0 tag has already been force-moved once, so a tag or version
+# range is not a stable reference. But do not expect different training results
+# from relaxing it.
+cherimoya = { git = "https://github.com/jmschrei/cherimoya.git", rev = "8e4283fe56db4a29418c1d8119da3240d7c709ba" }
+
+# On a GPU cluster the default linux torch wheel already bundles CUDA. If you
+# need a specific CUDA build, pin an index instead of editing the dependency:
+#
+# [[tool.uv.index]]
+# name = "pytorch-cu126"
+# url = "https://download.pytorch.org/whl/cu126"
+# explicit = true
+#
+# [tool.uv.sources]
+# torch = { index = "pytorch-cu126" }
