@@ -310,6 +310,31 @@ def filter_peaks(
     return len(lines)
 
 
+def median_window_signal(bigwig: Path, regions: pd.DataFrame, window: int) -> float:
+    """Median total signal in `window` bp around each region's midpoint.
+
+    Reported for the negatives and for the peaks so the two are comparable. It
+    is the check that matters when the signal filter is off: without it a
+    "negative" is only a GC-matched, peak-free-by-tile window, and this says
+    whether those are genuinely quiet or merely uncalled.
+    """
+    if not len(regions):
+        return float("nan")
+    totals = []
+    with pybigtools.open(str(bigwig)) as bw:
+        sizes = bw.chroms()
+        for chrom, sub_df in regions.groupby("chrom", sort=False):
+            if chrom not in sizes:
+                continue
+            mid = (sub_df["start"].to_numpy() + sub_df["end"].to_numpy()) // 2
+            lo = np.clip(mid - window // 2, 0, sizes[chrom])
+            hi = np.clip(mid + (window + 1) // 2, 0, sizes[chrom])
+            for a, b in zip(lo, hi):
+                if b > a:
+                    totals.append(float(np.nansum(bw.values(chrom, int(a), int(b)))))
+    return float(np.median(totals)) if totals else float("nan")
+
+
 def peak_overlap_fraction(matched: pd.DataFrame, loci: pd.DataFrame,
                           window: int) -> float:
     """Share of negatives whose IN_WINDOW training window overlaps any peak.
@@ -344,6 +369,7 @@ def peak_overlap_fraction(matched: pd.DataFrame, loci: pd.DataFrame,
 def sample_negatives(
     peaks: Path, sequences: Path, bigwig: Path, out_path: Path,
     keep: list[str], alpha: float | None, species: str, dry_run: bool,
+    signal_filter: bool = True,
 ) -> None:
     """GC-matched negatives, restricted to `keep`.
 
@@ -408,11 +434,19 @@ def sample_negatives(
     # tangermeme prints diagnostics before returning, and one of them is
     # `_counts_from_coords(...).max()`, which raises on an empty array first.
     # So the ValueError has to be caught here and translated.
+    # bigwig=None disables the SIGNAL restriction and nothing else: in
+    # `_extract_and_filter_chrom` the threshold and the `values <=
+    # signal_threshold` mask both sit behind `if bigwig is not None`, while GC
+    # matching, the max_n_perc filter and the peak-tile mask are unconditional.
+    # Worth having for the dense genomes, where the surviving tile count is the
+    # binding constraint and the signal filter only cuts it further -- but a
+    # negative is then merely GC-matched and peak-free BY TILE, so the reported
+    # median signal is what says whether it is quiet or just uncalled.
     try:
         matched = extract_matching_loci(
             loci=loci,
             fasta=str(sequences),
-            bigwig=str(bigwig),
+            bigwig=str(bigwig) if signal_filter else None,
             chroms=list(keep),
             in_window=tile,
             out_window=out_tile,
@@ -445,13 +479,18 @@ def sample_negatives(
             "chromosome-naming\n    mismatch between the peaks and the FASTA."
         )
     overlap = peak_overlap_fraction(matched, loci, IN_WINDOW)
+    neg_sig = median_window_signal(bigwig, matched, IN_WINDOW)
+    pk_sig = median_window_signal(bigwig, loci, IN_WINDOW)
     matched.to_csv(out_path, header=False, sep="\t", index=False)
+    ratio = (neg_sig / pk_sig) if pk_sig else float("nan")
     print(f"  wrote {len(matched):,} negatives "
           f"({len(matched) / max(len(loci), 1):.2f} per peak, "
-          f"{overlap:.1%} of their {IN_WINDOW} bp windows overlap a peak)")
+          f"{overlap:.1%} of their {IN_WINDOW} bp windows overlap a peak, "
+          f"median signal {neg_sig:,.0f} vs {pk_sig:,.0f} in peaks = {ratio:.1%})")
 
 
-def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bool:
+def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool,
+                       signal_filter: bool = True) -> bool:
     """Process one experiment. Returns True if processed, False if skipped."""
     processed = exp.get("processed", {})
 
@@ -505,7 +544,8 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bo
 
         print(f"Matching GC-content negatives over {len(keep)} chromosomes...")
         sample_negatives(peaks_input, sequences, us_bw, out_path, keep,
-                         ALPHA.get(exp_id), exp["species"], dry_run)
+                         ALPHA.get(exp_id), exp["species"], dry_run,
+                         signal_filter=signal_filter)
 
     return True
 
@@ -533,6 +573,14 @@ def main():
         help="print commands without executing them",
     )
     parser.add_argument(
+        "--no-signal-filter",
+        action="store_true",
+        help="drop the signal restriction on candidate background windows "
+             "(passes bigwig=None to extract_matching_loci). GC matching, the "
+             "N-content filter and peak-tile masking still apply. For dense "
+             "genomes where the surviving tile count, not signal, is what binds",
+    )
+    parser.add_argument(
         "-j", "--threads",
         type=int,
         default=1,
@@ -557,7 +605,8 @@ def main():
         exp_ids = list(experiments.keys())
 
     run_one = partial(
-        process_experiment, force=args.force, dry_run=args.dry_run
+        process_experiment, force=args.force, dry_run=args.dry_run,
+        signal_filter=not args.no_signal_filter,
     )
 
     # Build every .fai serially first. It used to be created inside the worker

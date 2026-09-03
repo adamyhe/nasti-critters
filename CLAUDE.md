@@ -2147,6 +2147,28 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   synthetic is uniform and therefore worst case; real yeast peaks cluster, which is why the real run finds
   310 rather than 0 at the default. **`NEGATIVE_WINDOW` is deliberately empty**: set an entry only with a
   measured `pct_peak_overlap` in front of you, and record why.
+  **`--no-signal-filter` is the other lever, and for a densely transcribed genome it is the one that
+  binds.** `bigwig=None` disables the signal restriction and nothing else: in `_extract_and_filter_chrom`
+  both the threshold and the `values <= signal_threshold` mask sit behind `if bigwig is not None`, while
+  GC matching, `max_n_perc` and the peak-tile mask are unconditional. On a synthetic genome at
+  `S.cerevisiae_PROcap` density (one peak per 1,840 bp, 1.15 per window):
+
+  | inter-peak signal | filter ON | filter OFF |
+  | --- | --- | --- |
+  | none | 792 negatives | 792 negatives (filter inert) |
+  | pervasive | **0 negatives** | 792 negatives, **median signal 41% of peak median** |
+
+  So where the genome is quiet between peaks the filter costs nothing, and where it is not the filter
+  alone takes the count to zero. Yeast is the second case. The bar is
+  `window signal <= signal_beta x (1st percentile of peak signal)`, which in a genome where essentially
+  everything is transcribed almost nothing clears.
+  **The recovered negatives are peak-free but not quiet** — 0.0% overlap a called peak, yet they carry a
+  large fraction of peak-level signal. Whether that is a defect depends on what negatives are for here:
+  they are not labelled zero, the loader extracts their real measured signal, so a GC-matched peak-free
+  window carrying ordinary background transcription is arguably a *better* sample of "non-peak yeast
+  genome" than an artificially quiet subset of it. `sample_negatives` now prints
+  `median signal N vs M in peaks = X%` on every run so this is measured per experiment rather than
+  assumed. **The synthetic cannot predict the real X** — run it on the experiment and read the number.
   **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
   yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
   eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
