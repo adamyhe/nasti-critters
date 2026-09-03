@@ -2241,18 +2241,32 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   median is the misleading comparator wherever the peak set saturates the genome. Read
   `negatives are Nx genome`, not the percentage against peaks.
 
-  **Whether to do this per species is the wrong question — prefer a uniform rule.** Sorting the corpus by
-  negatives per peak splits it cleanly: **9 experiments sit at the peak cap (1.00)**, where GC matching
-  already found a partner for every peak, so removing the filter cannot raise the count and in a synthetic
-  at that density changes neither the count nor the selection. The other 14 are constrained — fly embryo
-  0.75-0.80, fly 5GROcap 0.73, worm 0.26-0.70, yeasts 0.01-0.07.
-  Toggling this per species is exactly the per-species tuning this repo refuses elsewhere: it would mean
-  yeast negatives are drawn from one distribution and mouse negatives from another, which is a systematic
-  between-species difference in a repo whose point is between-species comparison — the same objection
-  raised against the outlier filter's data-dependent threshold. Since the filter appears inert wherever
-  the count is capped, **off everywhere is both the simpler rule and the more comparable one**, and on
-  everywhere is the only other defensible choice. `NO_SIGNAL_FILTER` is per-species because that is the
-  cheapest thing to experiment with; if the decision lands on uniform, collapse it to a single default.
+  **Turning the filter off is NOT a no-op on the large genomes, and an earlier version of this note said
+  it was.** The claim was that where the count is already capped at one negative per peak — 9 of the 23
+  measured experiments — removing the filter can change nothing. The COUNT cannot change, that part is
+  right. The COMPOSITION changes completely. Measured on a synthetic at 0.10 peaks per window, capped, with
+  heterogeneous background:
+
+  | | negatives | median signal | vs random genome |
+  | --- | --- | --- | --- |
+  | filter on | 559 | **0** | 0.00x |
+  | filter off | 559 | **24** | **0.67x** |
+
+  Identical count, different windows. `matched_loci_bin_count = min(bg, loci)` saturates per GC bin, but
+  the pool it draws from is `random_state.shuffle`d and truncated, so a larger pool means a different — and
+  noisier — sample. The earlier synthetic that showed no change had *uniform* background, so the filter
+  rejected nothing; it demonstrated only that the test was degenerate.
+
+  What this means for the choice. **With the filter on, negatives are the SILENT TAIL of the genome**
+  (median 0); with it off they are **representative peak-free background** (0.67x genome). Both are
+  defensible and they are different things, so this is not a free switch to flip corpus-wide — it would
+  change the negatives of every experiment, including the 33 that have no problem. bpnet-lite and
+  procap-atlas choose the silent tail, and this repo tracks their standards.
+  So the realistic options are: keep it on everywhere and accept that the dense yeast experiments train on
+  a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
+  departure**, accepting that their negatives then mean something slightly different from every other
+  species'. The second is what `NO_SIGNAL_FILTER` is for. It is not a comparability-free option — it just
+  makes the cost explicit and per-species rather than silent.
 
   **All seven yeast experiments measured (2026-09-03), and the gain decays monotonically with density:**
 
