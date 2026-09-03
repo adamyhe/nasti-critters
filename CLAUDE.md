@@ -2168,7 +2168,24 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   window carrying ordinary background transcription is arguably a *better* sample of "non-peak yeast
   genome" than an artificially quiet subset of it. `sample_negatives` now prints
   `median signal N vs M in peaks = X%` on every run so this is measured per experiment rather than
-  assumed. **The synthetic cannot predict the real X** — run it on the experiment and read the number.
+  assumed.
+
+  **Measured on the real `S.cerevisiae_PROcap`, and it is a clear gain:**
+
+  | | negatives | per peak | overlap a peak | median signal |
+  | --- | --- | --- | --- | --- |
+  | filter on | 440 | 0.07 | — | — |
+  | filter off | **1,905** | **0.28** | **0.0%** | 271 vs 961 in peaks (28.2%) |
+
+  **Read the 271 against the genome, not against the peaks.** An average 2114 bp window in this library
+  holds **853** reads (4.87 M over 12.07 Mb), so the negatives sit at **0.32x a random window** while the
+  *median* peak window sits at 1.13x. 28.2% sounds like contamination and is not: it is the peak median
+  that is unremarkable, because at 1.18 peaks per window essentially every window contains one and the
+  informative peaks are in the tail. So the filter was discarding 4.3x more negatives that are three times
+  quieter than average genome and never overlap a called peak.
+  `NO_SIGNAL_FILTER` in `make_negatives.py` records the choice per species. It is **still empty**: only
+  `S.cerevisiae_PROcap` has been measured, and the other six yeast experiments are 1.5-4x denser, so
+  measure before switching a species on.
   **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
   yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
   eight times over and the GC match is thin. Two honest readings, and the choice has not been made:

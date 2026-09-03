@@ -157,6 +157,33 @@ OUT_WINDOW = 1000
 #: provide. Set a value here only with the measured overlap in front of you.
 NEGATIVE_WINDOW: dict[str, int] = {}
 
+#: Species whose candidate background is chosen WITHOUT the signal restriction.
+#: `--no-signal-filter` forces it on for a whole run; this is the recorded,
+#: per-species version, so the choice lives in the repo rather than in shell
+#: history.
+#:
+#: Only worth setting where the genome is transcribed densely enough that the
+#: threshold -- `signal_beta x (1st percentile of peak signal)` over the window
+#: -- is what binds, rather than the supply of peak-free tiles. Measured on
+#: `S.cerevisiae_PROcap`:
+#:
+#:                       negatives   per peak   overlap   median signal
+#:   filter on                 440       0.07      0.0%     (unmeasured)
+#:   filter off              1,905       0.28      0.0%    271 vs 961 peaks
+#:
+#: **Read that 271 against the genome, not against the peaks.** An average
+#: 2114 bp window in this library holds 853 reads (4.87 M over 12.07 Mb), so the
+#: negatives sit at 0.32x a random window while the MEDIAN peak window sits at
+#: 1.13x. The median peak is unremarkable here because at 1.18 peaks per window
+#: essentially every window contains one; the informative peaks are in the tail.
+#: So dropping the filter buys 4.3x more negatives that are still three times
+#: quieter than average genome and never overlap a called peak.
+#:
+#: Set per species only after running the experiment and reading its numbers --
+#: the other six yeast experiments are 1.5-4x denser than this one and are not
+#: measured yet.
+NO_SIGNAL_FILTER: set[str] = set()
+
 #: Interval values below this are treated as absent when summing the two
 #: strands. Counts are integers stored exactly in float32 and accumulated in
 #: float64, so the sweep is exact for real data; the epsilon only guards
@@ -397,12 +424,16 @@ def sample_negatives(
     same `to_csv` -- so this is a one-argument divergence, not a fork. Keep it
     that way; if bpnet-lite ever grows a `--chroms` flag, go back to the CLI.
     """
+    signal_filter = signal_filter and species not in NO_SIGNAL_FILTER
     tile = NEGATIVE_WINDOW.get(species, IN_WINDOW)
     # out_window scaled to keep the flank proportion; the assertion inside
     # extract_matching_loci is `in_window >= out_window`, so both must move.
     out_tile = max(1, round(tile * OUT_WINDOW / IN_WINDOW))
     if tile != IN_WINDOW:
         print(f"  tiling GC candidates at {tile} bp (not {IN_WINDOW}) for {species}")
+    if not signal_filter:
+        print(f"  signal restriction OFF for {species} "
+              f"(GC, N-content and peak masking still apply)")
     if dry_run:
         print(f"  # extract_matching_loci({peaks.name}, chroms={len(keep)} main, "
               f"tile={tile}) -> {out_path.name}")
