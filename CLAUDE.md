@@ -2060,9 +2060,16 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   deeper. It took out **A. thaliana (1-5), C. reinhardtii (1-17) and P. patens (1-27)** — the only three
   species with purely numeric names — and spared C. griseus purely because it has an `X`, which makes the
   column `object`. Roman numerals and `chr`/`NC_` prefixes are safe for the same accidental reason.
-  **Pre-existing, not caused by dropping the `bpnet negatives` CLI**: that CLI passed
-  `pyfaidx.Fasta(...).keys()`, which are also strings, so it hit the same mismatch. Those three species
-  never had working negatives.
+  **bpnet-lite has the same latent bug — verified, not assumed.** `pyfaidx.Fasta(...).keys()` returns
+  `str` unconditionally (checked on a FASTA with contigs `1`/`2`/`10`), so `bpnet negatives` passes string
+  `chroms` against the same int64 column and keeps **0 of 3** rows. It never surfaces upstream only
+  because bpnet-lite is used on human and mouse, where `chr`-prefixed names force `object` dtype. So this
+  is pre-existing rather than caused by dropping the CLI, and those three species never had working
+  negatives by either route.
+  Curiously the `chroms=None` fallback is the one safe path: it derives `chroms` from the loci column
+  itself, so `fa[numpy.int64(1)]` raises `TypeError: Record name must be a string, not int64` — loud
+  instead of silent. **The real fix belongs upstream**, as `dtype={0: str}` in that one `read_csv`; it
+  would fix the CLI too and is worth a tangermeme PR.
   `sample_negatives` now reads the BED itself with `dtype={0: str}` and passes the **DataFrame**, which
   skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
   regression test uses all three naming styles on purpose.
