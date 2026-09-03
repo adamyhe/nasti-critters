@@ -369,6 +369,13 @@ python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py
 ```
 
+Without SLURM, `--print-commands` emits the same job selection as bare shell
+commands, one per line, and submits nothing:
+
+```bash
+python src/bpnet/fit/launch.py --print-commands | bash
+```
+
 ### Open questions and resolved ones
 
 Every experiment now has a fold assignment — `launch.py` reports **214
@@ -741,7 +748,20 @@ python src/bpnet/fit/fit_bpnet.py -e M.musculus-liver-young-female_ChROcap -f 0
 # Submit all (experiment x fold) jobs. --requeue helps on preemptible partitions.
 python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py --partition gpu --requeue
+
+# No SLURM: the same selection as bare commands, nothing submitted
+python src/bpnet/fit/launch.py --print-commands | bash
 ```
+
+`launch.py` has three emission modes over one selection rule — `--print-commands`
+(bare commands on stdout), `--dry-run` (full sbatch scripts) and the default
+(submit). The two flags are mutually exclusive. With `--print-commands`, skip
+messages and the summary go to **stderr**, so stdout stays pipeable; the env
+setup block is not included, so activate the mamba env and uv venv first. These
+are GPU jobs, so `| bash` runs them serially — use
+`| xargs -P N -I{} bash -c '{}'` only if N models are known to fit in VRAM.
+Cherimoya has no launcher (one experiment set, folds only):
+`for f in 0 1 2 3 4; do python src/cherimoya/fit/fit_cherimoya.py -f $f; done`.
 
 A fold counts as done only when `{experiment}.fold{f}.final.torch` exists.
 bpnet-lite also writes `{experiment}.fold{f}.torch` whenever validation loss

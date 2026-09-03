@@ -168,6 +168,9 @@ python src/bpnet/fit/fit_bpnet.py -e D.melanogaster-S2_PROcap -f 0 -v
 python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py --time 12:00:00 --mem 32G
 
+# Same selection, no SLURM: bare commands on stdout, skips and summary on stderr
+python src/bpnet/fit/launch.py --print-commands | bash
+
 # Train Cherimoya (D. melanogaster / dm3 config set only)
 python src/cherimoya/fit/fit_cherimoya.py -f 0
 

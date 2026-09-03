@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
-"""Submit SLURM jobs to train BPNet models for all experiments and folds.
+"""Enumerate BPNet training jobs for all experiments and folds.
 
-Reads experiment IDs from config/experiment_config.yaml and submits one
-sbatch job per (experiment, fold) pair via fit.py.
+Reads experiment IDs from config/experiment_config.yaml and produces one job per
+(experiment, fold) pair, running fit_bpnet.py. Experiments whose model already
+finished, whose inputs are missing, or whose species has no fold assignment are
+skipped, and each skip says which.
 
-Experiments with an already-trained model file are skipped automatically.
+Three output modes, none of which needs SLURM to *decide* anything -- the
+selection logic is identical and only the emission differs:
+
+    --print-commands   one bare shell command per job on stdout. No SBATCH
+                       directives, no env setup, nothing submitted. This is the
+                       non-SLURM path.
+    --dry-run          the full sbatch script per job, printed not submitted.
+    (neither)          submit via sbatch.
 
 Usage:
-    python src/bpnet/fit/launch.py                    # submit all experiments x folds
-    python src/bpnet/fit/launch.py --dry-run           # print sbatch scripts without submitting
+    python src/bpnet/fit/launch.py                     # submit all experiments x folds
+    python src/bpnet/fit/launch.py --dry-run           # print sbatch scripts
+    python src/bpnet/fit/launch.py --print-commands     # bare commands, for any box
     python src/bpnet/fit/launch.py --time 12:00:00 --mem 32G --partition gpu
+
+On a single non-SLURM box, run them serially -- these are GPU jobs and one box
+almost certainly holds one at a time:
+
+    python src/bpnet/fit/launch.py --print-commands | bash
+
+To run N at once, having checked N models fit in VRAM:
+
+    python src/bpnet/fit/launch.py --print-commands | xargs -P N -I{} bash -c '{}'
+
+Skips and the summary go to stderr in this mode, so stdout stays pipeable.
 """
 
 import argparse
@@ -30,8 +51,17 @@ from experiments import Experiment, experiment_ids, model_path  # noqa: E402
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    emit = parser.add_mutually_exclusive_group()
+    emit.add_argument(
         "--dry-run", action="store_true", help="print sbatch scripts without submitting"
+    )
+    emit.add_argument(
+        "--print-commands", action="store_true",
+        help="print one bare shell command per job to stdout and submit nothing. "
+             "For a non-SLURM box. The env setup block is NOT included -- "
+             "activate the mamba env and uv venv yourself first, exactly as "
+             "--setup-file would inside a job. Skip messages and the summary go "
+             "to stderr so stdout can be piped to bash or xargs",
     )
     # SLURM resource flags
     # Site-specific by nature: no default, and the corresponding #SBATCH line
@@ -94,6 +124,7 @@ def main():
     skipped_trained = 0
     skipped_missing = 0
     skipped_experiments = 0
+    total = 0
     for exp_id in experiments:
         try:
             exp = Experiment.load(exp_id, use_controls=args.controls)
@@ -113,6 +144,7 @@ def main():
             print(f"SKIP {exp_id}: {err}", file=sys.stderr)
             skipped_experiments += 1
             continue
+        total += n_folds
 
         missing = exp.missing
         if missing:
@@ -171,6 +203,11 @@ def main():
                  fit_cmd, ""]
             )
 
+            if args.print_commands:
+                print(fit_cmd)
+                submitted += 1
+                continue
+
             if args.dry_run:
                 print(f"--- {job_name} ---")
                 print(sbatch_script)
@@ -189,19 +226,24 @@ def main():
                     file=sys.stderr,
                 )
 
-    action = "Would submit" if args.dry_run else "Submitted"
-    total = 0
-    for e in experiments:
-        try:
-            entry = Experiment.load(e)
-            total += 0 if (entry.species == "S.pombe"
-                           and not entry.uses_peak_level_splits) else entry.n_folds()
-        except KeyError:
-            pass
+    if args.print_commands:
+        action = "Printed"
+    elif args.dry_run:
+        action = "Would submit"
+    else:
+        action = "Submitted"
+    # `total` is accumulated in the loop above. It used to be a second pass that
+    # reloaded every experiment and carried `entry.species == "S.pombe"` as a
+    # special case -- dead code twice over, since a species with no fold
+    # assignment raises from n_folds() and is already excluded, and the rest of
+    # this launcher stopped naming pombe when C.griseus and S.moellendorffii
+    # arrived. Do not reintroduce a species-name test here.
     print(
         f"\n{action} {submitted} jobs of {total} (experiment x fold); "
         f"skipped {skipped_trained} already trained, {skipped_missing} missing data"
-        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else "")
+        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        # stdout must stay pipeable when it carries commands.
+        file=sys.stderr if args.print_commands else sys.stdout,
     )
 
 
