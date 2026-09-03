@@ -132,6 +132,31 @@ def make_chrom_sizes(
 IN_WINDOW = 2114
 OUT_WINDOW = 1000
 
+#: Per-species candidate-tiling width for GC matching ONLY. Absent = IN_WINDOW.
+#:
+#: `extract_matching_loci` tiles each chromosome into NON-OVERLAPPING blocks of
+#: `in_window` and masks out every block containing a peak, so the entire
+#: candidate pool is `genome / in_window`. That is ~5,700 blocks for a 12 Mb
+#: yeast genome against 23,642 peaks -- four peaks per block -- and almost
+#: nothing survives: the yeasts get 0.01-0.07 negatives per peak where every
+#: large genome gets 1.00.
+#:
+#: Shrinking the tiling width for those species places candidate MIDPOINTS more
+#: finely. It does not shrink the training window: both `_resize_coords_generator`
+#: here and `extract_loci` in the training loader resize to the same midpoint, so
+#: the model still sees IN_WINDOW. The written BED intervals are this width,
+#: which is why nothing downstream may depend on their width.
+#:
+#: The cost is real and is why `pct_peak_overlap` is reported on every run: a
+#: negative whose narrow block is peak-free can still contain peaks once expanded
+#: to IN_WINDOW. In S. cerevisiae there is a peak every ~780 bp, so a 2114 bp
+#: window holds ~2.7 of them on average and no large clean set exists to find.
+#: That is NOT a labelling error -- the loader extracts real measured signal for
+#: backgrounds, so an overlapping negative is a low-contrast example, not a
+#: mislabelled one -- but it does weaken the contrast negatives are there to
+#: provide. Set a value here only with the measured overlap in front of you.
+NEGATIVE_WINDOW: dict[str, int] = {}
+
 #: Interval values below this are treated as absent when summing the two
 #: strands. Counts are integers stored exactly in float32 and accumulated in
 #: float64, so the sweep is exact for real data; the epsilon only guards
@@ -285,9 +310,40 @@ def filter_peaks(
     return len(lines)
 
 
+def peak_overlap_fraction(matched: pd.DataFrame, loci: pd.DataFrame,
+                          window: int) -> float:
+    """Share of negatives whose IN_WINDOW training window overlaps any peak.
+
+    The negatives BED holds whatever width the tiling used, but training resizes
+    each one to IN_WINDOW around its midpoint -- so this measures the window the
+    model will actually see, not the interval on disk. With the default tiling
+    this is ~0 by construction; it is the number that makes a narrower
+    NEGATIVE_WINDOW an informed choice rather than a hopeful one.
+    """
+    if not len(matched) or not len(loci):
+        return 0.0
+    hit = 0
+    for chrom, neg in matched.groupby("chrom", sort=False):
+        pk = loci[loci["chrom"] == chrom]
+        if not len(pk):
+            continue
+        # Sort peaks by start and carry a running max of their ends, so a
+        # single searchsorted answers "does any peak starting at or before this
+        # point still extend past it".
+        order = np.argsort(pk["start"].to_numpy(), kind="mergesort")
+        ps = pk["start"].to_numpy()[order]
+        pe = np.maximum.accumulate(pk["end"].to_numpy()[order])
+        mid = (neg["start"].to_numpy() + neg["end"].to_numpy()) // 2
+        s, e = mid - window // 2, mid + (window + 1) // 2
+        idx = np.searchsorted(ps, e, side="left") - 1
+        ok = idx >= 0
+        hit += int(np.count_nonzero(ok & (pe[np.clip(idx, 0, None)] > s)))
+    return hit / len(matched)
+
+
 def sample_negatives(
     peaks: Path, sequences: Path, bigwig: Path, out_path: Path,
-    keep: list[str], alpha: float | None, dry_run: bool,
+    keep: list[str], alpha: float | None, species: str, dry_run: bool,
 ) -> None:
     """GC-matched negatives, restricted to `keep`.
 
@@ -315,9 +371,15 @@ def sample_negatives(
     same `to_csv` -- so this is a one-argument divergence, not a fork. Keep it
     that way; if bpnet-lite ever grows a `--chroms` flag, go back to the CLI.
     """
+    tile = NEGATIVE_WINDOW.get(species, IN_WINDOW)
+    # out_window scaled to keep the flank proportion; the assertion inside
+    # extract_matching_loci is `in_window >= out_window`, so both must move.
+    out_tile = max(1, round(tile * OUT_WINDOW / IN_WINDOW))
+    if tile != IN_WINDOW:
+        print(f"  tiling GC candidates at {tile} bp (not {IN_WINDOW}) for {species}")
     if dry_run:
-        print(f"  # extract_matching_loci({peaks.name}, chroms={len(keep)} main) "
-              f"-> {out_path.name}")
+        print(f"  # extract_matching_loci({peaks.name}, chroms={len(keep)} main, "
+              f"tile={tile}) -> {out_path.name}")
         return
 
     from tangermeme.match import extract_matching_loci
@@ -342,17 +404,26 @@ def sample_negatives(
         names=["chrom", "start", "end"], dtype={0: str},
     )
 
-    matched = extract_matching_loci(
-        loci=loci,
-        fasta=str(sequences),
-        bigwig=str(bigwig),
-        chroms=list(keep),
-        in_window=IN_WINDOW,
-        out_window=OUT_WINDOW,
-        verbose=True,
-        n_jobs=1,
-        **({"signal_beta": alpha} if alpha is not None else {}),
-    )
+    # The empty-match check below is NOT reachable on its own: with verbose=True
+    # tangermeme prints diagnostics before returning, and one of them is
+    # `_counts_from_coords(...).max()`, which raises on an empty array first.
+    # So the ValueError has to be caught here and translated.
+    try:
+        matched = extract_matching_loci(
+            loci=loci,
+            fasta=str(sequences),
+            bigwig=str(bigwig),
+            chroms=list(keep),
+            in_window=tile,
+            out_window=out_tile,
+            verbose=True,
+            n_jobs=1,
+            **({"signal_beta": alpha} if alpha is not None else {}),
+        )
+    except ValueError as exc:
+        if "zero-size array" not in str(exc):
+            raise
+        matched = loci.iloc[:0]
     if len(matched) == 0:
         # tangermeme's own verbose path calls .max() on the matched counts and
         # dies with "zero-size array to reduction operation maximum", which says
@@ -373,8 +444,11 @@ def sample_negatives(
             "  * Both columns near-empty -> too few input peaks, or a "
             "chromosome-naming\n    mismatch between the peaks and the FASTA."
         )
+    overlap = peak_overlap_fraction(matched, loci, IN_WINDOW)
     matched.to_csv(out_path, header=False, sep="\t", index=False)
-    print(f"  wrote {len(matched):,} negatives")
+    print(f"  wrote {len(matched):,} negatives "
+          f"({len(matched) / max(len(loci), 1):.2f} per peak, "
+          f"{overlap:.1%} of their {IN_WINDOW} bp windows overlap a peak)")
 
 
 def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bool:
@@ -431,7 +505,7 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bo
 
         print(f"Matching GC-content negatives over {len(keep)} chromosomes...")
         sample_negatives(peaks_input, sequences, us_bw, out_path, keep,
-                         ALPHA.get(exp_id), dry_run)
+                         ALPHA.get(exp_id), exp["species"], dry_run)
 
     return True
 

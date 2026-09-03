@@ -2101,6 +2101,27 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   hits 1.00, meaning GC matching found a partner for essentially every peak and the peak count is the
   binding constraint.
 
+  **`NEGATIVE_WINDOW` in `make_negatives.py` is the knob, and every run now reports the cost.** It
+  overrides the candidate-tiling width per species for GC matching only. Shrinking it places candidate
+  midpoints more finely; it does NOT shrink the training window, because both
+  `_resize_coords_generator` and the loader's `extract_loci` resize to the same midpoint. The written BED
+  intervals do take that width, so nothing downstream may depend on it. `out_window` is scaled with it,
+  since `extract_matching_loci` asserts `in_window >= out_window`.
+  Alongside it, `sample_negatives` prints negatives per peak and **`pct_peak_overlap`** — the share whose
+  *2114 bp* window overlaps a peak, which is what the model will see. On a synthetic 2.4 Mb genome with a
+  peak every 780 bp (S. cerevisiae density) the trade is stark:
+
+  | tiling | negatives | per peak | overlap a peak |
+  | --- | --- | --- | --- |
+  | 2114 (default) | **0** | 0.00 | — |
+  | 1200 | 2 | 0.00 | 0.0% |
+  | 600 | 620 | 0.20 | **99.7%** |
+  | 400 | 2,466 | 0.80 | **99.8%** |
+
+  So narrowing does not buy clean negatives at yeast density — it buys many contaminated ones. That
+  synthetic is uniform and therefore worst case; real yeast peaks cluster, which is why the real run finds
+  310 rather than 0 at the default. **`NEGATIVE_WINDOW` is deliberately empty**: set an entry only with a
+  measured `pct_peak_overlap` in front of you, and record why.
   **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
   yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
   eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
