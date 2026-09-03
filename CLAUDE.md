@@ -2260,7 +2260,38 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   would fix the CLI too and is worth a tangermeme PR.
   `sample_negatives` now reads the BED itself with `dtype={0: str}` and passes the **DataFrame**, which
   skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
-  regression test uses all three naming styles on purpose.
+  regression test uses all three naming styles on purpose. (`dtype={0: str}` does work alongside
+  `names=`, checked directly: both `{0: str}` and `{"chrom": str}` give `object`.)
+
+  **The SAME bug has a second instance, in `tangermeme.io._load_exclusion_zones`, and it hit A. thaliana
+  training on 2026-09-03.** `KeyError: 1` out of
+  `exclusion_zones[chrom][start:end] = True` — the zones dict is keyed by the FASTA's string names while
+  the exclusion BED's column came back `int64`. Same missing `dtype`, opposite failure mode: **loud**
+  here, where `extract_matching_loci` was silent. A. thaliana is the only species that is both
+  numerically named *and* has a published exclusion list, which is why it was the one to break; the other
+  two numeric species carry `blacklist: null`, so the call never happens.
+
+  **It could not be fixed at the call site the way the first one was.** `_load_exclusion_zones` calls
+  `pandas.read_csv` on each element of `exclusion_lists` itself, so there is no pre-typed DataFrame to
+  hand it, and no file-level trick makes pandas infer `object` for an all-digit column. Renaming the BED's
+  contigs is worse than the bug: the published list was deliberately stripped to bare `1`-`5` to match the
+  Ensembl FASTA, and a list whose names do not match **excludes nothing, silently**. The remaining choices
+  were to fork `data_loader.py` — forbidden, it is byte-identical to procap-atlas's — or to patch the one
+  function, so `src/tangermeme_compat.py` patches it.
+
+  **`patch_numeric_chroms()` is SELF-RETIRING**, which is the part worth preserving. It functionally
+  probes the installed tangermeme with a numeric BED and returns without patching if the probe passes, so
+  the shim vanishes when tangermeme is fixed instead of shadowing a corrected implementation forever. It
+  also refuses to install a patch that fails its *own* probe, rather than silently breaking exclusion
+  lists for the nine species that were working. Called from all five scripts that pass a blacklist into
+  `extract_loci` (both fit scripts, both benchmarks, `attribute.py`), right after the deferred tangermeme
+  import.
+  Verified against the genuine upstream body lifted from the 1.4.1 wheel: unpatched reproduces
+  `KeyError: 1` on the real `TAIR10.Klasfeld.Excludable.bed.gz`; patched excludes 2.86 Mb across
+  chromosomes `1`-`5`; `chr`-prefixed lists behave identically through the patch; and a simulated
+  fixed-upstream is declined.
+  **So the tangermeme PR is now worth two `dtype={0: str}` edits, not one** — `match.extract_matching_loci`
+  and `io._load_exclusion_zones`.
 - **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
   over the first full run (2026-09-03), negatives per peak. **These are the filter-ON numbers**, kept
   because they are what motivated `NO_SIGNAL_FILTER`; the yeast rows are 3-4x higher at the sparse end

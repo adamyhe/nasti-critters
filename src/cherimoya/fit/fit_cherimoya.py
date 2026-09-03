@@ -206,6 +206,12 @@ def main():
     from cherimoya import Cherimoya
     from data_loader import PeakGenerator
     from tangermeme.io import extract_loci
+    from tangermeme_compat import patch_numeric_chroms
+
+    # Numeric chromosome names (A.thaliana 1-5, C.reinhardtii 1-17,
+    # P.patens 1-27) hit a dtype bug in tangermeme's BED reading. Self-retiring
+    # no-op once tangermeme is fixed -- see src/tangermeme_compat.py.
+    patch_numeric_chroms(verbose=params["verbose"])
     from torch.optim import SGD, AdamW
     from torch.optim.lr_scheduler import (
         ConstantLR,
