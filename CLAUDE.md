@@ -54,6 +54,14 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   Keeping it out of `workflow/Snakefile` is what makes the claim above true: the entire pipeline runs
   from the mamba env with no venv and no GPU stack. Run it separately, from the venv, before training —
   `uv run python src/make_negatives.py`. Do not add it back as a rule.
+- **The venv side must not shell out to a conda binary, and `make_negatives.py` did — three times.**
+  It failed with `No such file or directory: 'bigWigToBedGraph'`, because that binary is an
+  `environment.yml` package while this script runs from the uv venv. The other two would have been the
+  next two failures: `bgzip` in `filter_peaks`, which runs unconditionally, and a `samtools faidx`
+  fallback. All three are now in-process — `pybigtools` for the strand merge, the `gzip` module for the
+  BED, `pyfaidx` for the index — leaving `bpnet negatives` as the only subprocess, which is correct
+  because bpnet-lite *is* a venv package. **When adding to this script, check which environment provides
+  what you are calling.**
 - **When auditing that boundary, grep for `subprocess`, `run([` and bare command names in `shell:`
   blocks — not just imports.** An earlier version of this file claimed preprocessing needed no uv,
   verified by loading each script and checking `sys.modules`. That covers what a script *imports* and
@@ -74,8 +82,8 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   `uv pip install --python "$CONDA_PREFIX/bin/python" -r pyproject.toml`. Module loads are in
   `src/bpnet/fit/slurm.sh`.
 - Preprocessing shells out to: fastp, STAR, samtools, bedtools, GNU coreutils `sort`, `bgzip`,
-  `bedGraphToBigWig`/`bigWigToBedGraph`/`bigWigMerge`, `pints_caller`, `umi_tools`, and the `bpnet` CLI
-  (`bpnet negatives`). The pipeline pulls FASTQs straight from ENA over HTTPS, so SRA Toolkit is not
+  `bedGraphToBigWig`, `pints_caller` and `umi_tools`. **`bigWigToBedGraph` and `bigWigMerge` are gone**,
+  and so is the `bpnet` CLI from this list — see the next bullet. The pipeline pulls FASTQs straight from ENA over HTTPS, so SRA Toolkit is not
   needed; homerTools, `fasterq-dump` and `proseq2.0` are no longer used anywhere.
 - **No site-specific values are hard-coded any more.** Launchers and `launch.py` take `--partition`/`-C`
   at submit time and emit no such directive by default; container use is opt-in via `APPTAINER_IMAGE` /
@@ -390,8 +398,11 @@ Things that will bite you:
   `genomecov` pass instead of N passes plus a merge plus a re-conversion. It also avoids a real trap:
   **`bigWigMerge` defaults `-threshold` to 0 and drops values at or below it**, so a minus-strand track
   stored as negative values merges to nothing. The deleted legacy fly script needed
-  `-threshold=-1000000` for precisely this, and `src/make_negatives.py` still abs-values the minus bigWig
-  before merging strands. Do not "modernise" this into a bigWig-level merge.
+  `-threshold=-1000000` for precisely this. Do not "modernise" this into a bigWig-level merge.
+  **Nothing in this repo calls `bigWigMerge` any more** — `src/make_negatives.py` was the last user and
+  now sums the two strands in-process with `pybigtools`. It still abs-values the minus track first, and
+  that is still load-bearing: without it the strands cancel instead of summing. The threshold trap went
+  with the tool; the reason it existed is worth keeping.
 - **We do NOT use `biodatatools`, and the unrecorded subcommand does not matter.** ENCODE produces its
   per-replicate bigWigs with `biodatatools` 0.0.7 and the source document omits the subcommand. That was
   logged as a blocker; it is not one, because the quantity is pinned from both ends. procap-atlas consumes
@@ -1990,9 +2001,22 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   than a bug — but check it before publishing yeast numbers.
 - **Negatives live in `main_chromosomes`, from `config/genomes.yaml`** — the same allow-list the bigWig
   and PINTS steps use, so negatives are drawn from exactly the space the peaks occupy.
-  `src/make_negatives.py` applies it in three places: the peak set, both bedgraphs, and the chrom.sizes
-  it feeds `bedGraphToBigWig`. All three are needed — restricting only chrom.sizes makes
-  `bedGraphToBigWig` abort on the first contig it no longer lists.
+  `src/make_negatives.py` applies it to the peak set, to the merged bigWig, and — the one that was
+  missing — to the **negative sampling space itself**.
+  **That last one was not being applied at all, and the claim above was false until 2026-09-02.**
+  The script shelled out to `bpnet negatives`, whose first line is
+  `chroms = list(pyfaidx.Fasta(args.fasta).keys())` — the whole assembly. `chroms` is not merely a filter
+  on the input loci: `extract_matching_loci` builds its candidate space from it
+  (`chrom_sizes = {key: len(fa[key]) for key in chroms}`), so negatives were drawn from organelles and
+  unplaced scaffolds no matter what the peaks and signal were restricted to. It is now a direct
+  `tangermeme.match.extract_matching_loci(..., chroms=keep)` call, which is the same three lines as the
+  CLI with that one argument changed. **Do not go back to the CLI** unless bpnet-lite grows a `--chroms`
+  flag.
+  It surfaced as a crash rather than as bad data only because the merged bigWig *is* restricted:
+  `_counts_from_coords` asked it for a contig it does not contain and pybigtools raised
+  `KeyError: 'No chromomsome with name \`scaffold_37\` found.'` (and `Mito` on S. cerevisiae). **A less
+  restricted bigWig would have returned counts and the negatives would have been quietly wrong** — which
+  is what had been happening for every species whose peaks happened to cover the whole assembly.
   This replaced a hand-written per-*experiment* `CHROM_EXCLUDE` regex map, which was wrong two ways.
   It **under-covered**: 3 of the 38 experiments then defined had an entry, so 35 filtered nothing while
   chrom.sizes came

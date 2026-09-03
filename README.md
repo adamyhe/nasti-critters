@@ -503,6 +503,16 @@ Outputs land in `data/procap/`. Until the pipeline has run, `launch.py` and
 the expected state mid-re-map. The three original experiments retain their
 previous paths under `legacy_processed:` in `config/experiment_config.yaml`.
 
+**`make_negatives.py` runs entirely in-process, and must stay that way.** It is
+the one script here that runs from the **uv venv** rather than the mamba env, so
+any binary from `environment.yml` is off `PATH` for it. It used to shell out to
+three of them — `bigWigToBedGraph`/`bigWigMerge` to sum the strands, `bgzip` to
+write the filtered peaks, `samtools faidx` to build a missing index — and the
+first of those is what produced
+`ERROR ...: [Errno 2] No such file or directory: 'bigWigToBedGraph'`. All three
+are now `pybigtools`, the `gzip` module and `pyfaidx`. **Before adding a
+subprocess call here, check which environment provides it.**
+
 Generate GC-matched negatives from `config/experiment_config.yaml`:
 
 ```bash
