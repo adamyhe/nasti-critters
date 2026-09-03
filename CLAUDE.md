@@ -2050,6 +2050,22 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   ints and would match nothing), and raises if `main_chromosomes` and the FASTA disagree rather than
   silently emitting a short chrom.sizes. `ALPHA` stays per-experiment: it is a tuning parameter, not a
   property of the genome.
+- **A purely numeric chromosome column silently drops EVERY peak inside `extract_matching_loci`.** Its
+  path branch is `pandas.read_csv(loci, sep='\t', usecols=[0,1,2], header=None, names=[...])` with **no
+  `dtype`**, so a BED whose first column is all digits infers as `int64`. The next line is
+  `numpy.isin(loci['chrom'], chroms)` against our all-string `chroms`, every comparison is False, `loci`
+  becomes empty, and the run dies further down on `zero-size array to reduction operation maximum` —
+  which names nothing.
+  This is the exact failure `main_chromosomes()`'s `str()` exists to prevent, happening one library
+  deeper. It took out **A. thaliana (1-5), C. reinhardtii (1-17) and P. patens (1-27)** — the only three
+  species with purely numeric names — and spared C. griseus purely because it has an `X`, which makes the
+  column `object`. Roman numerals and `chr`/`NC_` prefixes are safe for the same accidental reason.
+  **Pre-existing, not caused by dropping the `bpnet negatives` CLI**: that CLI passed
+  `pyfaidx.Fasta(...).keys()`, which are also strings, so it hit the same mismatch. Those three species
+  never had working negatives.
+  `sample_negatives` now reads the BED itself with `dtype={0: str}` and passes the **DataFrame**, which
+  skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
+  regression test uses all three naming styles on purpose.
 - **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
   over the first full run (2026-09-03), negatives per peak:
 

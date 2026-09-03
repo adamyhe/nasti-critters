@@ -322,8 +322,28 @@ def sample_negatives(
 
     from tangermeme.match import extract_matching_loci
 
+    # Read the BED OURSELVES, with chrom forced to str, and pass the DataFrame.
+    # extract_matching_loci accepts either a path or a DataFrame, and its path
+    # branch is `pandas.read_csv(..., names=['chrom','start','end'])` with no
+    # dtype -- so a purely numeric chromosome column infers as int64. It then
+    # does `numpy.isin(loci['chrom'], chroms)` against our all-string `chroms`,
+    # every comparison is False, and EVERY PEAK IS SILENTLY DROPPED.
+    #
+    # That is why A.thaliana (1-5), C.reinhardtii (1-17) and P.patens (1-27) --
+    # the three species with purely numeric names -- produced no negatives at
+    # all, while C.griseus survived on the strength of having an `X`, which
+    # makes the column object dtype. Roman-numeral and prefixed names are safe
+    # for the same reason.
+    #
+    # Pre-existing, not introduced by dropping the CLI: `bpnet negatives` passed
+    # pyfaidx keys, which are also strings, so it hit the same mismatch.
+    loci = pd.read_csv(
+        peaks, sep="\t", usecols=[0, 1, 2], header=None, index_col=False,
+        names=["chrom", "start", "end"], dtype={0: str},
+    )
+
     matched = extract_matching_loci(
-        loci=str(peaks),
+        loci=loci,
         fasta=str(sequences),
         bigwig=str(bigwig),
         chroms=list(keep),
