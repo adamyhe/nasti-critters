@@ -48,9 +48,15 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   `snakemake` is deliberately NOT a uv dependency; do not add preprocessing-only deps there.
   `numpy`/`pandas`/`pyyaml` appear in both on purpose, because scripts on both sides import them.
 - **GC-matched negatives are model prep, not preprocessing, and are deliberately outside the DAG.**
-  They are a training input rather than a label, and `src/make_negatives.py` is the only thing here that
-  shells out to `bpnet negatives` from **bpnet-lite, which is PyPI-only** — not on bioconda or
-  conda-forge, so it can never move into `environment.yml` the way `umi_tools` and `pypints` did.
+  They are a training input rather than a label, and `src/make_negatives.py` imports
+  **`tangermeme`, which is PyPI-only** — checked 2026-09-02, HTTP 404 on both `bioconda/tangermeme` and
+  `conda-forge/tangermeme` — so it can never move into `environment.yml` the way `umi_tools` and
+  `pypints` did.
+  **The package behind that argument changed and the conclusion did not.** It used to be bpnet-lite,
+  because the script shelled out to `bpnet negatives`; it now calls
+  `tangermeme.match.extract_matching_loci` directly and does not import bpnet-lite at all. Both are
+  PyPI-only, so the DAG boundary is exactly where it was — do not read "no more bpnet-lite" as
+  permission to move this into `workflow/Snakefile`.
   Keeping it out of `workflow/Snakefile` is what makes the claim above true: the entire pipeline runs
   from the mamba env with no venv and no GPU stack. Run it separately, from the venv, before training —
   `uv run python src/make_negatives.py`. Do not add it back as a rule.
@@ -59,9 +65,10 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   `environment.yml` package while this script runs from the uv venv. The other two would have been the
   next two failures: `bgzip` in `filter_peaks`, which runs unconditionally, and a `samtools faidx`
   fallback. All three are now in-process — `pybigtools` for the strand merge, the `gzip` module for the
-  BED, `pyfaidx` for the index — leaving `bpnet negatives` as the only subprocess, which is correct
-  because bpnet-lite *is* a venv package. **When adding to this script, check which environment provides
-  what you are calling.**
+  BED, `pyfaidx` for the index. A fourth call, `bpnet negatives` itself, went the same way for a
+  different reason — see the negatives bullet under "Data conventions" — so **the script now makes no
+  subprocess calls at all.** Keep it that way: when adding to it, check which environment provides what
+  you are calling.
 - **When auditing that boundary, grep for `subprocess`, `run([` and bare command names in `shell:`
   blocks — not just imports.** An earlier version of this file claimed preprocessing needed no uv,
   verified by loading each script and checking `sys.modules`. That covers what a script *imports* and
@@ -2017,6 +2024,20 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   `KeyError: 'No chromomsome with name \`scaffold_37\` found.'` (and `Mito` on S. cerevisiae). **A less
   restricted bigWig would have returned counts and the negatives would have been quietly wrong** — which
   is what had been happening for every species whose peaks happened to cover the whole assembly.
+  Calling `extract_matching_loci` directly is fine rather than a fork: `bpnet negatives` is a thin
+  wrapper around exactly that function. The alternative considered and rejected was to keep the CLI and
+  hand it a **symlink to the FASTA with a `.fai` subset to `main_chromosomes`** — which does work
+  (verified: pyfaidx reports only the indexed contigs and still reads sequence through the original
+  offsets), but restricts the CLI by trickery rather than by saying what is meant.
+- **`-j` is a PROCESS pool, and has to be.** It was a `ThreadPoolExecutor`, which was fine while the
+  work happened in `bigWigToBedGraph`/`bpnet` subprocesses that release the GIL. Once the strand merge
+  and the GC matching both moved in-process, threads serialised on the GIL and `-j 42` used about two
+  cores. Note the cost inside `extract_matching_loci` is a `joblib.Parallel(n_jobs=...)` scan over
+  chromosomes that the CLI pins to `n_jobs=1`, so a single experiment is single-threaded either way —
+  `-j` buys parallelism ACROSS experiments, not within one. Each worker holds a genome, so a large `-j`
+  on the multi-gigabase species is memory-hungry.
+  The `.fai` fallback in `make_chrom_sizes` used to be guarded by a `threading.Lock`, which processes do
+  not share; `main()` now builds every missing index serially before the pool starts.
   This replaced a hand-written per-*experiment* `CHROM_EXCLUDE` regex map, which was wrong two ways.
   It **under-covered**: 3 of the 38 experiments then defined had an entry, so 35 filtered nothing while
   chrom.sizes came

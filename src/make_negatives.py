@@ -2,8 +2,16 @@
 """Generate negative control regions for BPNet training.
 
 Reads experiment paths from config/experiment_config.yaml, builds an unstranded
-csRNA BigWig per experiment, and calls `bpnet negatives` to sample genomic windows
-with low transcription signal.
+initiation-signal BigWig per experiment, and GC-matches genomic windows with low
+transcription signal against the peak set.
+
+NOT csRNA. The temporary track was called `csrna.us.bw` and described as a
+"csRNA BigWig" until 2026-09-02, inherited from csRNAnet, the sibling repo this
+script came from. Nothing here is csRNA-seq: the corpus is PRO-cap, GRO-cap,
+ChRO-cap, 5'GRO and CoPRO. The distinction is not pedantic -- csRNAnet consumes
+the csRNA-seq tracks from GSE233927 while this repo maps that same series'
+5'GRO-seq FASTQs from scratch, so a log line naming the wrong assay is exactly
+the kind of thing that sends someone looking at the wrong input.
 
 Minus-strand BigWigs are always abs-valued before merging, which correctly
 handles both UCSC-format tracks (stored as negative values) and direct-format
@@ -29,8 +37,7 @@ import argparse
 import gzip
 import sys
 import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 
@@ -43,8 +50,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent   # src/ -> repo root
 CONFIG_PATH = REPO_ROOT / "config" / "experiment_config.yaml"
 GENOMES_PATH = REPO_ROOT / "config" / "genomes.yaml"
 
-_fai_locks: dict[Path, threading.Lock] = {}
-_fai_locks_mutex = threading.Lock()
 
 # Which chromosomes negatives may be drawn from: `main_chromosomes` for the
 # experiment's species, from config/genomes.yaml -- the same allow-list the
@@ -94,21 +99,18 @@ def make_chrom_sizes(
     sampling space inside the same chromosome space as the peaks.
     """
     fai = Path(str(sequences) + ".fai")
-    if not fai.exists():
-        with _fai_locks_mutex:
-            if fai not in _fai_locks:
-                _fai_locks[fai] = threading.Lock()
-        with _fai_locks[fai]:
-            # pyfaidx, not `samtools faidx`: samtools is an environment.yml
-            # binary and this script runs from the uv venv, so shelling out
-            # here is the same cross-environment bug as the old
-            # bigWigToBedGraph call. pyfaidx writes a byte-identical .fai and
-            # is already a venv dependency via tangermeme. Normally a no-op --
-            # the pipeline's `faidx` rule has run -- but the fallback has to
-            # work where it has not.
-            if not fai.exists() and not dry_run:
-                import pyfaidx
-                pyfaidx.Faidx(str(sequences))
+    if not fai.exists() and not dry_run:
+        # pyfaidx, not `samtools faidx`: samtools is an environment.yml binary
+        # and this script runs from the uv venv, so shelling out here is the
+        # same cross-environment bug as the old bigWigToBedGraph call. pyfaidx
+        # writes a byte-identical .fai.
+        #
+        # A last-resort fallback only. main() builds every index serially before
+        # the pool starts, because workers are PROCESSES and a lock here would
+        # not be shared between them. Reaching this line means an index went
+        # missing mid-run.
+        import pyfaidx
+        pyfaidx.Faidx(str(sequences))
     chrom_sizes = tmp / "chrom.sizes"
     if not dry_run:
         fai_df = pd.read_csv(
@@ -385,7 +387,7 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bo
         keep = main_chromosomes(exp["species"])
         chrom_sizes = make_chrom_sizes(sequences, keep, tmp, dry_run)
 
-        us_bw = tmp / "csrna.us.bw"
+        us_bw = tmp / "unstranded.bw"
         print("Building unstranded csRNA BigWig...")
         make_unstranded_bw(pl_bw, mn_bw, us_bw, chrom_sizes, keep, dry_run)
 
@@ -461,8 +463,33 @@ def main():
         process_experiment, force=args.force, dry_run=args.dry_run
     )
 
+    # Build every .fai serially first. It used to be created inside the worker
+    # under a threading.Lock; processes do not share that lock, so two workers
+    # on the same species could race writing one index. Doing it here is also
+    # cheap and idempotent.
+    if not args.dry_run:
+        for exp_id in exp_ids:
+            ref = (experiments[exp_id].get("processed") or {}).get("sequences")
+            if not ref:
+                continue
+            seq = REPO_ROOT / ref
+            if seq.exists() and not Path(str(seq) + ".fai").exists():
+                import pyfaidx
+                print(f"Indexing {seq.name}...")
+                pyfaidx.Faidx(str(seq))
+
     n_processed = n_skipped = 0
-    with ThreadPoolExecutor(max_workers=args.threads) as pool:
+    # PROCESSES, not threads. -j was a ThreadPoolExecutor, which was fine while
+    # the work happened in `bigWigToBedGraph`/`bpnet` subprocesses that release
+    # the GIL. Now that the strand merge and the GC matching both run
+    # in-process, threads serialise on the GIL and `-j 42` used about two cores.
+    # Each experiment is independent, so one process each restores the old
+    # concurrency without the old cross-environment subprocess calls.
+    #
+    # Note this is a genome per worker in memory, so a large -j on the
+    # multi-gigabase species is memory-hungry -- the same exposure the previous
+    # N-concurrent-`bpnet` model had.
+    with ProcessPoolExecutor(max_workers=args.threads) as pool:
         futures = {
             pool.submit(run_one, exp_id=exp_id, exp=experiments[exp_id]): exp_id
             for exp_id in exp_ids
