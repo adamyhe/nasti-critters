@@ -1989,16 +1989,26 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   exists *only* to add these `abs()` calls around `bpnetlite`'s `PeakGenerator`. Any new code that reads
   signal must do the same.
 - **Non-ACGT.** Every `extract_loci` call passes `ignore=list("QWERYUIOPSDFHJKLZXVBNM")`.
-- **Outlier peaks: no signal-based filter is applied, deliberately.** Both fit scripts pass
-  `max_counts=None`, matching procap-atlas, which does the same in its `fit_bpnet.py` and
-  `fit_cherimoya.py`. The pre-unification `fit_bpnet.py` (at `a806e0d`) did drop peaks above
-  `quantile(total_signal, 0.99) * 1.2`; the port to `data_loader.PeakGenerator` removed it, which brought
-  this repo in line with upstream. Do not reinstate it casually: the threshold is data-dependent, so every
-  species and library gets a different effective cutoff, which is corrosive in a repo whose point is
-  cross-species comparison — and the top of a PRO-cap signal distribution is real biology (snRNA, histone,
-  ribosomal-protein promoters), i.e. the most informative loci for an initiation model. Upstream uses
-  signal quantiles only in *diagnostics* (`locus_diagnostics`, `generate_warning_flags.py`), never to drop
-  training data. Artifact removal is the exclusion lists' job, and those are canonical published lists —
+- **Outlier peaks ARE dropped, at `quantile(0.99) * 1.2`. An earlier version of this file said the
+  opposite and it was wrong.** The claim was that the port to `data_loader.PeakGenerator` removed the
+  filter the pre-unification `fit_bpnet.py` (at `a806e0d`) had. It did not remove it — it MOVED it. The
+  filter now lives inside `src/bpnet/fit/data_loader.py`:
+
+      outlier_threshold = torch.quantile(loci_counts, 0.99) * 1.2
+      outlier_idxs = loci_counts > outlier_threshold
+      ...
+      peak_sequences=X_peaks[0][~outlier_idxs],
+
+  `max_counts=None` in both fit scripts is true and was the evidence for the wrong claim, but it is a
+  *different* knob — `max_counts` is tangermeme's own cutoff inside `extract_loci`, and this quantile
+  filter is applied afterwards, on top. `data_loader.py` is byte-identical to procap-atlas's, so upstream
+  drops them too; this is inherited, not local.
+  **The objection the old text raised is therefore live, not avoided.** The threshold is data-dependent,
+  so every species and library gets a different effective cutoff, which is corrosive in a repo whose
+  point is cross-species comparison — and the top of a PRO-cap signal distribution is real biology
+  (snRNA, histone, ribosomal-protein promoters), i.e. the most informative loci for an initiation model.
+  Roughly the top 1% of peaks per experiment is being discarded. Decide deliberately whether to keep it;
+  do not assume it is off. Artifact removal is the exclusion lists' job, and those are canonical published lists —
   **do not hand-curate regions into them**, or folds and preprocessing stop being comparable with
   procap-atlas.
 - **The real gap this leaves:** S. cerevisiae and S. pombe have no published exclusion list *and* no
