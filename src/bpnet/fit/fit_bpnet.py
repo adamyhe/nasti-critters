@@ -207,6 +207,34 @@ def main():
     else:
         print(f"Fold {args.fold}: test={split['test_chroms']}, valid={split['valid_chroms']}")
 
+    # Cap negative_ratio at the pool actually available, so no negative is drawn
+    # more than once per epoch. `negative_ratio` is negatives PER PEAK in a
+    # batch, so an epoch over N peaks draws N * ratio; where the pool is smaller
+    # than that the same regions recycle. That is not hypothetical -- with the
+    # configured 1/7, `S.cerevisiae-Spt5IAA4h_PROcap` draws 3,377 from a pool of
+    # 327, about 10x over, because its peaks are denser than one per training
+    # window and almost no window is peak-free.
+    #
+    # Computed from the WHOLE-GENOME counts, not the fold's. PeakGenerator
+    # filters both peaks and negatives by the same `chroms`, so pool/peaks is
+    # near-constant across folds, and the exact per-fold counts are not knowable
+    # here without duplicating extract_loci. An approximate cap that is always
+    # in the right direction beats forking data_loader.py, which is
+    # byte-identical to procap-atlas's.
+    #
+    # Only ever engages for the yeasts: every other experiment's pool is at
+    # least 0.26 per peak, comfortably above 1/7.
+    configured_ratio = params["negatives_ratio"]
+    available_ratio = len(negatives) / max(len(peaks), 1)
+    if available_ratio < configured_ratio:
+        params["negatives_ratio"] = available_ratio
+        print(
+            f"negative_ratio capped {configured_ratio:.4f} -> {available_ratio:.4f}: "
+            f"{len(negatives):,} negatives for {len(peaks):,} peaks, so the "
+            f"configured ratio would recycle each negative "
+            f"{configured_ratio / available_ratio:.1f}x per epoch"
+        )
+
     # Training DataLoader. Delegated to data_loader.PeakGenerator (identical to
     # procap-atlas's) rather than reimplemented here: it already applies the
     # torch.abs() minus-strand handling, the 99th-percentile outlier filter, and

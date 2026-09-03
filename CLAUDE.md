@@ -2323,8 +2323,36 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   | `S.cerevisiae_PROcap` | 6,759 | 966 | 1,905 | **0.5x** |
 
   So `S.cerevisiae_PROcap` is fine once the filter is off — it cannot even use its pool once per epoch —
-  and the two Spt5 depletions recycle roughly ten and seven times over. Lowering `negatives_ratio` for
-  those two is the cheapest lever, and unlike finer tiling it costs no peak contamination.
+  and the two Spt5 depletions recycle roughly ten and seven times over.
+- **`negative_ratio` is therefore CAPPED at the available pool**, in both `fit_bpnet.py` and
+  `fit_cherimoya.py`: `min(configured, len(negatives) / len(peaks))`, so no negative is drawn more than
+  once per epoch and the cap is printed when it engages. Chosen over loosening the signal filter because
+  it leaves the negatives themselves identical in kind to every other species — same silent-tail
+  definition — and changes only how often they are drawn.
+  Computed from **whole-genome** counts rather than the fold's: `PeakGenerator` filters peaks and
+  negatives by the same `chroms`, so `pool/peaks` is near-constant across folds, and the exact per-fold
+  numbers are not knowable at the call site without duplicating `extract_loci`. An approximate cap that
+  always errs in the right direction beats forking `data_loader.py`, which is byte-identical to
+  procap-atlas's.
+  **The cap makes the scarcity honest; it does not fix it.** `Spt5IAA4h` ends at 0.0127 negatives per
+  peak, so negatives are ~1.3% of a batch rather than the intended 12.5%. That is the true state of the
+  data, and 10x silent recycling was not.
+
+**Should the signal filter be loosened for the other experiments where negatives < peaks? No.** That is
+the wrong threshold — what matters is `pool/peaks` against `negatives_ratio`, not against 1. Sorted, the
+corpus has a clean gap with nothing in it:
+
+| | pool/peaks | vs 1/7 |
+| --- | --- | --- |
+| the 7 yeast experiments | 0.013 - 0.065 | **all below** |
+| `C.elegans-L3` (worst non-yeast) | **0.262** | 1.8x above |
+| `C.elegans` others, `D.melanogaster` | 0.57 - 1.00 | 4-7x above |
+| everything else | ~1.00 | 7x above |
+
+`C.elegans-L3` has 9,411 negatives for 35,923 peaks, which *looks* alarming and is not: at 1/7 an epoch
+draws 5,132, well inside the pool, so nothing recycles. Loosening the filter there would change what its
+negatives mean — silent tail to representative background — for **no training benefit at all**. Leave
+every non-yeast experiment alone.
 - Windows are `in_window=2114` / `out_window=1000` throughout; `trimming` is always
   `(in_window - out_window) // 2`.
 
