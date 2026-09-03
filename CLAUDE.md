@@ -2235,8 +2235,28 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   be a fair sample of what exists; or the pool is too small to teach anything and yeast needs a different
   background scheme (a strided rather than tiled candidate set would give many more, and would need an
   upstream change). **Read yeast negatives-derived metrics with this in mind.**
-- **Negatives ratio.** GC-matched negatives are sampled at a low ratio (1/7 in `fit_bpnet.py`, 0.1 in the
-  JSON configs) rather than a balanced mix.
+- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya, i.e. negatives are 1/8 and 1/5 of a batch.**
+  An earlier version of this line had it backwards, as "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs".
+  It is the other way round: `config/bpnet_params.json` sets `negatives_ratio: 0.142857…` and
+  `config/cherimoya_params.json` sets `0.25`, while **0.1 is only `PeakGenerator`'s default and never
+  applies**, because `fit_bpnet.py` passes `params["negatives_ratio"]`. The ratio is negatives per peak,
+  so 1/7 means one negative for every seven peaks.
+  It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
+  the pool available with the signal filter off:
+
+  | experiment | peaks | draws/epoch at 1/7 | pool | reuse |
+  | --- | --- | --- | --- | --- |
+  | `Spt5IAA4h` | 23,642 | 3,377 | 327 | **10.3x** |
+  | `Spt5IAA1h` | 21,591 | 3,084 | 419 | **7.4x** |
+  | `Ino80KD` | 16,865 | 2,409 | 520 | 4.6x |
+  | `Ino80ctl` | 15,431 | 2,204 | 579 | 3.8x |
+  | `Spt5EtOH` | 10,811 | 1,544 | 738 | 2.1x |
+  | `S.pombe_PROcap` | 9,208 | 1,315 | 947 | 1.4x |
+  | `S.cerevisiae_PROcap` | 6,759 | 966 | 1,905 | **0.5x** |
+
+  So `S.cerevisiae_PROcap` is fine once the filter is off — it cannot even use its pool once per epoch —
+  and the two Spt5 depletions recycle roughly ten and seven times over. Lowering `negatives_ratio` for
+  those two is the cheapest lever, and unlike finer tiling it costs no peak contamination.
 - Windows are `in_window=2114` / `out_window=1000` throughout; `trimming` is always
   `(in_window - out_window) // 2`.
 
