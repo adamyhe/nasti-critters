@@ -9,10 +9,10 @@ had become misleading: the `dm-` prefix dates from when this was one *D. melanog
 repo now covers 42 experiments across 12 species and three assay families.
 
 A research repo of training/evaluation scripts (no installable package, no test suite) for base-resolution
-sequence-to-function models of PRO-cap transcription-initiation profiles across non-human species. 26
-experiments over 10 species (*D. melanogaster*, *M. musculus*, *C. elegans*, *S. cerevisiae*, *S. pombe*,
-*A. thaliana*, and — added with the 2026-08-30 manifest update — *C. reinhardtii*, *P. patens*,
-*S. moellendorffii*, *C. griseus*) are defined in `config/experiment_config.yaml`, generated from the
+sequence-to-function models of PRO-cap transcription-initiation profiles across non-human species. 42
+experiments over 12 species (*D. melanogaster*, *M. musculus*, *C. elegans*, *S. cerevisiae*, *S. pombe*,
+*A. thaliana*, *C. reinhardtii*, *P. patens*, *S. moellendorffii*, *C. griseus* and — added 2026-09-01 —
+*G. arboreum*, *G. hirsutum*) are defined in `config/experiment_config.yaml`, generated from the
 manifest in `planning/`.
 
 **One experiment == one species x one biological condition == one model.** Perturbations (Ino80 depletion,
@@ -28,7 +28,7 @@ Two model families are trained on the same data:
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
 did not exist yet. Both are ignored now (along with `logs/`, `predictions/`, `performance_metrics/`,
-`attr/`); the full FASTQ set alone is ~120 GiB, so check `git status` before any bulk `git add`.
+`attr/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
 Every script resolves config/data paths relative to `REPO_ROOT`, computed from `__file__`, so scripts can be
 invoked from anywhere — but the launcher shell scripts assume the repo root as CWD.
 
@@ -224,8 +224,11 @@ Two drivers, same steps:
 - **`workflow/Snakefile` — preferred.** Proper DAG: parallel, resumable, atomic outputs, per-rule
   resources. `snakemake -c16 --config tier=include`. **Verified by local dry-run 2026-08-30**
   (`uvx --from snakemake --with pyyaml snakemake -s workflow/Snakefile -n -c1 --config tier=...`):
-  228 jobs for `tier=include`, **704 for all tiers** over 38 experiments and 10 genomes;
-  `fetch_only` 78, `signal_only` 542. Note the **target name must come before `--config`** --
+  and re-measured 2026-09-02 after cotton: **~286 jobs for `tier=include`, ~908 for all tiers** over 42
+  experiments and 12 genomes. **Treat the totals as approximate**: `fetch_fastq` is one job per FASTQ
+  *not already on disk*, so the number moves with local state — the same tree measured 906 with two more
+  files present. The experiment and genome counts are the stable part. Note the **target name must come
+  before `--config`** --
   `snakemake -n --config tier=include qc` makes Snakemake read `qc` as a config entry and die with
   "Config entries have to be defined as name=value pairs"; `snakemake qc -n --config tier=include`
   is correct.
@@ -271,7 +274,7 @@ manifest rows resolve. If another ArrayExpress row appears, do the same lookup r
 `resolve_runs.py` a second archive.
 
 **Fetching is separate from mapping.** `fetch_fastqs.py` bulk-downloads every FASTQ the config references
-(~120 GiB, 74 files over 64 runs — measured from ENA `fastq_bytes`) with md5 verification, so transfers
+(~202 GiB, 82 files over 64 runs — measured from ENA `fastq_bytes`) with md5 verification, so transfers
 can run on a login/transfer node instead of burning
 GPU allocation and a failed mapping run never re-downloads. Transfers stage through
 `data/fastq/.incoming/` and are only moved to the final path once the md5 matches — a file at the final path
@@ -291,7 +294,8 @@ Things that will bite you:
   and R2's 5' end (the RNA 3' end, on the opposite strand) alike — roughly half of each track becomes
   strand-flipped 3'-end signal. `final_bam` therefore applies `samtools view -f 64`, selected by
   `steps.signal.five_prime_mate`. It happens **after dedup** because `umi_tools --paired` needs both
-  mates. Only 5 of 40 experiments are paired (all S. cerevisiae: Ino80 x2, Spt5 x3), which is why this
+  mates. Only 8 of 42 experiments are paired for processing (5 S. cerevisiae, both cottons, and the
+  interleaved GCB run), which is why this
   went unnoticed. **R1 is a convention here, not a documented fact** — the manifest records read
   orientation only for `Liver_ChROcap_mm`, which ENA reports as single-end anyway. Validate it like
   `reverse_strand`: confirm signal piles up at annotated TSSs rather than 3' ends.
@@ -313,12 +317,13 @@ Things that will bite you:
   where `alignEndsType Local` soft-clips it, so **5' coordinates were preserved** but aligned length was
   spent against `--outFilterMatchNminOverLread 0.66`; and umi_tools deduplicated on read 2's first 10
   *genomic* bases — a tag determined by read 2's own mapping position, so it added nothing beyond the
-  fragment's 3' coordinate while dropping 43-57% of reads in the only 3 of 40 experiments that are
+  fragment's 3' coordinate while dropping 43-57% of reads in the only 3 of 42 experiments that are
   deduped at all.
 - **How a library is known to have a UMI: the manifest's `umi_len`/`umi_loc` columns, and nothing else.**
   `build_experiment_config.py` derives `raw.umi` from them (it used to be a hardcoded dict transcribed by
   hand from free text in `library_layout`). **The archives cannot corroborate this** — ENA's
-  `library_construction_protocol` was queried for all 45 runs and mentions a UMI for *none* of them,
+  `library_construction_protocol` was queried for all 45 runs then resolved and mentions a UMI for
+  *none* of them,
   including the three Spt5 experiments that demonstrably have one, so the manifest is authoritative and
   must be curated from the paper or GEO record. The direct evidence for Spt5 is the extracted read name,
   `SRR29037352.25948720:ACTAGATAGC` — a 10-base tag, matching `umi_len: 10`.
@@ -326,7 +331,7 @@ Things that will bite you:
   its PCR duplicates. That is the safer error, because deduplicating a non-UMI PRO-cap library destroys
   real stacked 5' ends — but it does mean a missed UMI is silent.
 - **umi_tools does nothing to non-UMI libraries, by design.** `final_bam` takes `unique.bam` directly
-  when `has_umi(run)` is false, so the `dedup` rule never runs for them — 37 of 40 experiments. This is
+  when `has_umi(run)` is false, so the `dedup` rule never runs for them — 39 of 42 experiments. This is
   deliberate: PRO-cap legitimately stacks many reads on one initiation base, so deduplicating a non-UMI
   library destroys real signal. Only the three Spt5 experiments carry a UMI.
 
@@ -493,7 +498,7 @@ existing checkpoints.
 
 **The six legacy `src/data_preprocessing/*.sh` download scripts are deleted** — `download_genomes.sh`,
 `download_{drosophila_s2_procap,scer,spombe}.sh`, `download_S2_PROcap_dm3.sh` and `utils.sh`. Everything they
-did is now in `workflow/Snakefile` (`fetch_genome`/`faidx`/`chrom_sizes`/`star_index` cover all six species;
+did is now in `workflow/Snakefile` (`fetch_genome`/`faidx`/`chrom_sizes`/`star_index` cover all twelve species;
 the old script covered three) or was part of the deleted dm3 regime. `utils.sh` was sourced by nothing and
 hard-coded `/programs/...` paths. Read them at `a806e0d` if you need the exact legacy provenance; do not
 restore them.
@@ -864,8 +869,8 @@ rather than re-deriving it.
 
 ENCODE aligns to no_alt references: a locus present twice (primary + alt) turns its reads into
 multi-mappers, which `--outFilterMultimapNmax 10` then MAPQ 255 discard, leaving a hole exactly where
-the duplication is. **All six references here were checked against their real contig lists and all six
-are already alt-free.** Do not add a contig-filtering step; there is nothing to filter.
+the duplication is. **All twelve references here were checked against their real contig lists and all
+twelve are already alt-free.** Do not add a contig-filtering step; there is nothing to filter.
 
 | reference | contigs | alt |
 | --- | --- | --- |
@@ -993,7 +998,7 @@ a `faidx_rdna` rule reachable; both are gone. If you ever drop the filter from `
 with it.
 
 This is the same treatment **mm10's `chrM` already gets** — no organelle appears in `main_chromosomes`
-for any of the 10 species — so a decoy can never reach a fold, a peak or a bigWig.
+for any of the 12 species — so a decoy can never reach a fold, a peak or a bigWig.
 
 **`organelle_accessions` covers a reference that omits its own organelles.** Unlike the rDNA sink, which
 prevents *mis*mapping, this fixes reads that cannot map at all:
@@ -1037,7 +1042,7 @@ against Ensembl's current default for each species, which is a different assembl
 
 **`organelle_contigs` records the organelles that are ALREADY in each assembly**, and exists purely so
 `src/qc/rrna_content.py` can measure organellar content for them. Without it the tool scores only against
-`data/decoy/` and reports 0% for the 7 of 10 species whose organelles are in the reference — a false
+`data/decoy/` and reports 0% for the 9 of 12 species whose organelles are in the reference — a false
 negative, not a missing measurement. Verified with a positive control: a k-mer taken from R64-1-1's `Mito`
 is present in the organellar index and absent from the rRNA one, and Booth S. cerevisiae then genuinely
 measures ~0% mitochondrial.
@@ -1127,7 +1132,7 @@ identical.
 ## Read-structure QC: the untrimmed adapter
 
 **Nothing in this pipeline configured a sequencing adapter until now, and it cost most of the reads in
-14 of 38 experiments.** `src/qc/read_structure_qc.py` (rule `read_structure_qc`, in `all` and `qc`,
+14 of the 38 experiments that existed when the survey was run.** `src/qc/read_structure_qc.py` (rule `read_structure_qc`, in `all` and `qc`,
 output `qc/reads/{exp}.tsv`) surveys the raw FASTQs so this is visible before alignment burns the compute.
 
 The failure chain, established from `Log.final.out` plus the reads themselves:
@@ -1156,7 +1161,7 @@ Two further traps found in the same reads, both of which survive adapter trimmin
   already spent and any real variant is fatal. `dead_cycles` reports it. The fix is a length-scaled cap
   (`--outFilterMismatchNoverLmax`) rather than `Nmax 1`, marked `DEVIATION` in
   `config/procap_pipeline.yaml`.
-- **`--overlap_len_require 18` is paired-end only** and therefore inert for 35 of 40 experiments. The
+- **`--overlap_len_require 18` is paired-end only** and therefore inert for 34 of 42 experiments. The
   ENCODE trim string is doing less than it looks.
 
 **Read `pct_short_untrimmed`, not `pct_adapter`.** Every library carries a few percent of adapter
@@ -1389,7 +1394,8 @@ TSV) and `qc/umi/`. They stay inside the DAG only because `pybigwig`, `pyfastx`,
   ratios. The PWM check is never gated — it is annotation-free.
 - **Neither panel is capped any more.** `--max-peaks`/`--max-tss` default to all. The old defaults
   (20,000 / 5,000) took a **prefix of a sorted file, not a sample**: `combine_peaks` writes peaks
-  `sort -k1,1 -k2,2n`, so the logo for the 16 of 38 experiments that hit the cap was estimated from a
+  `sort -k1,1 -k2,2n`, so the logo for the 16 of the 38 experiments then defined that hit the cap was
+  estimated from a
   genomic prefix — `C.griseus-CHO_GROcap` used 30% of its peaks, roughly one third of the genome in
   lexicographic chromosome order. The PWM's standard error at n=20,000 was already negligible, so this
   buys freedom from that bias rather than precision. The TSS cap bound for **all 38** experiments
@@ -1405,7 +1411,7 @@ Annotation (`annotation_url` in `config/genomes.yaml`, UCSC GTF for the chr-pref
 Ensembl GFF3 for the bare-named ones, so naming always matches the FASTA) is used **for QC only** —
 never for training, peak calling or fold assignment, so no circularity reaches the model.
 
-**GTF exists for all 10 species, but the source split is not free to change.** Ensembl ships a parallel
+**GTF exists for all 12 species, but the source split is not free to change.** Ensembl ships a parallel
 `gtf/` tree at the same release for all seven Ensembl species (probed 2026-08-30, all HTTP 200). Switching
 the three UCSC species to Ensembl GTF is nevertheless **wrong**: the annotation source is chosen so
 chromosome names match the FASTA, and Ensembl's fly GTF says `2L` where dm6 says `chr2L`. Literal name
@@ -1482,8 +1488,9 @@ All 14 runs were resolved against ENA and all report `SINGLE`. Findings worth ke
   references" rule matters here as much as anywhere.
 - **`Shamie2021` `Liver_GROCap1` is shallow at 5.4 M reads** — an order of magnitude below its siblings
   (23-40 M). Treat its model with suspicion.
-- Download total is now **~120 GiB / 74 files / 64 runs**, measured from ENA `fastq_bytes`. The new
-  projects add only 12.5 GiB; the old "~78 GiB" figure was already stale at 107.3 GiB.
+- Download total at that update was **~120 GiB / 74 files / 64 runs**, measured from ENA `fastq_bytes`
+  (the new projects added only 12.5 GiB; the old "~78 GiB" figure was already stale at 107.3 GiB).
+  **Superseded by cotton — it is ~202 GiB / 82 files now.**
 
 ### Two things this update broke, both fixed
 
@@ -1621,7 +1628,7 @@ rrna output"; conflating them let a stale organellar number resurrect through th
 
 **`qc/rrna` and `qc/reads` ARE declared `stats_table` inputs, after the opportunistic version failed in
 an instructive way.** The argument for leaving them out was that declaring them forces the cheap
-`snakemake stats` target to depend on the ~120 GiB of raw FASTQ, with the `,raw`/`,adj` suffix as the
+`snakemake stats` target to depend on the ~202 GiB of raw FASTQ, with the `,raw`/`,adj` suffix as the
 safeguard. The suffix held, but the outcome was still wrong: nothing ordered the two, so `stats_table` ran
 before `rrna_content` finished for **one of 38** experiments, and `C.griseus-BMDM_GROcap` alone was judged
 on the raw rate while the other 37 were adjusted. A wholly unadjusted table would have been obvious; one
@@ -1768,8 +1775,13 @@ solvable there:
 | --- | --- | --- | --- |
 | C. reinhardtii | yes | yes | **copied verbatim**; the two upstream copies were verified identical first |
 | P. patens | yes | yes | **copied verbatim**; likewise verified identical |
-| S. moellendorffii | no | no | peak-level folds, permanently (no chromosomes exist) |
-| C. griseus | no | no | chromosome-level, pending peaks |
+| S. moellendorffii | no | no | peak-level folds, permanently (no chromosomes exist); **built 2026-09-02** |
+| C. griseus | no | no | chromosome-level; **assigned here 2026-09-01** from CHO peak counts |
+
+The two cottons were added later and are the same story: neither is in csRNAnet or plant-design, both are
+chromosome-level, and both were **assigned here 2026-09-02** from their own peak counts. All four
+locally-originated entries — plus the retuned six-fold `C.elegans` — need pushing upstream before those
+species are used outside this repo.
 
 csRNANet holds the canonical `configs/splits/{species}_data_fold_assignments.csv` files that
 plant-design's `chrom_splits.yaml` is derived from, and for both reused species the CSV and the YAML
@@ -1982,7 +1994,8 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   it feeds `bedGraphToBigWig`. All three are needed — restricting only chrom.sizes makes
   `bedGraphToBigWig` abort on the first contig it no longer lists.
   This replaced a hand-written per-*experiment* `CHROM_EXCLUDE` regex map, which was wrong two ways.
-  It **under-covered**: 3 of 38 experiments had an entry, so 35 filtered nothing while chrom.sizes came
+  It **under-covered**: 3 of the 38 experiments then defined had an entry, so 35 filtered nothing while
+  chrom.sizes came
   from the whole FASTA `.fai` — fine for dm6, but S. moellendorffii has 757 scaffolds and C. griseus 637.
   And it was **actively incorrect**: the patterns were substring regexes over the entire BED line, so
   dm6's `_` dropped any peak whose *name* contained an underscore, not just the scaffolds it targeted

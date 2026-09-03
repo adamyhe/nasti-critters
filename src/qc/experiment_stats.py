@@ -217,7 +217,7 @@ def mapped_reads(bam: Path, keep: set | None = None) -> int | None:
     chrM, Pt and any decoy, but `bedgraph` greps to main_chromosomes afterwards,
     so those reads never enter a bigWig or a peak. Counting them made
     `signal_reads` -- documented as "the number that matters" -- overstate usable
-    depth for the 7 of 10 species with in-assembly organelles, and the error
+    depth for the 9 of 12 species with in-assembly organelles, and the error
     grows with every decoy added (12.2% of the C. reinhardtii library lands on
     the plastid decoy alone).
     """
@@ -450,7 +450,7 @@ def read_survey_flags(qc_reads: Path, exp_id: str) -> list[str]:
     """Per-run read-structure failures for one experiment, from the survey TSV.
 
     Read OPPORTUNISTICALLY and not declared as a Snakemake input, on purpose.
-    read_structure_qc.py surveys the raw FASTQs, which are ~120 GiB and are
+    read_structure_qc.py surveys the raw FASTQs, which are ~202 GiB and are
     routinely deleted once mapping is done; making the stats table depend on
     them would mean the table could no longer be rebuilt from surviving
     outputs. Absent survey -> no read-level flags, and the mapping and peak

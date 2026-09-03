@@ -8,14 +8,14 @@ instead of burning GPU allocation, a failed mapping run never re-downloads, and
 integrity is checked once up front.
 
 Only runs referenced by config/experiment_config.yaml are fetched. Downloading
-whole studies instead would be ~1.1 TiB rather than ~78 GiB, because several
+whole studies instead would be several times larger than the ~202 GiB here, because several
 deposits bundle unrelated assays and other species (PRJNA834081 is 8/11 human
 Ramos libraries; SRP131922 is 294 runs of which one is wanted).
 
 FASTQ URLs and md5 checksums come from planning/manifest_runs_resolved.tsv,
 which is produced by resolve_runs.py from ENA metadata.
 
-Storage: ~78 GiB total. On a cluster, point --fastq-dir at scratch (or set
+Storage: ~202 GiB total. On a cluster, point --fastq-dir at scratch (or set
 PROCAP_FASTQ_DIR) rather than filling the repo checkout:
 
     ln -s /scratch/users/$USER/procap_fastq data/fastq

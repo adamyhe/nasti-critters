@@ -166,7 +166,7 @@ def build_index(species: str, genome: dict) -> dict:
     fasta = REPO_ROOT / genome["fasta"]
     idx = {}
     # Organelle contigs already in the assembly, so pct_organellar is measured
-    # for the 7 of 10 species that have them. Scoring only against data/decoy/
+    # for the 9 of 12 species that have them. Scoring only against data/decoy/
     # would report 0% for all of those, which is a false negative rather than a
     # missing measurement.
     in_asm = [str(c) for c in (genome.get("organelle_contigs") or [])]

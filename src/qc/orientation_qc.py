@@ -136,7 +136,8 @@ def peak_maxima(peaks, pl_bw, mn_bw, limit=None):
     `limit=None` means every peak, which is the default and what you want.
     combine_peaks writes the peak file `sort -k1,1 -k2,2n`, so it is
     COORDINATE-SORTED -- a `limit` therefore takes a genomic PREFIX, not a
-    sample. At the old default of 20,000 that capped 16 of 38 experiments, and
+    sample. At the old default of 20,000 that capped 16 of the 38 experiments
+    then defined, and
     C.griseus-CHO used 30% of its peaks, i.e. roughly one third of the genome in
     lexicographic chromosome order. The PWM's standard error at n=20,000 was
     already negligible, so this is about not estimating a sequence preference

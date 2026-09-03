@@ -3,7 +3,7 @@
 
 Why this exists: UMI presence is curated by hand in the manifest
 (umi_len/umi_loc) and CANNOT be cross-checked against the archives -- ENA's
-library_construction_protocol was queried for all 45 runs of this project and
+library_construction_protocol was queried for all 45 runs then resolved and
 mentions a UMI for none of them, including the three Spt5 experiments that
 demonstrably have one. The scheme is default-deny, so a library whose UMI was
 never noted keeps its PCR duplicates and nothing in the pipeline complains.

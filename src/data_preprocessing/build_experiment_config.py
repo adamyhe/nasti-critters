@@ -240,7 +240,7 @@ LEGACY = {
 # nothing made it visible next to the sample it describes.
 #
 # It cannot be cross-checked against the archives: ENA's
-# library_construction_protocol was queried for all 45 runs and mentions a UMI
+# library_construction_protocol was queried for all 45 runs then resolved and mentions a UMI
 # for NONE of them, including the three Spt5 experiments that demonstrably have
 # one (their read names carry a 10-base tag, e.g.
 # SRR29037352.25948720:ACTAGATAGC). So the manifest is authoritative and must be

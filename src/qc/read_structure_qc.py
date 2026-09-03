@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Survey raw read structure: adapter content, insert length, dead cycles.
 
-Written after the first full run showed 14 of 38 experiments losing most of
+Written after the first full run showed 14 of the 38 experiments then defined
+losing most of
 their reads to STAR's `unmapped: too short`. The cause was not read length or
 the mismatch filter but an UNTRIMMED ADAPTER: PRO-seq/ChRO-cap libraries carry
 the Illumina small-RNA 3' adapter (TGGAATTCTCGGGTGCCAAGG, also proseq2.0's

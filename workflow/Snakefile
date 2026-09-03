@@ -1202,7 +1202,7 @@ rule stats_table:
     qc/reads and qc/rrna ARE declared inputs, after an attempt at reading them
     opportunistically failed in a way worth recording. The argument for leaving
     them out was that declaring them makes the cheap standalone `snakemake stats`
-    target depend on the raw FASTQs (~120 GiB, routinely deleted after mapping),
+    target depend on the raw FASTQs (~202 GiB, routinely deleted after mapping),
     with the `,adj`/`,raw` suffix on each mapping flag as the safeguard.
 
     That safeguard held but the outcome was still wrong: because nothing ordered

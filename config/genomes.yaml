@@ -93,7 +93,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -158,7 +158,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -214,7 +214,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -268,7 +268,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -320,7 +320,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -376,7 +376,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -443,7 +443,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -492,7 +492,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -575,7 +575,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/
@@ -638,7 +638,7 @@ species:
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
     # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 7 of 10.
+    # species whose organelles are in the reference, which is 9 of 12.
     # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
     # Only needed where the annotation carries no `rRNA` feature: the three
     # UCSC species use refGene GTF, which types everything exon/CDS/

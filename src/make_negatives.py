@@ -54,7 +54,7 @@ _fai_locks_mutex = threading.Lock()
 # (`CHROM_EXCLUDE = {"S.cerevisiae_PROcap": "Mito", "S.pombe_PROcap": "MT|AB",
 # "D.melanogaster-S2_PROcap": "_|2110000|Y|rDNA"}`). Three problems with that,
 # all of which get worse as species are added:
-#   * it covered 3 of 38 experiments, so 35 filtered nothing at all;
+#   * it covered 3 of the 38 experiments then defined, so 35 filtered nothing;
 #   * the chrom.sizes it fed to bedGraphToBigWig came from the whole FASTA
 #     .fai, so negatives could be sampled on organelles and unplaced scaffolds
 #     -- 757 of them in S. moellendorffii, 637 in C. griseus;
