@@ -5,14 +5,6 @@ Reads experiment paths from config/experiment_config.yaml, builds an unstranded
 initiation-signal BigWig per experiment, and GC-matches genomic windows with low
 transcription signal against the peak set.
 
-NOT csRNA. The temporary track was called `csrna.us.bw` and described as a
-"csRNA BigWig" until 2026-09-02, inherited from csRNAnet, the sibling repo this
-script came from. Nothing here is csRNA-seq: the corpus is PRO-cap, GRO-cap,
-ChRO-cap, 5'GRO and CoPRO. The distinction is not pedantic -- csRNAnet consumes
-the csRNA-seq tracks from GSE233927 while this repo maps that same series'
-5'GRO-seq FASTQs from scratch, so a log line naming the wrong assay is exactly
-the kind of thing that sends someone looking at the wrong input.
-
 Minus-strand BigWigs are always abs-valued before merging, which correctly
 handles both UCSC-format tracks (stored as negative values) and direct-format
 tracks (already positive).
@@ -388,7 +380,7 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bo
         chrom_sizes = make_chrom_sizes(sequences, keep, tmp, dry_run)
 
         us_bw = tmp / "unstranded.bw"
-        print("Building unstranded csRNA BigWig...")
+        print("Building unstranded signal BigWig (plus + |minus|)...")
         make_unstranded_bw(pl_bw, mn_bw, us_bw, chrom_sizes, keep, dry_run)
 
         # Always filter, for every species. Peaks from the pipeline are already
