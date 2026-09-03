@@ -1676,6 +1676,25 @@ Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the
 rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
 enough to be committed.
 
+**`umi_report.py` was checking the WRONG MATE, and it was the last place the old 3'-adaptor assumption
+survived.** It hardcoded `expect = declared if (not paired or mate_i == 2) else 0`, with a comment
+asserting "for a 3' adaptor UMI that is R2, which is what fastp is told (--umi_loc read2)" — the exact
+claim the Spt5 investigation overturned. The pipeline was corrected to `5' adaptor -> read1`; this report
+was not, so for all six Spt5 runs it expected 10 nt on R2, found none, and printed
+`MISMATCH (manifest says 10)` on R2 while R1 read `no UMI signature`. **Both lines were artifacts of the
+report, not findings about the data.** It now resolves the mate through the same
+`steps.dedup.umi_locations` table both drivers hand to fastp, and raises on an unmapped prose value rather
+than defaulting. Verified: `5' adaptor -> mate 1`, `3' adaptor -> mate 2`, and `declared` now sits on R1
+for Spt5.
+
+**Fixing it requires no re-mapping, but it does re-run against the raw FASTQs.** `umi_report.py` is pure
+reporting — its only output is `qc/umi/{exp}.tsv`, consumed by nothing but the `all` and `qc` targets, and
+the pipeline's UMI handling never came from it. No BAM, bigWig, peak or negative changes. But the script
+is a declared `input:` of the `umi_report` rule, so editing it re-runs that rule for all 42 experiments,
+and the rule's other inputs are the **raw FASTQs**. Where those have been deleted, `snakemake qc` will
+try to re-fetch them. Run `python src/data_preprocessing/umi_report.py -e <exp>` standalone instead if
+the FASTQs are gone and only the table is wanted.
+
 **A handled interleaved deposit is not a defect, and `declared_interleaved` in the survey TSV is what says
 so.** `M.musculus-GCB_PROcap` was reported `FAIL:interleave_suspect` after the re-map even though its
 interleaving is declared and deinterleaved — the per-file printout said "(already declared)" but the
