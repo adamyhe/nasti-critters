@@ -335,12 +335,23 @@ def sample_negatives(
     )
     if len(matched) == 0:
         # tangermeme's own verbose path calls .max() on the matched counts and
-        # dies with "zero-size array to reduction operation maximum" here, which
-        # says nothing about the cause. Fail with something actionable instead.
+        # dies with "zero-size array to reduction operation maximum", which says
+        # nothing about the cause. The cause IS printed, in the GC-bin table
+        # immediately above, so point at it.
         raise SystemExit(
-            f"no GC-matched negatives found for {peaks.name} over "
-            f"{len(keep)} chromosomes. Usually too few input peaks, or a "
-            f"chromosome-naming mismatch between the peaks and the FASTA."
+            f"\nno GC-matched negatives for {peaks.name} over {len(keep)} "
+            f"chromosomes.\n"
+            "Read the 'GC Bin / Background Count / Peak Count' table printed "
+            "just above:\n"
+            "  * Background Count all zero -> every candidate window was "
+            "rejected, either by\n    max_n_perc (N content) or by the signal "
+            "threshold, which is the 1st percentile\n    of peak signal times "
+            "signal_beta. Raise this experiment's ALPHA in make_negatives.py.\n"
+            "  * Background nonzero but concentrated in bins where Peak Count "
+            "is zero -> the\n    peaks sit at a GC content the rest of the "
+            "genome does not offer. Widen\n    gc_bin_width.\n"
+            "  * Both columns near-empty -> too few input peaks, or a "
+            "chromosome-naming\n    mismatch between the peaks and the FASTA."
         )
     matched.to_csv(out_path, header=False, sep="\t", index=False)
     print(f"  wrote {len(matched):,} negatives")
