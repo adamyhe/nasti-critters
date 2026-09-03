@@ -2050,6 +2050,31 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   ints and would match nothing), and raises if `main_chromosomes` and the FASTA disagree rather than
   silently emitting a short chrom.sizes. `ALPHA` stays per-experiment: it is a tuning parameter, not a
   property of the genome.
+- **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
+  over the first full run (2026-09-03), negatives per peak:
+
+  | species | negatives/peak | negatives as % of all candidate windows |
+  | --- | --- | --- |
+  | S. cerevisiae (6 experiments) | **0.01-0.07** | 4.5-7.7% |
+  | S. pombe | **0.03** | 5.3% |
+  | C. elegans | 0.26-0.70 | 20-36% |
+  | D. melanogaster | 0.73-1.00 | 31-48% |
+  | everything else | **1.00** | 0.7-16% |
+
+  `extract_matching_loci` tiles each chromosome into NON-OVERLAPPING `in_window` blocks, so the entire
+  candidate pool is `genome / 2114` — about **5,700 windows for a 12 Mb yeast genome**. Windows
+  overlapping a peak are masked out, and `S.cerevisiae-Spt5IAA4h_PROcap` has **23,642 peaks, four times
+  more than there are windows in the whole genome**. Almost nothing survives. Every large genome instead
+  hits 1.00, meaning GC matching found a partner for essentially every peak and the peak count is the
+  binding constraint.
+
+  **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
+  yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
+  eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
+  non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so 300 windows may
+  be a fair sample of what exists; or the pool is too small to teach anything and yeast needs a different
+  background scheme (a strided rather than tiled candidate set would give many more, and would need an
+  upstream change). **Read yeast negatives-derived metrics with this in mind.**
 - **Negatives ratio.** GC-matched negatives are sampled at a low ratio (1/7 in `fit_bpnet.py`, 0.1 in the
   JSON configs) rather than a balanced mix.
 - Windows are `in_window=2114` / `out_window=1000` throughout; `trimming` is always
