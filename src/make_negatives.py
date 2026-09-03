@@ -158,31 +158,80 @@ OUT_WINDOW = 1000
 NEGATIVE_WINDOW: dict[str, int] = {}
 
 #: Species whose candidate background is chosen WITHOUT the signal restriction.
-#: `--no-signal-filter` forces it on for a whole run; this is the recorded,
-#: per-species version, so the choice lives in the repo rather than in shell
-#: history.
+#: This is the recorded, per-species form of `--no-signal-filter`, so the choice
+#: lives in the repo rather than in shell history. `--force-signal-filter`
+#: overrides it for one run, which is how the two columns below were measured.
+#:
+#: **This is a deliberate, documented departure from bpnet-lite and
+#: procap-atlas, and it changes what a negative MEANS for these two species.**
+#: With the filter on, negatives are the SILENT TAIL of the genome (median
+#: signal 0 on a large genome); with it off they are REPRESENTATIVE PEAK-FREE
+#: background (0.67x a random window). Both are defensible and they are
+#: different things -- which is why this is a set of two species rather than a
+#: global default, and why anything derived from yeast negatives is not strictly
+#: comparable with the other ten species.
 #:
 #: Only worth setting where the genome is transcribed densely enough that the
 #: threshold -- `signal_beta x (1st percentile of peak signal)` over the window
-#: -- is what binds, rather than the supply of peak-free tiles. Measured on
-#: `S.cerevisiae_PROcap`:
+#: -- is what binds, rather than the supply of peak-free tiles. All seven yeast
+#: experiments measured 2026-09-03; the gain decays monotonically with density:
 #:
-#:                       negatives   per peak   overlap   median signal
-#:   filter on                 440       0.07      0.0%     (unmeasured)
-#:   filter off              1,905       0.28      0.0%    271 vs 961 peaks
+#:   experiment           peaks/win     ON     OFF   gain  neg/peak  med neg  med peak
+#:   S.cerevisiae_PROcap       1.18    440   1,905   4.3x      0.28      271       961
+#:   S.pombe_PROcap            1.56    311     947   3.0x      0.10      831     3,518
+#:   Spt5EtOH                  1.89    257     738   2.9x      0.07      316     1,873
+#:   Ino80ctl                  2.70    310     579   1.9x      0.04       90     4,701
+#:   Ino80KD                   2.95    313     520   1.7x      0.03       95     4,975
+#:   Spt5IAA1h                 3.78    348     419   1.2x      0.02       41     2,956
+#:   Spt5IAA4h                 4.14    301     327   1.1x      0.01       16     3,264
 #:
-#: **Read that 271 against the genome, not against the peaks.** An average
-#: 2114 bp window in this library holds 853 reads (4.87 M over 12.07 Mb), so the
-#: negatives sit at 0.32x a random window while the MEDIAN peak window sits at
-#: 1.13x. The median peak is unremarkable here because at 1.18 peaks per window
-#: essentially every window contains one; the informative peaks are in the tail.
-#: So dropping the filter buys 4.3x more negatives that are still three times
-#: quieter than average genome and never overlap a called peak.
+#: Peak overlap is 0.0% in all seven and the recovered windows are very quiet --
+#: 16 to 831 reads per 2114 bp against peak medians of 961-4,975 -- so there is
+#: no contamination to trade against at any density measured. The worry that
+#: dropping the filter would buy contaminated negatives was unfounded here.
 #:
-#: Set per species only after running the experiment and reading its numbers --
-#: the other six yeast experiments are 1.5-4x denser than this one and are not
-#: measured yet.
-NO_SIGNAL_FILTER: set[str] = set()
+#: **Read a median against the GENOME, not against the peaks.** An average
+#: 2114 bp window in `S.cerevisiae_PROcap` holds 853 reads (4.87 M over
+#: 12.07 Mb), so its negatives sit at 0.32x a random window while the MEDIAN
+#: peak window sits at 1.13x. The peak median is unremarkable because at 1.18
+#: peaks per window essentially every window contains one and the informative
+#: peaks are in the tail. That is why every run prints
+#: `negatives are Nx genome`; the percentage against peaks is the misleading
+#: comparator wherever the peak set saturates the genome.
+#:
+#: The crossover is near 2 peaks per window: below it the signal threshold is
+#: what binds and removing it gains 3-4x, above it the supply of peak-free tiles
+#: binds and removing it gains 10-20%. So this does NOT rescue the four densest
+#: experiments -- `Spt5IAA4h` goes 301 -> 327, still 0.014 negatives per peak,
+#: which is simply the peak-free fraction of a genome at 4.14 peaks per window.
+#: Only finer tiling could raise that, and NEGATIVE_WINDOW above records what
+#: finer tiling costs. Their negative pools stay small; the ratio cap in
+#: `fit_bpnet.py` is what stops that becoming heavy recycling.
+#:
+#: Non-yeast species are deliberately absent, and `negatives < peaks` is NOT the
+#: test for adding one. What matters is `pool/peaks` against `negatives_ratio`
+#: (1/7), not against 1, and the corpus has a clean gap with nothing in it: the
+#: seven yeast experiments are 0.013-0.065, the worst non-yeast is
+#: `C.elegans-L3` at 0.262 -- 1.8x above 1/7, so nothing recycles -- and
+#: everything else is 0.57-1.00. Loosening the filter for those would change
+#: what their negatives mean for no training benefit at all.
+NO_SIGNAL_FILTER: set[str] = {"S.cerevisiae", "S.pombe"}
+
+
+def resolve_signal_filter(mode: str, species: str) -> tuple[bool, str]:
+    """Whether the signal restriction applies, and why.
+
+    Three states rather than a bool, because once NO_SIGNAL_FILTER is populated
+    there has to be a way back to upstream behaviour for the species in it --
+    that is what produced the `ON` column in the table above.
+    """
+    if mode == "on":
+        return True, "--force-signal-filter"
+    if mode == "off":
+        return False, "--no-signal-filter"
+    if species in NO_SIGNAL_FILTER:
+        return False, "recorded in NO_SIGNAL_FILTER"
+    return True, "default"
 
 #: Interval values below this are treated as absent when summing the two
 #: strands. Counts are integers stored exactly in float32 and accumulated in
@@ -249,10 +298,10 @@ def make_unstranded_bw(
     bedGraphToBigWig` -- four UCSC binaries and four temporary files -- and it
     is the reason this script failed with `No such file or directory:
     'bigWigToBedGraph'`. Those binaries live in `environment.yml`, but
-    make_negatives.py is the one thing here that needs bpnet-lite, so it runs
-    from the uv venv where they are not on PATH. pybigtools is already a venv
-    dependency via tangermeme, so reading and writing directly removes the
-    cross-environment dependency instead of papering over it.
+    make_negatives.py needs tangermeme, which is PyPI-only, so it runs from the
+    uv venv where those binaries are not on PATH. pybigtools is a direct venv
+    dependency, so reading and writing here removes the cross-environment
+    dependency instead of papering over it.
 
     abs() on the minus strand is still the load-bearing part and must stay: it
     makes UCSC-convention tracks (negative values) and direct tracks (already
@@ -422,7 +471,7 @@ def peak_overlap_fraction(matched: pd.DataFrame, loci: pd.DataFrame,
 def sample_negatives(
     peaks: Path, sequences: Path, bigwig: Path, out_path: Path,
     keep: list[str], alpha: float | None, species: str, chrom_sizes: Path,
-    dry_run: bool, signal_filter: bool = True,
+    dry_run: bool, signal_mode: str = "auto",
 ) -> None:
     """GC-matched negatives, restricted to `keep`.
 
@@ -450,7 +499,7 @@ def sample_negatives(
     same `to_csv` -- so this is a one-argument divergence, not a fork. Keep it
     that way; if bpnet-lite ever grows a `--chroms` flag, go back to the CLI.
     """
-    signal_filter = signal_filter and species not in NO_SIGNAL_FILTER
+    signal_filter, why = resolve_signal_filter(signal_mode, species)
     tile = NEGATIVE_WINDOW.get(species, IN_WINDOW)
     # out_window scaled to keep the flank proportion; the assertion inside
     # extract_matching_loci is `in_window >= out_window`, so both must move.
@@ -458,8 +507,11 @@ def sample_negatives(
     if tile != IN_WINDOW:
         print(f"  tiling GC candidates at {tile} bp (not {IN_WINDOW}) for {species}")
     if not signal_filter:
-        print(f"  signal restriction OFF for {species} "
+        print(f"  signal restriction OFF for {species} [{why}] "
               f"(GC, N-content and peak masking still apply)")
+    elif why == "--force-signal-filter":
+        print(f"  signal restriction forced ON for {species}, overriding "
+              f"NO_SIGNAL_FILTER")
     if dry_run:
         print(f"  # extract_matching_loci({peaks.name}, chroms={len(keep)} main, "
               f"tile={tile}) -> {out_path.name}")
@@ -550,7 +602,7 @@ def sample_negatives(
 
 
 def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool,
-                       signal_filter: bool = True) -> bool:
+                       signal_mode: str = "auto") -> bool:
     """Process one experiment. Returns True if processed, False if skipped."""
     processed = exp.get("processed", {})
 
@@ -605,7 +657,7 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool,
         print(f"Matching GC-content negatives over {len(keep)} chromosomes...")
         sample_negatives(peaks_input, sequences, us_bw, out_path, keep,
                          ALPHA.get(exp_id), exp["species"], chrom_sizes, dry_run,
-                         signal_filter=signal_filter)
+                         signal_mode=signal_mode)
 
     return True
 
@@ -632,14 +684,27 @@ def main():
         action="store_true",
         help="print commands without executing them",
     )
-    parser.add_argument(
+    signal = parser.add_mutually_exclusive_group()
+    signal.add_argument(
         "--no-signal-filter",
-        action="store_true",
-        help="drop the signal restriction on candidate background windows "
-             "(passes bigwig=None to extract_matching_loci). GC matching, the "
-             "N-content filter and peak-tile masking still apply. For dense "
-             "genomes where the surviving tile count, not signal, is what binds",
+        dest="signal_mode",
+        action="store_const",
+        const="off",
+        help="drop the signal restriction on candidate background windows for "
+             "EVERY species (passes bigwig=None to extract_matching_loci). GC "
+             "matching, the N-content filter and peak-tile masking still apply. "
+             "By default only the species in NO_SIGNAL_FILTER drop it",
     )
+    signal.add_argument(
+        "--force-signal-filter",
+        dest="signal_mode",
+        action="store_const",
+        const="on",
+        help="apply the signal restriction to every species, overriding "
+             "NO_SIGNAL_FILTER. Reproduces upstream bpnet-lite behaviour and is "
+             "how the ON column in that table was measured",
+    )
+    parser.set_defaults(signal_mode="auto")
     parser.add_argument(
         "-j", "--threads",
         type=int,
@@ -666,7 +731,7 @@ def main():
 
     run_one = partial(
         process_experiment, force=args.force, dry_run=args.dry_run,
-        signal_filter=not args.no_signal_filter,
+        signal_mode=args.signal_mode,
     )
 
     # Build every .fai serially first. It used to be created inside the worker

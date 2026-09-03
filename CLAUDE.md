@@ -2185,7 +2185,9 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
   regression test uses all three naming styles on purpose.
 - **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
-  over the first full run (2026-09-03), negatives per peak:
+  over the first full run (2026-09-03), negatives per peak. **These are the filter-ON numbers**, kept
+  because they are what motivated `NO_SIGNAL_FILTER`; the yeast rows are 3-4x higher at the sparse end
+  now that the filter is off for them, and the shape of the finding is unchanged:
 
   | species | negatives/peak | negatives as % of all candidate windows |
   | --- | --- | --- |
@@ -2309,11 +2311,20 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   defensible and they are different things, so this is not a free switch to flip corpus-wide — it would
   change the negatives of every experiment, including the 33 that have no problem. bpnet-lite and
   procap-atlas choose the silent tail, and this repo tracks their standards.
-  So the realistic options are: keep it on everywhere and accept that the dense yeast experiments train on
-  a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
+  So the realistic options were: keep it on everywhere and accept that the dense yeast experiments train
+  on a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
   departure**, accepting that their negatives then mean something slightly different from every other
-  species'. The second is what `NO_SIGNAL_FILTER` is for. It is not a comparability-free option — it just
-  makes the cost explicit and per-species rather than silent.
+  species'.
+
+  **The second was chosen, 2026-09-03: `NO_SIGNAL_FILTER = {"S.cerevisiae", "S.pombe"}`.** It is not a
+  comparability-free option — it makes the cost explicit and per-species rather than silent, and anything
+  derived from yeast negatives is no longer strictly comparable with the other ten species. The switch is
+  three-state now, because populating the set has to leave a way back to upstream behaviour: `auto`
+  (respect the set, the default), `--no-signal-filter` (off for every species), and
+  **`--force-signal-filter`** (on for every species, overriding the set — which is how the `filter on`
+  column below was measured and how it can be re-measured). `resolve_signal_filter()` returns the reason
+  alongside the decision, so every run prints which of the four states it is in rather than leaving the
+  reader to infer it from a species name.
 
   **All seven yeast experiments measured (2026-09-03), and the gain decays monotonically with density:**
 
@@ -2341,15 +2352,15 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   **This corrects an earlier note here that `NEGATIVE_WINDOW` was probably unnecessary.** That was true
   for `S.cerevisiae_PROcap`, where the filter bound; it is false for the four densest, where only finer
   tiling could help and finer tiling costs the peak contamination measured above. For those four there is
-  no good option — with `negatives ratio 0.1` and 23,642 peaks, `Spt5IAA4h` draws ~2,364 negatives an
-  epoch from a pool of 327.
-  **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
-  yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
-  eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
-  non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so 300 windows may
-  be a fair sample of what exists; or the pool is too small to teach anything and yeast needs a different
-  background scheme (a strided rather than tiled candidate set would give many more, and would need an
-  upstream change). **Read yeast negatives-derived metrics with this in mind.**
+  no good option — at the configured 1/7 and 23,642 peaks, `Spt5IAA4h` would draw 3,377 negatives an
+  epoch from a pool of 327, recycling each one 10.3x.
+  **This is not a bug and `--force` will not change it.** Two honest readings, and this one is genuinely
+  undecided: non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so ~330
+  windows may be a fair sample of what exists; or the pool is too small to teach anything and yeast needs
+  a different background scheme (a strided rather than tiled candidate set would give many more, and would
+  need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
+  `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
+  log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
 - **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya, i.e. negatives are 1/8 and 1/5 of a batch.**
   An earlier version of this line had it backwards, as "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs".
   It is the other way round: `config/bpnet_params.json` sets `negatives_ratio: 0.142857…` and
@@ -2373,9 +2384,12 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   and the two Spt5 depletions recycle roughly ten and seven times over.
 - **`negative_ratio` is therefore CAPPED at the available pool**, in both `fit_bpnet.py` and
   `fit_cherimoya.py`: `min(configured, len(negatives) / len(peaks))`, so no negative is drawn more than
-  once per epoch and the cap is printed when it engages. Chosen over loosening the signal filter because
-  it leaves the negatives themselves identical in kind to every other species — same silent-tail
-  definition — and changes only how often they are drawn.
+  once per epoch and the cap is printed when it engages. **It is on by default and complements
+  `NO_SIGNAL_FILTER` rather than substituting for it** — an earlier version of this line said the cap was
+  chosen *over* loosening the filter, which is no longer the arrangement. The filter is what decides how
+  many distinct negatives exist; the cap is what stops whatever number that is from being recycled. Both
+  are needed for the dense experiments, where the filter buys only 10-20% and the pool stays a few
+  hundred.
   Computed from **whole-genome** counts rather than the fold's: `PeakGenerator` filters peaks and
   negatives by the same `chroms`, so `pool/peaks` is near-constant across folds, and the exact per-fold
   numbers are not knowable at the call site without duplicating `extract_loci`. An approximate cap that
@@ -2384,33 +2398,50 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   **The cap addresses RECYCLING, not DIVERSITY, and they are orthogonal.** The pool is the same N distinct
   windows at any ratio; capping only lowers how often each is seen, and with it the negative share of a
   batch — 12.5% to ~1.3% for `Spt5IAA4h`. If the negative class's batch weight matters more than avoiding
-  repeats, `fit_bpnet.py --no-ratio-cap` keeps the configured composition. Neither setting adds a single
-  new background sequence.
+  repeats, `--no-ratio-cap` keeps the configured composition — present on **both** fit scripts, since
+  cherimoya had the cap but no way off it. Neither setting adds a single new background sequence; only
+  `NO_SIGNAL_FILTER` does that.
 
-- **Negative DIVERSITY in the yeasts is capped by the genome, and no pipeline setting can raise it.**
-  S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and at 1.2-4.1 peaks per window
-  only 4.5-7.7% of them are peak-free. The measured pools of 257-440 are essentially all the peak-free
-  windows that exist. Poisson on the observed density predicts 91 free windows for `Spt5IAA4h` and 1,755
-  for `S.cerevisiae_PROcap`, bracketing what is found.
+- **Negative DIVERSITY in the yeasts has a GENOMIC ceiling, and dropping the signal filter is what
+  reaches it.** S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and the peak-free
+  share of them runs from 33% at 1.18 peaks per window down to 5.7% at 4.14. **The filter-off pools are
+  essentially those peak-free windows; the filter-on pools were a subset of them**, which is why removing
+  it gains 3-4x at the sparse end and 10-20% at the dense end. Poisson on the observed density predicts
+  1,753 free windows for `S.cerevisiae_PROcap` and 91 for `Spt5IAA4h`: the first matches the measured
+  1,905 almost exactly, and the second is exceeded (327 found) because real peaks cluster, which leaves
+  more empty tiles than a uniform model allows.
+  An earlier version of this bullet read "no pipeline setting can raise it" and quoted the 257-440
+  filter-on pools as the peak-free total. The **ceiling** is genomic, which is the part that holds; the
+  pools were not at it.
 
   **In RELATIVE terms the pool is not impoverished at all**, which is worth knowing before treating it as
-  a defect:
+  a defect. Yeast rows are the filter-off pools now in use; mouse keeps the filter:
 
   | | pool | unique background sequence | share of genome |
   | --- | --- | --- | --- |
-  | `Spt5IAA4h` | 301 | 636 kb | **5.27%** |
-  | `S.cerevisiae_PROcap` | 440 | 930 kb | **7.71%** |
-  | `S.pombe_PROcap` | 311 | 657 kb | **5.26%** |
-  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | **5.15%** |
+  | `Spt5IAA4h` | 327 | 691 kb | **5.7%** |
+  | `S.pombe_PROcap` | 947 | 2,002 kb | **16.0%** |
+  | `S.cerevisiae_PROcap` | 1,905 | 4,027 kb | **33.4%** |
+  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | 5.15% |
 
-  Yeast negatives sample the same fraction of their genome as mouse negatives sample of theirs. What is
-  small is the genome, not the sampling.
+  So the densest yeast experiment samples about the same fraction of its genome as mouse does of its
+  (5.7% vs 5.15%), and the sparse ones sample far more. What is small is the genome, not the sampling.
 
-  **The asymmetry that IS real is negative vs positive unique sequence.** Yeast peak windows overlap
-  heavily, so their union is roughly the whole genome minus the peak-free part: ~11.4 Mb of positive
-  against 0.64 Mb of negative, about **1:18**. Mouse peak windows barely overlap, giving ~137 Mb against
-  ~137 Mb, about **1:1**. So a yeast model sees eighteen times more distinct positive than negative
-  sequence, where a mouse model sees parity — and that is structural, not a setting.
+  **The asymmetry that IS real is negative vs positive unique sequence, and it now spans an order of
+  magnitude within one species.** Yeast peak windows overlap heavily, so their union is roughly the whole
+  genome minus the peak-free part:
+
+  | | positive union | negative union | ratio |
+  | --- | --- | --- | --- |
+  | `Spt5IAA4h` | ~11.4 Mb | 0.69 Mb | **1:17** |
+  | `S.cerevisiae_PROcap` | ~8.0 Mb | 4.03 Mb | **1:2** |
+  | `M.musculus-GCB_PROcap` | ~137 Mb | ~137 Mb | 1:1 |
+
+  Mouse peak windows barely overlap, hence parity. So the model trained on `Spt5IAA4h` sees seventeen
+  times more distinct positive than negative sequence while the one trained on the WT library sees
+  roughly a 2:1 split — and that spread is set by peak density, not by any setting. It is also the
+  strongest argument for reading the two groups' negatives-derived numbers separately rather than as
+  "the yeasts".
 
   Levers, with what each actually buys:
   - **Jitter on negatives.** `data_loader.py` passes `max_jitter=0` for the background while peaks get
