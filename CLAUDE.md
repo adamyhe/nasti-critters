@@ -2334,9 +2334,47 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   numbers are not knowable at the call site without duplicating `extract_loci`. An approximate cap that
   always errs in the right direction beats forking `data_loader.py`, which is byte-identical to
   procap-atlas's.
-  **The cap makes the scarcity honest; it does not fix it.** `Spt5IAA4h` ends at 0.0127 negatives per
-  peak, so negatives are ~1.3% of a batch rather than the intended 12.5%. That is the true state of the
-  data, and 10x silent recycling was not.
+  **The cap addresses RECYCLING, not DIVERSITY, and they are orthogonal.** The pool is the same N distinct
+  windows at any ratio; capping only lowers how often each is seen, and with it the negative share of a
+  batch — 12.5% to ~1.3% for `Spt5IAA4h`. If the negative class's batch weight matters more than avoiding
+  repeats, `fit_bpnet.py --no-ratio-cap` keeps the configured composition. Neither setting adds a single
+  new background sequence.
+
+- **Negative DIVERSITY in the yeasts is capped by the genome, and no pipeline setting can raise it.**
+  S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and at 1.2-4.1 peaks per window
+  only 4.5-7.7% of them are peak-free. The measured pools of 257-440 are essentially all the peak-free
+  windows that exist. Poisson on the observed density predicts 91 free windows for `Spt5IAA4h` and 1,755
+  for `S.cerevisiae_PROcap`, bracketing what is found.
+
+  **In RELATIVE terms the pool is not impoverished at all**, which is worth knowing before treating it as
+  a defect:
+
+  | | pool | unique background sequence | share of genome |
+  | --- | --- | --- | --- |
+  | `Spt5IAA4h` | 301 | 636 kb | **5.27%** |
+  | `S.cerevisiae_PROcap` | 440 | 930 kb | **7.71%** |
+  | `S.pombe_PROcap` | 311 | 657 kb | **5.26%** |
+  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | **5.15%** |
+
+  Yeast negatives sample the same fraction of their genome as mouse negatives sample of theirs. What is
+  small is the genome, not the sampling.
+
+  **The asymmetry that IS real is negative vs positive unique sequence.** Yeast peak windows overlap
+  heavily, so their union is roughly the whole genome minus the peak-free part: ~11.4 Mb of positive
+  against 0.64 Mb of negative, about **1:18**. Mouse peak windows barely overlap, giving ~137 Mb against
+  ~137 Mb, about **1:1**. So a yeast model sees eighteen times more distinct positive than negative
+  sequence, where a mouse model sees parity — and that is structural, not a setting.
+
+  Levers, with what each actually buys:
+  - **Jitter on negatives.** `data_loader.py` passes `max_jitter=0` for the background while peaks get
+    the configured 200. Enabling it would add **+19%** unique sequence (2114 -> 2514 bp per locus), which
+    is augmentation rather than diversity, and it means forking a file that is byte-identical to
+    procap-atlas's. Not worth it for 19%.
+  - **Stricter peak calling.** The only lever that moves the number materially, because peak-free space
+    and peak count are the same quantity: fewer calls means more free windows. It also bears directly on
+    whether the yeast peak sets are over-called at 1.7-3.6 calls per annotated TSS against Booth's 1.04.
+    **The diversity problem and the possible over-calling are one problem seen twice.**
+  - **Accept it**, and treat yeast negatives-derived numbers as weakly supported.
 
 **Should the signal filter be loosened for the other experiments where negatives < peaks? No.** That is
 the wrong threshold — what matters is `pool/peaks` against `negatives_ratio`, not against 1. Sorted, the

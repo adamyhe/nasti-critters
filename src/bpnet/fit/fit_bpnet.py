@@ -86,6 +86,14 @@ def main():
     parser.add_argument("--early-stopping", type=int, default=None)
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
+    parser.add_argument(
+        "--no-ratio-cap", action="store_true",
+        help="do not cap negatives_ratio at the available pool. The cap stops a "
+             "negative being drawn more than once per epoch, but it also lowers "
+             "the negative share of each batch (12.5%% -> ~1.3%% for the densest "
+             "yeast experiment). Use this to keep the configured batch "
+             "composition and accept the repeats",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -224,8 +232,15 @@ def main():
     #
     # Only ever engages for the yeasts: every other experiment's pool is at
     # least 0.26 per peak, comfortably above 1/7.
+    # NOTE this addresses RECYCLING, not DIVERSITY, and they are orthogonal: the
+    # pool is the same N distinct windows whichever ratio is used. Capping only
+    # lowers how often each is seen, which also lowers the negative share of a
+    # batch -- 12.5% to about 1.3% for Spt5IAA4h. If the negative class's batch
+    # weight matters more than avoiding repeats, pass --no-ratio-cap.
     configured_ratio = params["negatives_ratio"]
     available_ratio = len(negatives) / max(len(peaks), 1)
+    if args.no_ratio_cap:
+        available_ratio = configured_ratio
     if available_ratio < configured_ratio:
         params["negatives_ratio"] = available_ratio
         print(
