@@ -3,13 +3,13 @@
 **NAScent Transcription Initiation models in critters.**
 
 Sequence-to-function models of PRO-cap / GRO-cap / ChRO-cap initiation profiles
-across non-human species. 38 experiments over 10 species are defined in
-`config/experiment_config.yaml`:
+across non-human species. 42 experiments over 12 species are defined in
+`config/experiment_config.yaml`, all mapped uniformly from FASTQ:
 
 | Species | Experiments | Assemblies |
 | --- | --- | --- |
 | *Drosophila melanogaster* | 5 (S2 cells, LacZ KD, 5'GRO, embryo 3-4 h / 6-8 h) | dm6 |
-| *Mus musculus* | 11 (ESC, BMDM, liver young/old, B cells, 5'GRO, GRO-cap, MEF CoPRO ± heat shock) | mm10 |
+| *Mus musculus* | 13 (ESC, BMDM, liver young/old × female/male, B cells, 5'GRO, GRO-cap, MEF CoPRO ± heat shock) | mm10 |
 | *Caenorhabditis elegans* | 4 (embryo, L1 starved, L3, sdc-2) | ce11 |
 | *Saccharomyces cerevisiae* | 6 (WT, Ino80 ctl/KD, Spt5 EtOH/IAA 1 h/IAA 4 h) | R64-1-1 |
 | *Schizosaccharomyces pombe* | 1 (WT) | ASM294v2 |
@@ -18,6 +18,13 @@ across non-human species. 38 experiments over 10 species are defined in
 | *Chlamydomonas reinhardtii* | 1 (liquid culture) | v5.5 |
 | *Physcomitrium patens* | 1 (plate culture) | Phypa_V3 |
 | *Selaginella moellendorffii* | 1 (stems and leaves) | v1.0 |
+| *Gossypium arboreum* | 1 (ovule, diploid AA) | ASM2569848v2 |
+| *Gossypium hirsutum* | 1 (ovule, tetraploid AD) | Gossypium_hirsutum_v2.1 |
+
+The mouse liver experiments are split by **sex**, not pooled: the manifest
+records sex as a distinct replicate group, mouse liver is one of the most
+strongly sex-dimorphic transcriptional programs known, and each sex carries
+~97-116 M reads on its own.
 
 Each experiment is one species x one biological condition and trains **its own
 model** — conditions and assay families are not multi-tasked into shared heads.
@@ -116,10 +123,11 @@ metadata steps need no conda env at all.
 ### Check it worked
 
 ```bash
-# config parses and all 38 experiments resolve
+# config parses and all 42 experiments resolve
 python src/data_preprocessing/run_procap_pipeline.py --list
 
-# fold assignments agree with config/chrom_splits.yaml
+# fold assignments agree with the YAML *and* with the real contig names
+# (off-cluster it checks the YAML/CSV agreement only, and says so)
 python config/write_split_csvs.py --check
 
 # mapped reads + peak counts per experiment (blank columns = not mapped yet)
@@ -253,10 +261,33 @@ python src/data_preprocessing/run_procap_pipeline.py -e S.cerevisiae-Ino80ctl_PR
 python src/data_preprocessing/run_procap_pipeline.py -e S.cerevisiae-Ino80ctl_PROcap -t 16
 ```
 
-Then check strand orientation at a few known unidirectional promoters. If the
-plus/minus tracks are inverted, re-run that dataset with `--reverse-strand`.
-R1/R2 conventions differ across these deposits, so this is a per-dataset check,
-not a one-time one.
+Then run the QC suite. It exists because several things in this pipeline are
+conventions rather than documented facts, and every one of them is **silent**
+when wrong — the pipeline still runs, still calls peaks and still trains:
+
+```bash
+snakemake qc -c8 --config tier=include,conditional   # target BEFORE --config
+```
+
+| output | what it catches |
+| --- | --- |
+| `qc/reads/{exp}.tsv` | adapter content, insert length, poly-G, interleaved mates. Survey the raw FASTQs *before* alignment burns the compute |
+| `qc/orientation/{exp}.png` | initiator logo and a stranded TSS metaplot — whether the 5' assignment and the strand convention are right |
+| `qc/rrna/{exp}.tsv` | rRNA + organellar share, which sets the ceiling on `pct_unique` |
+| `qc/stats/experiment_stats.md` | one table over every experiment, with `FAIL:`/`WARN:` flags |
+
+**The orientation plot is the check — look at it.** A flat initiator logo means
+the maxima are not initiation sites, i.e. the 5'/mate assignment is wrong. If
+the plus/minus tracks are inverted, re-run that dataset with `--reverse-strand`;
+R1/R2 conventions differ across these deposits, so it is a per-dataset check.
+The metaplot is deliberately **not** scored — a numeric TSS-enrichment score was
+added and removed, because it scored 27.37 for a displaced-signal case against
+6.31 for the correct one.
+
+Read `pct_short_untrimmed`, not `pct_adapter`: every library carries a few
+percent of adapter dimers that cost nothing, and the former is the share STAR
+will actually discard. A `FAIL:adapter_mismatch` means the manifest's curated
+adapter name disagrees with what is in the reads — believe the reads.
 
 ### 5. Map the rest, then build negatives and splits
 
@@ -319,10 +350,15 @@ python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
 uv run python src/make_negatives.py -j 4
 ```
 
-Either way, S. pombe needs peak-level folds before training:
+Two species use **peak-level** folds and need them built once their peaks
+exist — S. pombe because 3 chromosomes cannot give 5 balanced folds, and
+S. moellendorffii because v1.0 has no chromosomes at all:
 
 ```bash
-python src/data_preprocessing/make_random_splits.py
+python src/data_preprocessing/make_random_splits.py                    # S. pombe (defaults)
+python src/data_preprocessing/make_random_splits.py \
+    -e S.moellendorffii-stemleaf_5GRO \
+    --output config/splits/S.moellendorffii_random_fold_assignments.csv
 ```
 
 ### 6. Train
@@ -333,17 +369,27 @@ python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py
 ```
 
-### Known blockers
+### Open questions and resolved ones
 
-Resolve these before trusting output:
+Every experiment now has a fold assignment — `launch.py` reports **214
+(experiment × fold) jobs and 0 unusable**. What is left is not blocking, but is
+worth knowing before trusting numbers:
 
-| Blocker | Effect |
+| Open | Effect |
 | --- | --- |
-| `five_prime_mate: R1` unverified | convention, not documented for the 5 paired S. cerevisiae experiments; check with `snakemake qc` |
-| `C.griseus` has no fold assignment | 7 experiments cannot train. Needs a peak-matched chromosome-level entry: `python config/write_split_csvs.py --peak-counts -e C.griseus-CHO_GROcap` after the pipeline runs |
-| `S.moellendorffii` has no fold assignment | 1 experiment cannot train. Peak-level only (v1.0 has no chromosomes): `make_random_splits.py -e S.moellendorffii-stemleaf_5GRO -o config/splits/S.moellendorffii_random_fold_assignments.csv` |
-| `S.moellendorffii` may fail PINTS | 189 scaffolds in `main_chromosomes`; sparse ones can give the pl/mn contig mismatch PINTS rejects. Remedy is to raise the length cutoff, documented in `config/genomes.yaml` |
+| Unexplained mapping residuals | *P. patens* 38 pts, *C. reinhardtii* 48 pts, *A. thaliana* ~50%, all **after** adjusting for rRNA. Not explained by adapter, assembly or rRNA content |
+| 18% of the cotton libraries in STAR's `unmapped: other` | not the match fraction, not the mismatch filter (0.00%), not multimapping — so no ENCODE parameter accounts for it. `--winAnchorMultimapNmax` is the untested guess |
 | `P.patens` / `C.griseus` rDNA unresolved | both `null`; no reference sequence exists to use as a sink. C. griseus is a rodent, so it is the one to watch |
+| `C.elegans` / `C.griseus` / both cottons folds originate here | push them to plant-design before using those species elsewhere, or a locus in test here becomes train there |
+| In-assembly rDNA in both yeasts | no published exclusion list and no outlier filter, so their rDNA arrays will be among the highest-signal PINTS calls. Real Pol I loci, not artifacts, and `log1p` compresses them — but check before publishing yeast numbers |
+
+Resolved since this list was written, kept here so they are not re-investigated:
+
+| Was | Resolution |
+| --- | --- |
+| `five_prime_mate: R1` unverified | validated by `snakemake qc`: all experiments put the initiator maximum at offset −1 or +0, with zero orientation flags |
+| `C.griseus` / `S.moellendorffii` / cotton had no folds | all assigned. C. griseus and both cottons chromosome-level from peak counts; S. moellendorffii peak-level. C. elegans was also retuned onto **six** folds, one chromosome each |
+| `S.moellendorffii` may fail PINTS | it did not; 32,973 peaks called over 189 scaffolds |
 
 Resolved since this list was written, kept here so they are not re-investigated:
 
@@ -392,13 +438,13 @@ interval-merged), following kundajelab/ProCapNet. Many non-human species have a
 large fraction of unidirectional TSSs, so both classes are needed.
 
 ```bash
-# Resolve archive run accessions (all 60 manifest rows resolve via ENA)
+# Resolve archive run accessions (all 64 manifest rows resolve via ENA)
 python src/data_preprocessing/resolve_runs.py
 
 # Regenerate config/experiment_config.yaml + config/datasets.tsv from the manifest
 python src/data_preprocessing/build_experiment_config.py
 
-# Bulk-download raw FASTQs (~120 GiB, md5-verified, resumable)
+# Bulk-download raw FASTQs (~202 GiB over 82 files, md5-verified, resumable)
 python src/data_preprocessing/fetch_fastqs.py --dry-run
 python src/data_preprocessing/fetch_fastqs.py --tier include -j 4
 
@@ -410,6 +456,30 @@ python src/data_preprocessing/run_procap_pipeline.py --index-only --species S.ce
 python src/data_preprocessing/run_procap_pipeline.py -e S.cerevisiae-Ino80ctl_PROcap --dry-run
 python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
 ```
+
+**Adapters are assigned per experiment from the manifest, and this was the
+single largest correctness fix here.** Nothing configured a sequencing adapter
+before, and it cost most of the reads in 14 of the 38 experiments that
+existed when the survey was run: inserts sit
+mid-read at a different offset every time, so fastp's auto-detection reported
+`No adapter detected` and STAR discarded 95-99.85% of mouse liver as
+`unmapped: too short`. Two adapters cover the corpus — `smallRNA_RA3` for the
+PRO-cap/ChRO-cap/CoPRO lineage, `truseq_universal` for 5'GRO/GRO-cap — mapped to
+sequences in `config/procap_pipeline.yaml` and resolved identically by both
+drivers.
+
+Both pass `--adapter_fasta`, not just `--adapter_sequence`, because a dimer can
+be deposited **truncated**: 43.4% of `SRR12774945` begins five bases into the
+TruSeq adapter, and fastp matches an adapter by looking for its *beginning*, so
+those reads survive trimming as pure adapter. Four guards fire on a bad value —
+a conflict within a project fails the generator, an unknown name fails DAG
+construction *and* the serial driver, and a name contradicted by the reads
+raises `FAIL:adapter_mismatch`.
+
+Note the fix mostly **removes** reads rather than recovering them. For the
+small-RNA libraries it recovers real inserts, but a truncated TruSeq dimer has
+no insert behind it, so `input_reads` roughly halves while `unique_reads` holds
+— an honest mapping rate, not extra depth.
 
 The `--allow-bundled-tap` guard still exists but no longer fires for anything.
 It was added for `S.cerevisiae_PROcap` / `S.pombe_PROcap` (Booth2016) on the
@@ -463,15 +533,31 @@ length — bp totals are not expected to match:
 python config/write_split_csvs.py --peak-counts -e S.cerevisiae-Ino80ctl_PROcap
 ```
 
-Fold assignments are copied verbatim from the canonical
-[adamyhe/plant-design](https://github.com/adamyhe/plant-design) `config/chrom_splits.yaml` for every species it
-covers (A. thaliana, D. melanogaster, M. musculus, S. cerevisiae) so models stay
-comparable across repos; C. elegans has no canonical entry and originates here.
+For a species with **no** entry yet, the same flag reports peaks per
+*chromosome* instead — which is the input you need to build one. `--check` also
+verifies every fold member against the real contig names, because `extract_loci`
+matches literally and a readable-but-wrong name yields **zero loci in silence**.
 
-**S. pombe is absent from `chrom_splits.yaml` on purpose.** Three chromosomes
-cannot give five balanced folds, so it uses random peak-level folds and nothing
-else — asking for its chromosome folds is an error, not a fallback. Generate the
-assignments once its peaks exist:
+Fold assignments are copied verbatim from the canonical
+[adamyhe/plant-design](https://github.com/adamyhe/plant-design) `config/chrom_splits.yaml` wherever it has an
+entry (A. thaliana, D. melanogaster, M. musculus, S. cerevisiae, plus
+C. reinhardtii and P. patens via csRNAnet) so models stay comparable across
+repos. Four entries **originate here** and should be pushed upstream before
+those species are used elsewhere:
+
+| species | folds | note |
+| --- | --- | --- |
+| *C. elegans* | **6**, one chromosome each | six near-equal chromosomes mean any 5-fold split pairs two and lands at 76% of target; six folds give 12% |
+| *C. griseus* | 5 | the two unplaced scaffolds share a fold — they are the arms of the unassembled chromosome 1 |
+| *G. arboreum* | 5 | 13 diploid chromosomes, exhaustively optimal at 14.1% spread |
+| *G. hirsutum* | 5 | **homoeologs share a fold** — A0i and D0i are ~96%+ identical, so splitting a pair puts the same sequence on both sides of train/test. Costs 19.0% spread against 2.8% unpaired |
+
+**S. pombe and S. moellendorffii are absent from `chrom_splits.yaml` on
+purpose**, for different reasons: three chromosomes cannot give five balanced
+folds, and *S. moellendorffii* v1.0 has no chromosomes at all (759 scaffolds,
+empty karyotype). Both use random peak-level folds and nothing else — asking for
+their chromosome folds is an error, not a fallback. Generate them once peaks
+exist:
 
 ```bash
 python src/data_preprocessing/make_random_splits.py
@@ -509,7 +595,12 @@ worth solving is spurious alignment *elsewhere*.
 Only mouse qualifies: mm10 lacks the array (it has just `Rn18s-rs5`, a dispersed
 18S copy on chr17), so it uses `BK000964.3` — 45,306 bp, "complete repeating
 unit", the analogue of the human `U13369.1`. It is fetched from ENA into
-`data/rdna/` and added to both the STAR index and `chrom.sizes`.
+`data/decoy/`.
+
+**Decoys go in the STAR index only, and are deliberately absent from
+`chrom.sizes`.** `bedgraph` filters to `main_chromosomes` before writing, so
+decoy rows never reach `bedGraphToBigWig` — the same treatment `chrM` already
+gets. A decoy can therefore never reach a fold, a peak or a bigWig.
 
 Every other species already has its rDNA. C. elegans, both yeasts and
 Arabidopsis carry theirs on real chromosomes; Drosophila carries it on the
@@ -521,13 +612,25 @@ accession-based `chrUn_*` names — and Ensembl types rRNA features under
 `ncRNA_gene` rather than `rRNA_gene`. Both make rDNA look absent when it is not.
 See `config/genomes.yaml` for coordinates and the full audit.
 
+**Organelle decoys use the same mechanism for the opposite problem.** Where the
+rDNA sink prevents *mis*mapping, these fix reads that cannot map at all: the two
+plant references carry **no organelle contigs**, which strands 12.2% of the
+*C. reinhardtii* library and 8.6% of *P. patens* as `unmapped: too short`. Both
+get chloroplast and mitochondrial decoys; C. griseus gets a mitochondrial one.
+
+Verify presence by **sequence, not by length** — 15 random 30-mers against the
+assembly on both strands. `KZ454947` is within 5% of the Chlamydomonas
+chloroplast's length and contains none of its sequence, and a 1/15 hit is what a
+NUMT looks like, not a present genome. Adding a decoy raises `pct_unique`
+without adding usable signal, since those reads are filtered out again at the
+`bedgraph` step; the gain is correctness, not depth.
+
 ## Alignment analysis set
 
-ENCODE aligns to no_alt references, so all six references here were checked
-against their real contig lists. **All six are already alt-free** — dm6, mm10,
-ce11, R64-1-1, TAIR10 and ASM294v2 contain no alt contigs, and mm10's contig set
-is identical to ENCODE's `mm10_no_alt_analysis_set_ENCODE`. No filtering step is
-needed or wanted.
+ENCODE aligns to no_alt references, so all twelve references here were checked
+against their real contig lists. **All twelve are already alt-free**, and mm10's
+contig set is identical to ENCODE's `mm10_no_alt_analysis_set_ENCODE`. No
+filtering step is needed or wanted.
 
 *S. pombe*'s `MTR` and `AB325691` look like alts but are not: `MTR` (FP565355) is
 the silent mat2/mat3 mating-type cassettes, a distinct locus from mat1 on
@@ -549,10 +652,24 @@ chromosome naming follows it:
 | *S. cerevisiae* | R64-1-1 | `I`… | none published |
 | *S. pombe* | ASM294v2 | `I`… | none published |
 | *A. thaliana* | TAIR10 | `1`… | Boyle-Lab software on 20 inputs, 83 regions (in-repo) |
+| *C. reinhardtii* | v5.5 | `1`… | none published |
+| *P. patens* | Phypa_V3 | `1`… | none published |
+| *S. moellendorffii* | v1.0 | `scaffold_1`… | none published |
+| *C. griseus* | CriGri-PICRH-1.0 | `1`… | none published |
+| *G. arboreum* | ASM2569848v2 | `NC_069070.1`… | none published |
+| *G. hirsutum* | Gossypium_hirsutum_v2.1 | `NC_053424.1`… | none published |
 
 Mouse is **mm10, not mm39**, following ENCODE — this overrides the manifest's
 recommendation. Yeast and Arabidopsis are not ENCODE organisms, so they keep
-Ensembl bare names. Exclusion lists are fetched alongside the genomes:
+Ensembl bare names.
+
+**The two cottons are the only NCBI-sourced genomes**, since neither species is
+in Ensembl Plants. FASTA and annotation come from the same RefSeq release, which
+is what keeps their names consistent — but those names are **RefSeq accessions**
+rather than the community `Chr01` / `A01`–`D13` labels, so `main_chromosomes`
+and `chrom_splits.yaml` are accessions too. `extract_loci` matches literally, and
+a readable-but-wrong name yields zero loci in silence; the accession-to-name
+mapping is in each assembly's `*_assembly_report.txt`. Exclusion lists are fetched alongside the genomes:
 
 ```bash
 python src/data_preprocessing/run_procap_pipeline.py --fetch-genomes --tier include
