@@ -258,6 +258,41 @@ Deleting the reconstruction removed that too.
 `cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
 affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
 
+## Where benchmark output goes
+
+Both benchmark scripts now write the same three things; `performance_metrics/`, `predictions/` and
+`logs/` are all gitignored, so nothing here is committed.
+
+| | BPNet | Cherimoya |
+| --- | --- | --- |
+| metrics JSON | `performance_metrics/bpnet/{experiment}.json` | `performance_metrics/cherimoya/{experiment}.json` |
+| override | `--metrics-dir` | `--metrics-dir` |
+| raw predictions | `--output-fname` (joblib, opt-in) | `--save-output` -> `predictions/cherimoya/` (npz) |
+| printed | per-fold **and** genome-wide | per-fold **and** genome-wide |
+
+**`benchmark_predictions.py` saved NOTHING until 2026-09-04 — it only printed.** So every BPNet
+benchmark run before then left no artifact, while `benchmark_cherimoya.py` had always written a JSON.
+The JSON now carries the same shape as cherimoya's (`run_name`, `model_paths`, `per_fold`,
+`genome_wide`) so the two families are directly comparable, plus `counts_pearson`, which this script
+already computed and cherimoya's does not. It also gained the genome-wide block it was missing.
+
+**Genome-wide is POOLED across folds, not averaged over them** — `pearson_corr` over the
+concatenation, so each locus counts once regardless of how large its fold was. Averaging per-fold
+correlations would weight a small fold equally with a large one, and for C. elegans, where one fold is
+one chromosome, the fold sizes differ enough to matter. Same construction in both scripts; keep them in
+step.
+
+Note upstream's `benchmark_bpnet.py` also reports `orientation_index_pearson`, which neither script
+here computes. Not an oversight to fix silently — adding it means defining the orientation index the
+same way upstream does.
+
+**Progress bars are ON by default in both, via `--no-progress` to suppress.** They are tangermeme's
+`verbose` argument to `extract_loci` and `predict`, which is *only* the tqdm bar, so it is wired to
+`--no-progress` rather than to `-v`: a long benchmark should show progress without turning on every
+other message. Bars go to stderr, so stdout stays clean for the printed metrics and can be piped.
+`benchmark_predictions.py` had **no `-v` flag at all**, so `params["verbose"]` was permanently `false`
+from `config/bpnet_params.json` and no bar could ever appear; it has one now.
+
 **Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
 `data_loader` are imported *inside* `main()`, after argparse and path validation, so
 `--help` and missing-data errors stay instant on a login node and are testable without a

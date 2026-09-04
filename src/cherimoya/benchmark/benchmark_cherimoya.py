@@ -62,6 +62,12 @@ def main():
              "torch.compile being usable at all -- it raises on Python 3.14+ "
              "below torch 2.10",
     )
+    parser.add_argument(
+        "--no-progress", dest="progress", action="store_false",
+        help="suppress the tqdm progress bars from extract_loci and predict. "
+             "They are ON by default and go to stderr, so stdout stays clean "
+             "for the printed metrics",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -139,7 +145,10 @@ def main():
             in_signals=params["controls"],
             in_window=params["in_window"],
             out_window=params["out_window"],
-            verbose=params["verbose"],
+            # tangermeme's `verbose` IS the tqdm bar here, so progress is wired
+            # to --no-progress rather than to -v. Keep in step with
+            # benchmark_predictions.py.
+            verbose=args.progress or params["verbose"],
             ignore=IGNORE,
             exclusion_lists=params["blacklist"],
         )
@@ -161,7 +170,7 @@ def main():
                 model=model,
                 X=X,
                 args=X_ctl,
-                verbose=params["verbose"],
+                verbose=args.progress or params["verbose"],
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 batch_size=params["batch_size"],
             )
