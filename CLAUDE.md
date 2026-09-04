@@ -657,7 +657,16 @@ breaks are fixed, ported from procap-atlas:
 - `PeakGenerator(signals=[params["signals"]])` — **nested**. A flat 2-element list now means two independent
   unstranded groups, which breaks reverse-complement channel swapping. `params["signals"]` itself stays flat
   for `extract_loci` and for `signal_groups`.
-- `Cherimoya.load(path, device=...)` is unchanged and still compatible.
+- `Cherimoya.load(path, device=...)` is unchanged and still compatible — but **it defaults to
+  `compile=True`**, so `benchmark_cherimoya.py` was compiling unconditionally until 2026-09-04. Both
+  scripts now take an explicit flag, with **deliberately opposite defaults**, because the warmup
+  economics differ: `benchmark_cherimoya.py --compile` is **opt-in** (one inference pass over the test
+  set does not amortise compilation), while `fit_cherimoya.py --no-compile` is **opt-out** (50 epochs
+  do). Both stay gated on `sys.version_info < (3, 14) or torch.__version__ >= "2.10"` — `torch.compile`
+  raises unconditionally on Python 3.14+ below torch 2.10, and the limit is Dynamo, not Triton. The
+  benchmark warns when `--compile` is asked for and cannot be honoured, rather than silently ignoring
+  it. Not applicable to this repo's own lock (torch 2.13 on Python 3.11); it matters where a site
+  interpreter differs.
 
 Note `load()` reconstructs via `cls(**payload['config'])`, so a checkpoint saved by a pre-0.2 cherimoya
 whose stored config contains `n_outputs` will fail to load under the pinned version.

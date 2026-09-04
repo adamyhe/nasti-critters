@@ -105,6 +105,15 @@ def main():
     parser.add_argument("--lw-lr", type=float, default=None)
     parser.add_argument("--lw-wd", type=float, default=None)
     parser.add_argument("--lw-momentum", type=float, default=None)
+    parser.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="disable torch.compile(). On by default here, unlike "
+             "benchmark_cherimoya.py's opt-in --compile: a training run is 50 "
+             "epochs, which amortises the warmup, where benchmarking is one "
+             "inference pass. Use this to rule compilation out when debugging a "
+             "Dynamo or Triton failure",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -285,7 +294,9 @@ def main():
     # torch.compile has no Python 3.14 support below torch 2.10; the limit is
     # Dynamo, not Triton itself. torch.__version__ is a TorchVersion, which
     # supports PEP 440-aware comparison against a plain string.
-    compile_supported = sys.version_info < (3, 14) or torch.__version__ >= "2.10"
+    compile_supported = (not args.no_compile) and (
+        sys.version_info < (3, 14) or torch.__version__ >= "2.10"
+    )
     model = Cherimoya(
         name=params["name"],
         n_filters=params["n_filters"],
