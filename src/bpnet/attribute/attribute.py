@@ -37,6 +37,46 @@ def load_bed(path: str | Path) -> pd.DataFrame:
     )
 
 
+def nucleotide_frequency_references(X, n=1, random_state=None):
+    """Soft PFM references from each sequence's own observed base frequencies.
+
+    Ported from procap-atlas. One reference per input sequence: the sequence's
+    A/C/G/T frequencies repeated at every position, so the baseline is
+    composition-matched but carries no positional information at all.
+
+    Why this rather than dinucleotide shuffling, which is bpnet-lite's and
+    tangermeme's default: upstream's locus diagnostics found that **dinucleotide
+    shuffles sometimes produce ACTIVE references** -- sequences with cryptic
+    promoter-like signal, occasionally as active as or more active than the
+    genomic input. That makes the baseline reference-sensitive rather than
+    neutral, which is the one property a DeepLIFT reference has to have.
+
+    The argument is stronger in this repo than upstream, because it is
+    multi-species and several of these genomes are far denser than human. In
+    S. cerevisiae there are 1.2-4.1 peaks per 2114 bp training window, so almost
+    every window contains a promoter; a shuffle that preserves local
+    dinucleotide composition there is correspondingly more likely to reassemble
+    something initiation-competent. It is the same reasoning that made the
+    initiator PWM measure use relative entropy against LOCAL base composition
+    rather than a uniform background -- promoter context is not genome average.
+
+    Shape is (N, n, 4, L), which is what tangermeme's reference interface wants.
+    Passed as a CALLABLE, so references are built per batch and never go through
+    tangermeme's tensor-reference one-hot validator, which would reject a soft
+    (non-one-hot) tensor.
+    """
+    if n < 1:
+        raise ValueError("n must be at least 1")
+
+    frequencies = X.float().mean(dim=-1, keepdim=True)
+    return (
+        frequencies.expand(-1, -1, X.shape[-1])
+        .unsqueeze(1)
+        .expand(-1, n, -1, -1)
+        .clone()
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -49,6 +89,23 @@ def main():
         default="profile",
     )
     parser.add_argument("--models-dir", type=str, default=None)
+    parser.add_argument(
+        "--reference-mode",
+        choices=("frequency", "dinucleotide"),
+        default="frequency",
+        help="DeepLIFT reference baseline (default: %(default)s). 'frequency' "
+             "uses one soft nucleotide-frequency reference per sequence; "
+             "'dinucleotide' uses bpnet-lite/tangermeme's dinucleotide "
+             "shuffles, which upstream found can be ACTIVE at some loci -- see "
+             "nucleotide_frequency_references()",
+    )
+    parser.add_argument(
+        "--n-shuffles", type=int, default=None,
+        help="number of dinucleotide shuffles; only used with "
+             "--reference-mode dinucleotide (default: from "
+             "config/bpnet_params.json, 20). Frequency mode forces 1, since "
+             "that reference is deterministic and repeats would be identical",
+    )
     parser.add_argument("--output-fname", type=str, default=None)
     parser.add_argument("--save-ohe", type=str, default=None)
     args = parser.parse_args()
@@ -83,9 +140,16 @@ def main():
     params["attribute_type"] = args.attribute_type
     params["model_fnames"] = [str(f["model"]) for f in folds]
     chroms = [c for f in folds for c in f["test_chroms"]]
+    if args.n_shuffles is not None:
+        params["n_shuffles"] = args.n_shuffles
+    # The reference mode is in the default filename because it changes the
+    # numbers: without it, a frequency-mode run silently overwrites a
+    # dinucleotide-mode one and nothing on disk records which produced it.
+    # Upstream's path omits it; this is a deliberate small divergence.
     params["output_fname"] = str(
         REPO_ROOT / (args.output_fname
-                     or f"attr/{exp.id}_attr_{args.attribute_type}.npz")
+                     or f"attr/{exp.id}_attr_{args.attribute_type}"
+                        f"_{args.reference_mode}.npz")
     )
     params["save_ohe"] = str(REPO_ROOT / args.save_ohe) if args.save_ohe else None
 
@@ -137,20 +201,31 @@ def main():
             model = ProfileWrapper(model)
             additional_nonlinear_ops = {_ProfileLogitScaling: _nonlinear}
 
-        attributions.append(
-            deep_lift_shap(
-                model,
-                X,
-                hypothetical=True,
-                batch_size=params["batch_size"],
-                n_shuffles=params["n_shuffles"],
-                random_state=params["random_state"],
-                verbose=params["verbose"],
-                additional_nonlinear_ops=additional_nonlinear_ops,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                warning_threshold=0.01,
-            ).numpy()
-        )
+        if args.reference_mode == "frequency":
+            # n_shuffles=1: the frequency reference is deterministic, so more
+            # would be byte-identical copies.
+            references, n_shuffles = nucleotide_frequency_references, 1
+        else:
+            references, n_shuffles = None, params["n_shuffles"]
+
+        attribution_kwargs = {
+            "model": model,
+            "X": X,
+            "hypothetical": True,
+            "batch_size": params["batch_size"],
+            "n_shuffles": n_shuffles,
+            "random_state": params["random_state"],
+            "verbose": params["verbose"],
+            "additional_nonlinear_ops": additional_nonlinear_ops,
+            "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "warning_threshold": 0.01,
+        }
+        # Only set `references` for frequency mode; omitting it entirely is what
+        # selects tangermeme's own dinucleotide shuffling.
+        if references is not None:
+            attribution_kwargs["references"] = references
+
+        attributions.append(deep_lift_shap(**attribution_kwargs).numpy())
 
         del model
         if torch.cuda.is_available():

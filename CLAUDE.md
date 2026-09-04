@@ -670,6 +670,34 @@ Already synced:
   `from bpnetlite.bpnet import BPNet`, optional `blacklist`/`exclusion_lists`, `dtype=torch.float`, and
   `alpha` renamed to `count_loss_weight` (`--alpha` kept as an alias).
 - `src/cherimoya/fit/fit_cherimoya.py` — ported to the cherimoya >= 0.2 API (see below).
+- `src/bpnet/attribute/attribute.py` — **the DeepLIFT reference**, synced 2026-09-04. It was using
+  tangermeme's default dinucleotide shuffling (`n_shuffles=20`) where upstream defaults to a
+  **nucleotide-frequency reference**: one soft PFM per input sequence carrying that sequence's own
+  A/C/G/T frequencies at every position. `--reference-mode {frequency,dinucleotide}` selects, default
+  `frequency`, and `--n-shuffles` now has a CLI override (it was JSON-only).
+  **The reason is that a dinucleotide shuffle is not reliably NEUTRAL.** Upstream's locus diagnostics
+  found shuffles that produce cryptic promoter-like signal — for some loci as active as, or more active
+  than, the genomic input — which makes the baseline reference-sensitive, the one thing a DeepLIFT
+  reference must not be. **That argument is stronger here than upstream**, because several of these
+  genomes are far denser than human: S. cerevisiae carries 1.2-4.1 peaks per 2114 bp window, so nearly
+  every window contains a promoter and a composition-preserving shuffle is correspondingly more likely
+  to reassemble something initiation-competent. Same reasoning that moved the initiator PWM to relative
+  entropy against *local* composition.
+  Two implementation details that matter: the reference is passed as a **callable**, so it is built per
+  batch and never reaches tangermeme's tensor-reference one-hot validator, which would reject a soft
+  tensor; and frequency mode forces **`n_shuffles=1`**, since that reference is deterministic and
+  further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
+  at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
+  soft, and `n=0` rejected.
+  **The default output path now carries the mode** (`attr/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  divergence from upstream's mode-less name: the two references give different numbers, and without it
+  a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
+
+Also not copied from their attribution tree: `--head orientation` (attributes the profile orientation
+index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible ReLU form of
+the binary maximum) and `src/bpnet/attribute/launch.py`. Both are real capability gaps rather than
+rejected ideas — the orientation head is the same metric as the `orientation_index_pearson` our
+benchmarks do not report.
 
 Deliberately not copied: `--background NAME:RATIO` multi-source negatives (its `ccre` source is
 GRCh38-only), `--min-reads` (needs their `config/n_reads.txt`), and their hitcall/modisco/predict/
