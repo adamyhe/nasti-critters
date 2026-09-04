@@ -18,8 +18,9 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
-    IGNORE,
     Experiment,
+    IGNORE,
+    load_model,
     load_params,
 )
 
@@ -78,7 +79,6 @@ def main():
     )
 
     import torch
-    from bpnetlite.bpnet import BPNet
     from bpnetlite.performance import (
         jensen_shannon_distance,
         pearson_corr,
@@ -98,8 +98,6 @@ def main():
         torch.set_num_interop_threads(params["n_cpus"])
 
     loci = load_bed(params["loci"])
-    n_control_tracks = 0 if params["controls"] is None else len(params["controls"])
-    trimming = (params["in_window"] - params["out_window"]) // 2
 
     signals = []
     preds = []
@@ -124,22 +122,8 @@ def main():
             X_ctl = None
         signals.append(torch.abs(y))
 
-        model = BPNet(
-            n_filters=params["n_filters"],
-            n_outputs=len(params["signals"]),
-            n_control_tracks=n_control_tracks,
-            count_loss_weight=params["count_loss_weight"],
-            n_layers=params["n_layers"],
-            trimming=trimming,
-            verbose=params["verbose"],
-        )
-        model.load_state_dict(
-            torch.load(
-                model_path,
-                weights_only=True,
-                map_location=torch.device("cpu"),
-            )
-        )
+        # The checkpoint IS the model -- see load_model()'s docstring.
+        model = load_model(model_path)
 
         preds.append(
             predict(

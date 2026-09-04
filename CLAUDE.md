@@ -232,6 +232,32 @@ need the old dm3 dataset, add it as an experiment rather than resurrecting a par
 `{name}.final.torch` exactly once at the end of `fit()`. `model_path(..., final=True)` is
 the only safe test of completion.
 
+**A bpnet-lite checkpoint IS a pickled module, not a state dict — load it with
+`experiments.load_model()`.** `bpnetlite/bpnet.py` persists with `torch.save(self, ...)` for both
+paths, verified in the installed source. Two things follow, and the downstream scripts got both wrong
+until 2026-09-04:
+
+- **`weights_only=False` is required.** PyTorch 2.6 flipped the default to `True`, so
+  `benchmark_predictions.py` died with `UnpicklingError: ... Unsupported global: GLOBAL
+  bpnetlite.bpnet.BPNet was not an allowed global by default`. Allowlisting with `add_safe_globals` is
+  the wrong remedy: it would have to cover BPNet and every type it pickles, and these checkpoints are
+  this repo's own training output, not untrusted input. procap-atlas passes `weights_only=False` at
+  every bpnet-lite load site.
+- **Do not reconstruct a `BPNet` and call `load_state_dict`.** Both scripts did, and it could never
+  have worked at any `weights_only` setting — reproduced on torch 2.10, it raises
+  `TypeError: Expected state_dict to be dict-like, got <class 'BPNet'>`. It also carried a quieter
+  hazard: the architecture came from the *current* `config/bpnet_params.json`, so a checkpoint trained
+  under a different `n_filters`/`n_layers` would be loaded into the wrong shape.
+
+`attribute.py` was additionally unrunnable one line earlier: it read `params["n_outputs"]` and
+`params["n_control_tracks"]`, which are set **nowhere** — absent from `bpnet_params.json`, from the
+`params.update()` block and from any CLI flag — so it raised `KeyError` before reaching the load.
+Deleting the reconstruction removed that too.
+
+**Cherimoya does not go through `load_model()`.** It saves a dict payload and reconstructs via
+`cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
+affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
+
 **Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
 `data_loader` are imported *inside* `main()`, after argparse and path validation, so
 `--help` and missing-data errors stay instant on a login node and are testable without a

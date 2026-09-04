@@ -18,8 +18,9 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
-    IGNORE,
     Experiment,
+    IGNORE,
+    load_model,
     load_params,
 )
 
@@ -90,7 +91,7 @@ def main():
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
-    from bpnetlite.bpnet import BPNet, ControlWrapper, CountWrapper, ProfileWrapper
+    from bpnetlite.bpnet import ControlWrapper, CountWrapper, ProfileWrapper
     from tangermeme.deep_lift_shap import _nonlinear, deep_lift_shap
     from tangermeme.io import extract_loci
     from tangermeme_compat import patch_numeric_chroms
@@ -118,26 +119,15 @@ def main():
         Path(params["save_ohe"]).parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(params["save_ohe"], X.to(torch.uint8).numpy())
 
-    n_outputs = params["n_outputs"] or len(params["signals"])
-    n_control_tracks = (
-        params["n_control_tracks"]
-        if params["n_control_tracks"] is not None
-        else 0 if params["controls"] is None else len(params["controls"])
-    )
-    trimming = (params["in_window"] - params["out_window"]) // 2
-
     attributions = []
     for model_path in params["model_fnames"]:
-        model = BPNet(
-            n_filters=params["n_filters"],
-            n_outputs=n_outputs,
-            n_control_tracks=n_control_tracks,
-            count_loss_weight=params["count_loss_weight"],
-            n_layers=params["n_layers"],
-            trimming=trimming,
-            verbose=params["verbose"],
-        )
-        model.load_state_dict(torch.load(model_path, weights_only=True))
+        # The checkpoint IS the model -- see load_model()'s docstring. The block
+        # this replaced also read params["n_outputs"] and
+        # params["n_control_tracks"], which are set NOWHERE: not in
+        # config/bpnet_params.json, not in the params.update() above, and behind
+        # no CLI flag. So this script raised KeyError before it ever reached the
+        # load.
+        model = load_model(model_path)
 
         model = ControlWrapper(model)
         additional_nonlinear_ops = None
