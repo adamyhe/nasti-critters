@@ -119,9 +119,43 @@ COLUMNS = [
 #: little more than "this organism has rDNA in its assembly".
 LOW_MAPPING_PCT = 50.0
 VERY_LOW_MAPPING_PCT = 25.0
-#: Reads reaching the signal track, below which the labels are thin for a
-#: base-resolution model. Observed floor of the corpus: Spt5EtOH 8.0M.
-SHALLOW_SIGNAL_READS = 10_000_000
+#: Coverage per called peak, below which the labels are thin for a
+#: base-resolution model.
+#:
+#: **This replaced an ABSOLUTE read count (10M), which was wrong in a way that
+#: correlated with species.** The depth a library needs is proportional to the
+#: size of the nascent transcriptome being sampled, not a constant: a small
+#: genome with few distal elements reaches the same coverage per initiation site
+#: on far fewer reads than mouse or human. Judging all 12 species against one
+#: read count therefore penalised the compact genomes for being compact, and it
+#: was measurably backwards in both directions on the real corpus:
+#:
+#:                                    signal   reads/peak   old flag
+#:   S.pombe_PROcap                    23.1M       2,513    (none)  <- best sampled
+#:   S.cerevisiae_PROcap                4.9M         721    SHALLOW <- false positive
+#:   C.reinhardtii-liquidculture        6.3M         770    SHALLOW <- false positive
+#:   M.musculus-BMDM_5GRO-ctl          18.2M         450    (none)  <- false negative
+#:   D.melanogaster-S2_5GROcap         22.2M         518    (none)  <- false negative
+#:
+#: S. cerevisiae at 4.9M matches C.griseus-CHO's 723 reads/peak on a tenth of
+#: the reads, and S. pombe on 23.1M is better sampled than M.musculus-GCB on
+#: 150.4M. Meanwhile two libraries above 18M were sampling their (much larger)
+#: transcriptomes more thinly than several flagged ones, and escaped silently.
+#:
+#: `reads_per_peak` is the normalisation the corpus already carries: peaks are
+#: this pipeline's own measure of how much transcribed space exists, so dividing
+#: by them asks "how deeply is each initiation site covered" rather than "how
+#: many reads are there". It is not perfectly independent of depth — peak
+#: calling saturates, so a shallow library calls fewer peaks and its denominator
+#: shrinks too — but it errs conservatively, since peaks fall more slowly than
+#: reads.
+#:
+#: **The threshold is a heuristic recalibrated from this corpus, not a
+#: principled constant** — same status as the FLAT initiator threshold. There is
+#: no clean gap in the distribution; 500 sits below a loose cluster at 595-770
+#: and above the genuinely thin tail at 209-518. Revisit it against a fuller
+#: corpus rather than treating it as settled.
+THIN_COVERAGE_READS_PER_PEAK = 500
 #: The "excessive adapter content" flag: a run is majority adapter dimer when
 #: its MEDIAN insert is below fastp's --length_required (so most reads are
 #: discarded before alignment) AND the adapter is actually prevalent.
@@ -536,8 +570,12 @@ def add_flags(rows: list[dict], qc_reads: Path | None = None,
             elif rate < LOW_MAPPING_PCT:
                 flags.append(f"WARN:low_mapping({rate:.0f}%,{basis})")
         signal = _num(r.get("signal_reads"))
-        if signal is not None and signal < SHALLOW_SIGNAL_READS:
-            flags.append(f"WARN:shallow_signal({signal / 1e6:.1f}M)")
+        rpp = _num(r.get("reads_per_peak"))
+        if rpp is not None and rpp < THIN_COVERAGE_READS_PER_PEAK:
+            # No absolute depth in the message: qc_flags is COMMA-JOINED, so a
+            # comma inside one flag splits it in two for anything parsing the
+            # field. signal_reads is an adjacent column anyway.
+            flags.append(f"WARN:thin_coverage({rpp:.0f}/peak)")
         peaks, med = _num(r.get("peaks_total")), medians.get(r.get("species", ""))
         if peaks and med and peaks < PEAKS_SPECIES_FRACTION * med:
             flags.append(f"WARN:peaks_below_species({peaks:.0f}v{med:.0f})")

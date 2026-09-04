@@ -1663,10 +1663,10 @@ reports what the pipeline actually produced, per experiment:
 | `pct_unique` | `unique/input`. Low means wrong assembly, contamination, or unsplit spike-in. |
 | `signal_reads` | reads in the merged BAM, i.e. what `genomecov -5` counts. **The number that matters.** |
 | `peaks_total` | PINTS uni + bi, matching the training locus set (`divergent` excluded). |
-| `reads_per_peak` | crude signal density; very low means peaks called from thin coverage. |
+| `reads_per_peak` | signal density, and **the basis of the `thin_coverage` flag** — the cross-species-comparable depth measure. See the note below on why absolute depth is not. |
 | `pct_rrna` | rRNA + organellar share of the raw reads, from `src/qc/rrna_content.py`. Blank means NOT MEASURED, which is not the same as 0. |
 | `pct_unique_adj` | `unique / non-rRNA input`. **This is the mapping-quality number**; `pct_unique` is not. |
-| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. Advisory — exclusion stays a manual `tier` decision. |
+| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. **Advisory only — nothing is excluded on them; see below.** Note the `low_mapping(N%,adj)` flags contain a comma themselves, so naive splitting on `,` breaks them; new flags should avoid commas. |
 
 **`pct_unique` is not a quality metric, and reading it as one produced three wrong verdicts.** Where the
 rDNA array sits in the assembly in 2+ near-identical copies, every rRNA read is a multimapper, gets
@@ -1856,6 +1856,53 @@ Three reasons to leave them alone:
 This also matches the project's stated design (one experiment == one species x one condition == one
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
+
+## Nothing is excluded: every dataset is analysed and modelled
+
+**Standing decision, 2026-09-03, and it generalises every "should we drop X?" question below.** Model
+every experiment, including the problematic ones, and QC at the end. The reason is structural rather than
+optimistic: **one experiment == one species x one condition == one model**, with no multi-tasking and no
+shared heads, so a weak dataset cannot contaminate a strong one. There is nothing to protect by excluding
+it in advance, and a trained model is *better* evidence about a library than a pre-hoc read count is.
+
+So `tier` gates preprocessing only, `launch.py` deliberately does not filter on it or on `qc_flags`, and
+proposals to add an `exclude` tier have been declined. The flags exist to tell you which numbers to
+distrust when reading results, not to decide what runs.
+
+### Depth requirements scale with the nascent transcriptome, NOT with a constant
+
+**The depth a library needs is proportional to the size of the transcribed space being sampled.** An
+organism with a small genome, few distal elements and little intergenic transcription reaches the same
+coverage per initiation site on far fewer reads than mouse or human. Ranking libraries by raw
+`signal_reads` across species therefore penalises the compact genomes for being compact — it measures the
+organism, not the library.
+
+This was not a hypothetical: `experiment_stats.py` carried `SHALLOW_SIGNAL_READS = 10_000_000`, one
+absolute threshold applied to all twelve species, and it was **measurably wrong in both directions**:
+
+| | signal | reads/peak | old flag |
+| --- | --- | --- | --- |
+| `S.pombe_PROcap` | 23.1 M | **2,513** | none — and it is the best-sampled experiment in the corpus |
+| `M.musculus-GCB_PROcap` | **150.4 M** | 2,325 | none |
+| `S.cerevisiae_PROcap` | 4.9 M | 721 | **SHALLOW** — false positive; matches CHO's 723 on 1/10 the reads |
+| `C.reinhardtii-liquidculture_5GRO` | 6.3 M | 770 | **SHALLOW** — false positive |
+| `M.musculus-BMDM_5GRO-ctl` | 18.2 M | **450** | **none** — false negative |
+| `D.melanogaster-S2_5GROcap` | 22.2 M | **518** | **none** — false negative |
+
+S. pombe on 23 M reads is better sampled than mouse on 150 M. Two libraries above 18 M were covering
+their much larger transcriptomes more thinly than several flagged ones and escaped silently.
+
+Replaced with `THIN_COVERAGE_READS_PER_PEAK = 500` and a `WARN:thin_coverage(N/peak)` flag. `peaks_total`
+is this pipeline's own measure of how much transcribed space exists, so dividing by it asks how deeply
+each initiation site is covered. It is **not fully depth-independent** — peak calling saturates, so a
+shallow library calls fewer peaks and shrinks its own denominator — but it errs conservatively, since
+peaks fall more slowly than reads. The threshold is a heuristic recalibrated from this corpus with no
+clean gap in the distribution, the same provisional status as the FLAT initiator threshold; do not treat
+500 as principled.
+
+Net effect on the real corpus: 10 flagged before, 8 after. `M.musculus-BMDM_5GRO-ctl` gained a flag it
+should always have had; `S.cerevisiae_PROcap`, `C.reinhardtii-liquidculture_5GRO` and
+`C.griseus-BMDM-KLA1h_GROcap` lost ones they never deserved.
 
 ## Should the S. cerevisiae perturbation experiments be dropped?
 
