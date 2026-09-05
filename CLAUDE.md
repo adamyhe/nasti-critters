@@ -271,6 +271,38 @@ Deleting the reconstruction removed that too.
 `cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
 affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
 
+## Peak-level splits were ignored by every downstream script
+
+S. pombe and S. moellendorffii assign folds per PEAK, not per chromosome, so `fold_split()` returns
+`test_chroms=None` for them and the filtering has to happen on the peak table. `fit_bpnet.py` and
+`fit_cherimoya.py` do that through `exp.fold_loci()`. **Nothing downstream did**, and the two failure
+modes were very different:
+
+- **`attribute.py` crashed.** `chroms = [c for f in folds for c in f["test_chroms"]]` raised
+  `TypeError: 'NoneType' object is not iterable`. Loud, and the reported symptom.
+- **Both benchmark scripts silently scored every fold's model on ALL loci** — its own training peaks
+  included — because `chroms=None` means "no chromosome filter" rather than "no loci". Metrics inflated,
+  no error. This is the worse one, and it was only found by chasing the crash.
+
+Fixes, and note they are deliberately different because the two scripts want different things:
+
+- `fold_loci()` gained **`test_loci`**. It already returned `train_loci`/`valid_loci` but only a
+  `n_test` COUNT, so benchmarking had nothing to filter with. Under chromosome-level splits it returns
+  every peak and `test_chroms` does the work, so that path is unchanged; under peak-level it returns the
+  fold's held-out peaks. Verified on a fixture: 4 of 20 loci for fold 0 of 5, zero train/test overlap,
+  and all 20 returned under chromosome-level.
+- Both benchmarks now extract `exp.fold_loci(loci, fold)["test_loci"]`.
+- `attribute.py` takes `[... for c in (f["test_chroms"] or [])] or None`, i.e. **no chromosome filter**
+  for peak-level species. That is correct rather than a workaround: their peaks are all in the fold
+  table, and attribution does not hold out anyway — see below.
+
+**Attribution deliberately does NOT hold out, and that is inherited, not accidental.** It extracts every
+locus once and attributes it with EVERY fold's model, then averages. Upstream's `attribute_bpnet.py`
+does the same, with `chroms=all_chrom`. So each locus is attributed by four models that saw it in
+training plus the one that did not: it is an **ensemble attribution, not a held-out estimate**, and
+reading it as evidence of generalisation would be wrong. `benchmark_predictions.py` is the per-fold
+held-out path and is where generalisation numbers come from.
+
 ## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
 
 An earlier version of this section called it optional and said a blank column is usually tolerable.

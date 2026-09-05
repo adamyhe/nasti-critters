@@ -284,6 +284,7 @@ class Experiment:
         split = self.fold_split(fold)
         if not split["peak_level"]:
             return {"train_loci": peaks, "valid_loci": peaks,
+                    "test_loci": peaks,
                     "train_chroms": split["train_chroms"],
                     "valid_chroms": split["valid_chroms"],
                     "n_test": None, **split}
@@ -337,6 +338,13 @@ class Experiment:
                           .reset_index(drop=True),
             "valid_loci": merged[merged["fold"] == split["valid_fold"]][cols]
                           .reset_index(drop=True),
+            # The held-out loci, which is what benchmarking must score against.
+            # Under chromosome-level splits the caller gets every peak back and
+            # `test_chroms` does the filtering; under peak-level splits
+            # `test_chroms` is None, so without this the fold filter simply does
+            # not happen and a model is scored on its own training peaks.
+            "test_loci": merged[merged["fold"] == split["test_fold"]][cols]
+                         .reset_index(drop=True),
             "train_chroms": None,
             "valid_chroms": None,
             "n_test": int((table["fold"] == split["test_fold"]).sum()),

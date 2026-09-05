@@ -168,7 +168,18 @@ def main():
 
     params["attribute_type"] = args.attribute_type
     params["model_fnames"] = [str(f["model"]) for f in folds]
-    chroms = [c for f in folds for c in f["test_chroms"]]
+    # Every chromosome that appears in the fold assignment, i.e. no restriction
+    # in practice -- attribution deliberately covers ALL loci and averages each
+    # one over every fold's model, matching procap-atlas. It is an ensemble
+    # attribution, NOT a held-out estimate, which is why it does not mirror the
+    # per-fold structure benchmark_predictions.py uses.
+    #
+    # `test_chroms` is None under peak-level splits (S. pombe, S. moellendorffii)
+    # because filtering happens on the peak table instead, so flattening it
+    # directly raised `TypeError: 'NoneType' object is not iterable` for those
+    # two species. None here means no chromosome filter, which is the right
+    # answer: their peaks are all in the fold table already.
+    chroms = [c for f in folds for c in (f["test_chroms"] or [])] or None
     if args.n_shuffles is not None:
         params["n_shuffles"] = args.n_shuffles
     # The reference mode is in the default filename because it changes the
