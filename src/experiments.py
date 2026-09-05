@@ -50,7 +50,7 @@ EXPERIMENTS_PATH = CONFIG / "experiment_config.yaml"
 CHROM_SPLITS_PATH = CONFIG / "chrom_splits.yaml"
 SPLITS_DIR = CONFIG / "splits"
 MODELS_DIR = REPO_ROOT / "models"
-ATTR_DIR = REPO_ROOT / "attr"
+ATTR_DIR = REPO_ROOT / "attributions"
 
 # Bases that extract_loci should treat as unknown. Passed on every call in this
 # repo; kept here so the list cannot drift between scripts.

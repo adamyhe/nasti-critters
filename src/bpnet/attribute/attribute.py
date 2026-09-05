@@ -18,6 +18,7 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
+    ATTR_DIR,
     Experiment,
     attribution_path,
     filtered_loci_path,
@@ -165,7 +166,7 @@ def main():
         # would record which set produced the file.
         stem = Path(args.loci).name.split(".")[0]
         params["output_fname"] = str(
-            REPO_ROOT / f"attr/{exp.id}_{stem}_attr_{args.attribute_type}"
+            ATTR_DIR / f"{exp.id}_{stem}_attr_{args.attribute_type}"
                         f"_{args.reference_mode}.npz")
     else:
         params["output_fname"] = str(

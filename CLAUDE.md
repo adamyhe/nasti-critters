@@ -38,7 +38,7 @@ Two model families are trained on the same data:
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
 did not exist yet. Both are ignored now (along with `logs/`, `predictions/`, `performance_metrics/`,
-`attr/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
+`attributions/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
 Every script resolves config/data paths relative to `REPO_ROOT`, computed from `__file__`, so scripts can be
 invoked from anywhere — but the launcher shell scripts assume the repo root as CWD.
 
@@ -303,7 +303,7 @@ the loci that were attributed, and the filter is what decides which those are.
 mean over folds of those. Observed/actual contributions are `hypothetical * one_hot`, derivable from the
 two files, so the pair is complete for modisco and nothing else needs saving.
 
-**Passing `--loci` changes the default output name** (`attr/{exp}_{stem}_attr_{type}_{mode}.npz`), for
+**Passing `--loci` changes the default output name** (`attributions/{exp}_{stem}_attr_{type}_{mode}.npz`), for
 the same reason the reference mode is in there: different loci give different numbers, and nothing else
 on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
 check follows.
@@ -773,7 +773,7 @@ Already synced:
   further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
   at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
   soft, and `n=0` rejected.
-  **The default output path now carries the mode** (`attr/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  **The default output path now carries the mode** (`attributions/{exp}_attr_{type}_{mode}.npz`), a deliberate
   divergence from upstream's mode-less name: the two references give different numbers, and without it
   a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
 
