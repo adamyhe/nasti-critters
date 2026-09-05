@@ -23,6 +23,11 @@ dependencies = [
     # same reasoning as pybigtools. It ships the entry point as an
     # old-style data/scripts/modisco rather than a console_script.
     "modisco-lite>=2.0.0",
+    # --- analysis / plotting ---
+    # Both arrive transitively (matplotlib via logomaker via modisco-lite,
+    # scipy via several), but src/analysis/ imports them directly.
+    "matplotlib",
+    "scipy",
     "tangermeme>=1.0.0",
     # Pinned by commit via [tool.uv.sources] below, not by version: the version this project needs (0.2.1) was never
     # released to PyPI. Note: 0.2.1 differs from the published 0.2.0 only by the

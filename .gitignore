@@ -191,6 +191,7 @@ models/
 logs/
 predictions/
 performance_metrics/
+plots/
 attributions/
 modisco/
 data/annotation/

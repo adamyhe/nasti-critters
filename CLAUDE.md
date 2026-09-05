@@ -188,6 +188,9 @@ python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0
 python src/cherimoya/fit/launch.py --dry-run
 python src/cherimoya/fit/launch.py --print-commands | bash
 
+# Compare the two model families on shared benchmark metrics
+python src/analysis/compare_bpnet_cherimoya.py
+
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
 python src/bpnet/benchmark/benchmark_predictions.py
@@ -398,6 +401,36 @@ additionally demand negatives and trained models that this step has nothing to d
 **The already-done check must predict the output path**, and the reference mode is part of that path, so
 `experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two
 copies of that format string is exactly how a launcher starts re-running finished work.
+
+## Comparing the two model families
+
+`src/analysis/compare_bpnet_cherimoya.py` collates
+`performance_metrics/{bpnet,cherimoya}/{experiment}.json`, inner-joins on experiment, writes
+`plots/bpnet_vs_cherimoya/collated.tsv` and one figure per metric: a scatter with a y=x line plus a
+histogram of per-experiment deltas, with a Wilcoxon signed-rank test. Ported from procap-atlas's
+`src/analysis/compare_bpnet_cherimoya.py`, which is why it looks the way it does.
+
+It only works because **both benchmark scripts now write the same schema** — that was the point of
+giving `benchmark_predictions.py` a metrics JSON at all. The four shared metrics are
+`profile_pearson`, `profile_jsd`, `log_counts_pearson`, `counts_spearman`; BPNet's extra
+`counts_pearson` is skipped automatically rather than half-plotted.
+
+Two deliberate departures from upstream:
+
+- **Points are coloured by SPECIES, not read depth.** Upstream is human-only, so depth is its only
+  axis; here the question is whether one architecture wins uniformly or only on some clades, which a
+  12-species corpus can actually answer. `--colour-by depth` restores the upstream view from
+  `qc/stats/experiment_stats.tsv`.
+- **No consolidate step.** Upstream inner-joins two pre-consolidated TSVs; reading the per-experiment
+  JSONs directly removes a stage that could go stale against them.
+
+**`--per-fold` compares folds instead of the genome-wide block, and its Wilcoxon p is not
+interpretable.** Folds of one experiment share an architecture, a library and a peak set, so 5 folds ×
+42 experiments is not 210 independent pairs — the test will report a p-value and it will be
+anticonservative. Use it to see spread, not significance.
+
+Cherimoya is not deployment-ready, so treat anything this produces as a development comparison rather
+than a result.
 
 ## TF-MoDISco
 
