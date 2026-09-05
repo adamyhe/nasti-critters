@@ -495,10 +495,21 @@ differ by more than an order of magnitude in every dimension:
 | `modisco report` | **1** | 16G | **2:00:00** | **1** |
 | fit launchers (for contrast) | 4 | 32G | 6:00:00 | unset |
 
-`motifs` is numba-parallel and runs for many hours; **`report` is single-threaded and finishes inside
-two** — it reads one `.h5`, matches its motifs against a MEME database and writes a report. Defaulting
-them together meant every report job reserved 32 idle cores for 48 hours, which queues badly and wastes
-allocation.
+`motifs` is numba-parallel and runs for many hours; **`report` finishes inside two** — it reads one
+`.h5`, matches its motifs against a MEME database and writes logos. Defaulting them together meant every
+report job reserved 32 idle cores for 48 hours, which queues badly and wastes allocation.
+
+**`report` is not literally single-threaded, though, and the numba pin is NOT a no-op for it.** Traced
+2026-09-05 because the obvious reading is that only `motifs` touches numba: `modiscolite/report.py`
+imports none, but it calls `memelite.tomtom`, which is `@njit(parallel=True, cache=True)` over a
+`prange` and calls `numba.set_num_threads(n_jobs)`. `report.py` invokes it as
+`tomtom(ppms, target_pwms, n_nearest=top_n_matches)` — **no `n_jobs`** — so it takes memelite's default
+of `-1` and uses every numba thread available. Without the pin a 1-CPU report job would spawn one thread
+per core on the node, which is precisely the oversubscription the pin exists to stop.
+
+What is true is that the tomtom call is *small* — tens of query motifs against a few hundred JASPAR
+targets — so the wall is dominated by logo rendering and HTML, and 1 CPU is a defensible default. If a
+report ever runs long, raise `--cpus-per-task`: the pin follows it, so tomtom will actually use them.
 
 `_add_modisco_args` therefore takes `default_cpus`/`default_mem`/`default_time` as **required** keyword
 arguments with no fallback, so the next caller cannot inherit the wrong set by omission;
