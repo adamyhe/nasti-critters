@@ -863,11 +863,12 @@ def run_modisco_report(family: str) -> None:
     # Short: reads one .h5, matches its motifs against a MEME database and
     # writes logos. NOT single-threaded, though -- it calls memelite.tomtom,
     # which is @njit(parallel=True) and is handed no n_jobs, so it takes every
-    # numba thread it can see. That is exactly why numba_env matters here: a
-    # 1-CPU job would otherwise spawn one thread per core on the node. The call
-    # is small enough that 1 CPU is still the right default; raise
-    # --cpus-per-task if a report ever runs long and tomtom will use them.
-    _add_modisco_args(parser, launcher, default_cpus=1,
+    # numba thread it can see. 4 cores rather than 1 so that parallel section
+    # has something to use, and rather than 32 because the tomtom call is small
+    # and the wall is dominated by logo rendering. numba_env pins
+    # NUMBA_NUM_THREADS to whatever is requested, so the threads match the
+    # allocation instead of the node.
+    _add_modisco_args(parser, launcher, default_cpus=4,
                       default_mem="16G", default_time="2:00:00")
     parser.add_argument(
         "--motif-db",

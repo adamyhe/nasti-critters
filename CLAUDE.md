@@ -492,7 +492,7 @@ differ by more than an order of magnitude in every dimension:
 | | CPUs | mem | time | `NUMBA_NUM_THREADS` |
 | --- | --- | --- | --- | --- |
 | `modisco motifs` | 32 | 64G | 48:00:00 | 32 |
-| `modisco report` | **1** | 16G | **2:00:00** | **1** |
+| `modisco report` | **4** | 16G | **2:00:00** | **4** |
 | fit launchers (for contrast) | 4 | 32G | 6:00:00 | unset |
 
 `motifs` is numba-parallel and runs for many hours; **`report` finishes inside two** — it reads one
@@ -507,9 +507,10 @@ imports none, but it calls `memelite.tomtom`, which is `@njit(parallel=True, cac
 of `-1` and uses every numba thread available. Without the pin a 1-CPU report job would spawn one thread
 per core on the node, which is precisely the oversubscription the pin exists to stop.
 
-What is true is that the tomtom call is *small* — tens of query motifs against a few hundred JASPAR
-targets — so the wall is dominated by logo rendering and HTML, and 1 CPU is a defensible default. If a
-report ever runs long, raise `--cpus-per-task`: the pin follows it, so tomtom will actually use them.
+So report gets **4** cores: enough for that parallel section to be worth having, and far short of
+motifs' 32 because the tomtom call is small — tens of query motifs against a few hundred JASPAR targets
+— and the wall is dominated by logo rendering and HTML. The pin follows `--cpus-per-task`, so raising it
+is picked up by tomtom rather than ignored.
 
 `_add_modisco_args` therefore takes `default_cpus`/`default_mem`/`default_time` as **required** keyword
 arguments with no fallback, so the next caller cannot inherit the wrong set by omission;
