@@ -2614,6 +2614,45 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
   `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
   log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
+- **Cherimoya has THREE sources of defaults and they disagree — checked 2026-09-04 against the 0.2.0
+  wheel.** Worth having in one place, because "cherimoya's default" is ambiguous:
+  `cherimoya_cli.defaults.default_fit_parameters` (its CLI), the Python API's own signatures
+  (`Cherimoya.__init__`, `fit()`, `io.PeakGenerator`), and procap-atlas.
+
+  | | CLI | API | procap-atlas | here |
+  | --- | --- | --- | --- | --- |
+  | `negative_ratio` | 0.25 | 0.25 | 1/7 | **0.25** |
+  | `max_jitter` | 500 | 500 | 500 | **500** |
+  | `n_filters` / `n_layers` | 128 / 9 | 128 / 9 | 128 / 9 | 128 / 9 |
+  | `expansion` / `residual_scale` | 2 / 0.15 | 2 / 0.15 | unset | unset -> 2 / 0.15 |
+  | `muon_lr`/`wd`, `adam_lr`/`wd`, `lw_*` | 0.025/0.03, 0.001/0.0, … | — | same | same |
+  | `max_epochs` | **20** | **50** | 50 | 50 |
+  | `early_stopping` | **5** | **None** | None | None |
+  | warmup epochs | **2** | — | 5 | 5 |
+  | `dtype` | float32 | float32 | float32 | **bfloat16** |
+
+  Three things fall out.
+
+  **The CLI's schedule is exactly the `20_5_2` config procap-atlas swept and rejected** — max_epochs 20,
+  early_stopping 5, warmup 2. So upstream's comparison was, in effect, testing cherimoya's own CLI
+  default and finding `50_None_5` better on every benchmark metric.
+
+  **On that schedule the API and the CLI disagree with each other**, and we follow the API:
+  `Cherimoya.fit()` is declared `max_epochs=50, early_stopping=None`, which is also procap-atlas's
+  choice and ours. So `max_epochs: 50, early_stopping: null` here is not a departure from cherimoya at
+  all — it matches the library's *function* default, and only the CLI wrapper differs.
+
+  **`expansion` and `residual_scale` are not passed by `fit_cherimoya.py` and do not need to be**: the
+  class defaults (2, 0.15) are identical to the CLI's, so the architecture is the same either way.
+
+  **`dtype=torch.bfloat16` is the one place this repo diverges from BOTH sources**, and it was never
+  recorded as a decision — cherimoya's CLI, its `fit()` signature and procap-atlas all use `float32`
+  (upstream passes `dtype=torch.float32` explicitly). `fit()` applies it through
+  `torch.autocast(device_type=device, dtype=dtype)`, so this is autocast precision for the whole
+  training loop, not a storage detail. Faster on Ampere and later, and usually harmless, but it is an
+  unflagged numerical divergence in a repo that otherwise tracks upstream — **decide it deliberately
+  rather than inheriting it.**
+
 - **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya** — negatives are 1/8 and 1/5 of a batch.
   Each family follows ITS OWN library's `PeakGenerator` default, which is the thing to remember, because
   the two libraries disagree and the number has been wrong here in three different ways.
@@ -2762,7 +2801,9 @@ every non-yeast experiment alone.
 - `load_bed()` reads only columns 0–2 with `dtype={"chrom": str}` — chromosome names must stay strings
   (S. cerevisiae uses roman numerals, dm has `4`/`X`).
 - Cherimoya optimization splits parameters: **Muon** for 2-D weight matrices except `linear.weight`, **AdamW**
-  for everything else, each with linear warmup → cosine decay, trained in `bfloat16`. Warmup was
+  for everything else, each with linear warmup → cosine decay, trained in `bfloat16` — which is a
+  divergence from cherimoya's own default and from procap-atlas, both `float32`; see the defaults table
+  above. Warmup was
   hard-coded at 5 epochs and is now `warmup_epochs` in the config with a `--warmup-epochs` flag, plus
   `decay_epochs` / `--decay-epochs` to decouple the decay's length from `max_epochs` — both ported from
   upstream, both no-ops at their defaults (5 and None give exactly the previous schedule, verified: 4,500
