@@ -486,8 +486,20 @@ clusters, `-w 1000` window, and `--lite` on the report.
 `filter_nonACGT_regions.py --save-ohe` is for, and it is why the OHE lives with the filter rather than
 with attribution — it must describe exactly the loci that were attributed.
 
-**Both stages are CPU-only** (`gpus=0`), and `motifs` is *long* — upstream allows two days and 32 CPUs,
-so raise `--time` and `--cpus-per-task` rather than accepting the 6-hour fit default.
+**Both stages are CPU-only** (`gpus=0`) and default to **32 CPUs, 64 GB and 48 hours**, against the fit
+launchers' 4 / 32G / 6h. `_add_common_args` takes those as parameters rather than hard-coding one set:
+a training fold and a tfmodisco run want very different walls, and a shared default that suits neither
+is how a 40-hour job gets killed at 6.
+
+**`NUMBA_NUM_THREADS` is pinned to `--cpus-per-task` on every modisco job.** numba otherwise sets it
+from every core it can SEE, which on a shared node is the whole machine and not the slice SLURM granted
+— a job holding 32 CPUs on a 128-core node spawns 128 threads, oversubscribes its own cgroup and can run
+slower than if it had asked for less, while degrading everything else on the node. tfmodisco-lite is
+numba-heavy throughout, which is why this is set here and nowhere else.
+
+It rides on the command as a `VAR=value cmd` prefix rather than an `export` line in the sbatch body, so
+one string carries it through all three emission modes. An `export` would silently vanish under
+`--print-commands` — the mode most likely to be run on a box where the variable matters.
 
 **The MEME database is chosen PER SPECIES, and this is the one place the port could not follow upstream.**
 procap-atlas hardcodes JASPAR CORE **vertebrates**, which it can afford to because it is human-only;

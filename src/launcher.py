@@ -117,7 +117,14 @@ def build_parser(
     return parser
 
 
-def _add_common_args(parser: argparse.ArgumentParser, launcher: str) -> None:
+def _add_common_args(
+    parser: argparse.ArgumentParser,
+    launcher: str,
+    *,
+    default_cpus: int = 4,
+    default_mem: str = "32G",
+    default_time: str = "6:00:00",
+) -> None:
     """Emission mode + SLURM resources. Shared by every launcher kind."""
     emit = parser.add_mutually_exclusive_group()
     emit.add_argument(
@@ -153,9 +160,12 @@ def _add_common_args(parser: argparse.ArgumentParser, launcher: str) -> None:
         "activation, etc. Defaults to activating the repo's mamba env "
         "and uv venv.",
     )
-    parser.add_argument("--cpus-per-task", type=int, default=4)
-    parser.add_argument("--mem", type=str, default="32G")
-    parser.add_argument("--time", type=str, default="6:00:00")
+    # Defaults are per launcher: a training fold and a tfmodisco run want very
+    # different walls, and a shared default that suits neither is how a 40-hour
+    # job gets killed at 6.
+    parser.add_argument("--cpus-per-task", type=int, default=default_cpus)
+    parser.add_argument("--mem", type=str, default=default_mem)
+    parser.add_argument("--time", type=str, default=default_time)
 
 
 def _setup_block(args) -> str:
@@ -187,7 +197,14 @@ def _select_experiments(parser, args) -> list[str]:
 
 
 def _emit(
-    args, log_dir: Path, setup: str, job_name: str, command: str, *, gpus: int = 1
+    args,
+    log_dir: Path,
+    setup: str,
+    job_name: str,
+    command: str,
+    *,
+    gpus: int = 1,
+    env: dict[str, object] | None = None,
 ) -> bool:
     """Emit one job in whichever of the three modes is active.
 
@@ -195,6 +212,18 @@ def _emit(
     launchers so the sbatch directives, the setup block and the three modes
     cannot drift between them.
     """
+    # Environment goes on the command as a `VAR=value cmd` prefix rather than as
+    # an `export` line in the sbatch body, so the SAME string carries it in all
+    # three emission modes. An export would silently vanish under
+    # --print-commands, which is the mode most likely to run on a box where the
+    # variable matters.
+    if env:
+        command = (
+            " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
+            + " "
+            + command
+        )
+
     if args.print_commands:
         print(command)
         return True
@@ -632,9 +661,26 @@ def run_filter(family: str, script: Path) -> None:
     )
 
 
-def _add_modisco_args(parser, launcher: str) -> None:
+def numba_env(args) -> dict[str, int]:
+    """Pin numba to the cores the job actually asked for.
+
+    numba sets `NUMBA_NUM_THREADS` from every core it can SEE, which on a shared
+    node is the whole machine rather than the slice SLURM granted. A job holding
+    32 CPUs on a 128-core node then spawns 128 threads, oversubscribes its own
+    cgroup and can run slower than if it had asked for less -- while degrading
+    whatever else is on the node. tfmodisco-lite is numba-heavy throughout, so
+    this matters here more than anywhere else in the repo.
+    """
+    return {"NUMBA_NUM_THREADS": args.cpus_per_task}
+
+
+def _add_modisco_args(
+    parser, launcher: str, *, default_cpus: int = 32,
+    default_time: str = "48:00:00",
+) -> None:
     """Shared by the motifs and report launchers."""
-    _add_common_args(parser, launcher)
+    _add_common_args(parser, launcher, default_cpus=default_cpus,
+                     default_mem="64G", default_time=default_time)
     parser.add_argument(
         "-e",
         "--experiments",
@@ -770,6 +816,7 @@ def run_modisco(family: str) -> None:
                 f"{family}_modisco_{exp_id}_{attribute_type}",
                 cmd,
                 gpus=0,
+                env=numba_env(args),
             )
 
     print(
@@ -873,6 +920,7 @@ def run_modisco_report(family: str) -> None:
                 f"{family}_modisco_report_{exp_id}_{attribute_type}",
                 cmd,
                 gpus=0,
+                env=numba_env(args),
             )
 
     print(
