@@ -54,19 +54,47 @@ METRIC_INFO = {
 }
 
 
-def load_family(family: str, per_fold: bool) -> pd.DataFrame:
-    """One row per experiment (or per experiment x fold) for one model family."""
+def load_family(family: str, aggregate: str) -> pd.DataFrame:
+    """Metrics for one model family, aggregated as requested.
+
+    The three aggregations are NOT interchangeable, and the difference matters
+    most for `fold-mean` versus `genome-wide`:
+
+    * **fold-mean** (default) -- the mean of the per-fold values, so every fold
+      counts equally regardless of how many loci it held out. Also carries a
+      `{metric}_sd` and `n_folds` so the spread is visible.
+    * **genome-wide** -- the benchmark's pooled block, computed as one
+      correlation over every fold's predictions concatenated. Each LOCUS counts
+      equally, so a large fold pulls it harder. This is not the mean of the
+      per-fold correlations and generally differs from it.
+    * **per-fold** -- one row per fold, for looking at spread directly.
+    """
     rows = []
     for path in sorted((METRICS_DIR / family).glob("*.json")):
         with open(path) as f:
             payload = json.load(f)
         exp_id = payload.get("run_name", path.stem)
-        if per_fold:
-            for fold, metrics in payload.get("per_fold", {}).items():
+        per_fold = payload.get("per_fold", {})
+
+        if aggregate == "per-fold":
+            for fold, metrics in per_fold.items():
                 rows.append({"experiment": exp_id, "fold": int(fold), **metrics})
-        else:
+        elif aggregate == "genome-wide":
             rows.append({"experiment": exp_id, "fold": -1,
                          **payload.get("genome_wide", {})})
+        else:
+            if not per_fold:
+                print(f"  {path.name}: no per_fold block, skipping",
+                      file=sys.stderr)
+                continue
+            folds = pd.DataFrame(per_fold.values())
+            row = {"experiment": exp_id, "fold": -1, "n_folds": len(folds)}
+            row.update(folds.mean().to_dict())
+            # ddof=1: the folds are a sample of the fold assignment, and with 5
+            # of them the difference from ddof=0 is not negligible.
+            row.update({f"{c}_sd": v for c, v in
+                        folds.std(ddof=1).to_dict().items()})
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -117,6 +145,14 @@ def plot_metric(df, metric, info, out_path, colour_by):
             ax.scatter(grp[f"{metric}_bpnet"], grp[f"{metric}_cherimoya"],
                        s=26, label=sp, edgecolor="none")
         ax.legend(fontsize=6, frameon=False, ncol=2)
+    # Under fold-mean the point is a mean over folds, so show what it is a mean
+    # OF: a bare point invites reading a 0.01 gap as real when the folds span
+    # 0.05. Drawn in grey underneath so it never competes with the species
+    # colours.
+    sd_a, sd_b = f"{metric}_sd_bpnet", f"{metric}_sd_cherimoya"
+    if sd_a in df and sd_b in df:
+        ax.errorbar(a, b, xerr=df[sd_a], yerr=df[sd_b], fmt="none",
+                    ecolor="0.7", elinewidth=0.8, capsize=0, zorder=-1)
     lo = float(min(a.min(), b.min()))
     hi = float(max(a.max(), b.max()))
     pad = 0.04 * (hi - lo or 1.0)
@@ -163,11 +199,17 @@ def main():
         help="metrics to plot (default: all four shared by both families)",
     )
     parser.add_argument(
-        "--per-fold", action="store_true",
-        help="compare per-fold values instead of the genome-wide block. More "
-             "points, but they are not independent -- folds of one experiment "
-             "share an architecture, a library and a peak set -- so the "
-             "Wilcoxon test is only interpretable per experiment",
+        "--aggregate", choices=("fold-mean", "genome-wide", "per-fold"),
+        default="fold-mean",
+        help="how to reduce each experiment's folds (default: %(default)s). "
+             "'fold-mean' averages the per-fold metrics, weighting every fold "
+             "equally, and draws +/-1 sd error bars. 'genome-wide' uses the "
+             "benchmark's pooled block, one correlation over all folds' "
+             "predictions concatenated, which weights every LOCUS equally and "
+             "is NOT the mean of the per-fold values. 'per-fold' plots each "
+             "fold separately -- useful for spread, but its Wilcoxon p is not "
+             "interpretable, since folds of one experiment share an "
+             "architecture, a library and a peak set",
     )
     parser.add_argument("--colour-by", choices=("species", "depth"),
                         default="species")
@@ -176,8 +218,8 @@ def main():
                         help="collated table (default: <out-dir>/collated.tsv)")
     args = parser.parse_args()
 
-    bpnet = load_family("bpnet", args.per_fold)
-    cherimoya = load_family("cherimoya", args.per_fold)
+    bpnet = load_family("bpnet", args.aggregate)
+    cherimoya = load_family("cherimoya", args.aggregate)
     for name, df in (("bpnet", bpnet), ("cherimoya", cherimoya)):
         if df.empty:
             print(f"Error: no metrics found in {METRICS_DIR / name}. Run that "
@@ -205,6 +247,7 @@ def main():
         m for m in METRIC_INFO
         if f"{m}_bpnet" in merged and f"{m}_cherimoya" in merged
     ]
+    print(f"  aggregation: {args.aggregate}")
     summary = []
     for metric in metrics:
         if f"{metric}_bpnet" not in merged:

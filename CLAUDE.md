@@ -424,10 +424,27 @@ Two deliberate departures from upstream:
 - **No consolidate step.** Upstream inner-joins two pre-consolidated TSVs; reading the per-experiment
   JSONs directly removes a stage that could go stale against them.
 
-**`--per-fold` compares folds instead of the genome-wide block, and its Wilcoxon p is not
-interpretable.** Folds of one experiment share an architecture, a library and a peak set, so 5 folds ×
-42 experiments is not 210 independent pairs — the test will report a p-value and it will be
-anticonservative. Use it to see spread, not significance.
+**`--aggregate` picks how folds are reduced, and the three options give genuinely different numbers.**
+The default is `fold-mean`, not the benchmark's `genome_wide` block:
+
+| | what it is | weights equally |
+| --- | --- | --- |
+| `fold-mean` *(default)* | mean of the per-fold metrics | every **fold** |
+| `genome-wide` | the benchmark's pooled block — one correlation over all folds' predictions concatenated | every **locus** |
+| `per-fold` | one row per fold | — |
+
+**`genome-wide` is NOT the mean of the per-fold correlations** and generally differs from it, which is
+why this is a choice rather than an implementation detail. Pooling lets a large fold pull the number
+harder; for C. elegans, where one fold is one chromosome, the fold sizes differ enough for that to
+matter.
+
+`fold-mean` also carries `{metric}_sd` and `n_folds` into the collated TSV and draws ±1 sd error bars on
+the scatter. That is worth having: a bare point invites reading a 0.01 gap between families as real when
+the folds behind it span 0.05.
+
+`per-fold`'s Wilcoxon p is **not interpretable** — folds of one experiment share an architecture, a
+library and a peak set, so 5 × 42 is not 210 independent pairs and the test is anticonservative. Use it
+to see spread, not significance.
 
 Cherimoya is not deployment-ready, so treat anything this produces as a development comparison rather
 than a result.
