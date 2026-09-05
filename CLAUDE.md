@@ -777,11 +777,28 @@ Already synced:
   divergence from upstream's mode-less name: the two references give different numbers, and without it
   a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
 
-Also not copied from their attribution tree: `--head orientation` (attributes the profile orientation
-index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible ReLU form of
-the binary maximum) and `src/bpnet/attribute/launch.py`. Both are real capability gaps rather than
-rejected ideas — the orientation head is the same metric as the `orientation_index_pearson` our
-benchmarks do not report.
+Also not copied from their attribution tree: `--head orientation`, which attributes the profile
+orientation index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible
+ReLU form of the binary maximum. Same metric as the `orientation_index_pearson` our benchmarks do not
+report, so those two are one piece of work. (`attribute/launch.py` was the other gap here and is now
+closed.)
+
+**Cherimoya attribution is BLOCKED, not merely absent — do not start it.** There is no
+`src/cherimoya/attribute/` and it should stay that way for now: it needs DeepLIFT **rescale rules that
+are still in development and are not in tangermeme yet**. This is not a wrapper-writing exercise, and
+the missing piece is upstream of this repo entirely.
+
+What the code shows, for whoever picks it up when the rules land. The ordinary nonlinearities are
+already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax`, and those are the only
+activations `cherimoya/cheri.py` and `cherimoya.py` use — so the gap is at the WRAPPER level, exactly
+where bpnet-lite needs `{_ProfileLogitScaling: _nonlinear}`. `cherimoya/wrappers.py` defines
+`ControlWrapper`, `_ProfileLogitScaling`, `ProfileWrapper`, `LogCountWrapper` and
+**`ExpectedCountsWrapper`**. The first four mirror bpnet-lite's, but note cherimoya's
+`_ProfileLogitScaling` is its OWN class, so a rule keyed on bpnetlite's would not match it.
+`ExpectedCountsWrapper` is the one with no counterpart: it composes `torch.expm1` with a per-group
+`softmax` over `cat`/`split` tensors, and `expm1` is absent from tangermeme's rule table. Treat that as
+the visible candidate rather than the confirmed blocker — the authority here is that the rules are in
+development, not this inspection.
 
 Deliberately not copied: `--background NAME:RATIO` multi-source negatives (its `ccre` source is
 GRCh38-only), `--min-reads` (needs their `config/n_reads.txt`), and their hitcall/modisco/predict/
