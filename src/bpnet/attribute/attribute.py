@@ -15,6 +15,9 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
+#: This script is BPNet-only; cherimoya attribution is blocked on
+#: DeepLIFT rescale rules for its LayerNorm (see CLAUDE.md).
+FAMILY = "bpnet"
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
@@ -212,11 +215,12 @@ def main():
         # would record which set produced the file.
         stem = loci_path.name.split(".")[0]
         params["output_fname"] = str(
-            ATTR_DIR / f"{exp.id}_{stem}_attr_{args.attribute_type}"
-                        f"_{args.reference_mode}.npz")
+            ATTR_DIR / FAMILY / f"{exp.id}_{stem}_attr_{args.attribute_type}"
+                                f"_{args.reference_mode}.npz")
     else:
         params["output_fname"] = str(
-            attribution_path(exp.id, args.attribute_type, args.reference_mode))
+            attribution_path(FAMILY, exp.id, args.attribute_type,
+                             args.reference_mode))
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling

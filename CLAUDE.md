@@ -310,6 +310,28 @@ training plus the one that did not: it is an **ensemble attribution, not a held-
 reading it as evidence of generalisation would be wrong. `benchmark_predictions.py` is the per-fold
 held-out path and is where generalisation numbers come from.
 
+## attributions/ is split by family; the filtered BED and OHE are not
+
+    attributions/{experiment}_filtered.bed          shared
+    attributions/{experiment}_ohe.npz               shared
+    attributions/{family}/{experiment}_attr_{type}_{mode}.npz
+
+**The split follows what produces each file.** Attributions come out of a MODEL, so bpnet's and
+cherimoya's are different files and belong under `attributions/{family}/` beside the `models/{family}/`
+and `performance_metrics/{family}/` convention. The filtered BED and its one-hot encoding depend only on
+(loci, sequences, in_window), so every family attributing the same experiment shares them — putting them
+under a family directory would imply they need producing twice, and would mean `launch_filter.py` had to
+know which family it was filtering for, which it does not.
+
+`attribution_path()` therefore takes `family` first, matching `model_path()`; `filtered_loci_path()` and
+`ohe_path()` do not take one at all. `attribute.py` is BPNet-only and pins `FAMILY = "bpnet"` at module
+level rather than accepting a flag, because cherimoya attribution is blocked on rescale rules, not on
+plumbing.
+
+`modisco/` is deliberately NOT family-split, for the same reason: its only producer is BPNet
+attributions, and a `modisco/bpnet/` with no sibling would be structure without content. Revisit if
+cherimoya attribution ever unblocks.
+
 ## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
 
 An earlier version of this section called it optional and said a blank column is usually tolerable.
@@ -361,7 +383,7 @@ the loci that were attributed, and the filter is what decides which those are.
 mean over folds of those. Observed/actual contributions are `hypothetical * one_hot`, derivable from the
 two files, so the pair is complete for modisco and nothing else needs saving.
 
-**Passing `--loci` changes the default output name** (`attributions/{exp}_{stem}_attr_{type}_{mode}.npz`), for
+**Passing `--loci` changes the default output name** (`attributions/bpnet/{exp}_{stem}_attr_{type}_{mode}.npz`), for
 the same reason the reference mode is in there: different loci give different numbers, and nothing else
 on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
 check follows.
@@ -928,7 +950,7 @@ Already synced:
   further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
   at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
   soft, and `n=0` rejected.
-  **The default output path now carries the mode** (`attributions/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  **The default output path now carries the mode** (`attributions/bpnet/{exp}_attr_{type}_{mode}.npz`), a deliberate
   divergence from upstream's mode-less name: the two references give different numbers, and without it
   a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
 

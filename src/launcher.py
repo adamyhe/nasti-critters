@@ -476,7 +476,8 @@ def run_attribute(family: str, script: Path) -> None:
             continue
 
         for attribute_type in types:
-            out = attribution_path(exp_id, attribute_type, args.reference_mode)
+            out = attribution_path(family, exp_id, attribute_type,
+                                   args.reference_mode)
             if out.exists():
                 skipped_done += 1
                 continue
@@ -738,7 +739,8 @@ def run_modisco(family: str) -> None:
         ohe = ohe_path(exp_id)
         for attribute_type in types:
             total += 1
-            attr = attribution_path(exp_id, attribute_type, args.reference_mode)
+            attr = attribution_path(family, exp_id, attribute_type,
+                                    args.reference_mode)
             out = modisco_h5_path(exp_id, attribute_type, args.reference_mode)
             if out.exists():
                 skipped_done += 1

@@ -100,17 +100,27 @@ def model_name(family: str, experiment: str, fold: int, suffix: str = "") -> str
 
 def filtered_loci_path(experiment: str) -> Path:
     """BED of loci whose whole window is ACGT, from filter_nonACGT_regions.py."""
+    # NOT under a family subdirectory: the filter depends only on loci and
+    # sequence, so every family attributing this experiment shares it.
     return ATTR_DIR / f"{experiment}_filtered.bed"
 
 
 def ohe_path(experiment: str) -> Path:
     """One-hot encoding of `filtered_loci_path`, written by the same step."""
+    # Family-agnostic, like filtered_loci_path -- see attribution_path().
     return ATTR_DIR / f"{experiment}_ohe.npz"
 
 
-def attribution_path(experiment: str, attribute_type: str,
+def attribution_path(family: str, experiment: str, attribute_type: str,
                      reference_mode: str) -> Path:
-    """Default output for an attribution run.
+    """Default output for an attribution run, under `attributions/{family}/`.
+
+    **Family-keyed where `filtered_loci_path` and `ohe_path` are not**, and the
+    split is the point: attributions are produced BY a model, so bpnet's and
+    cherimoya's are different files, while the filtered BED and its one-hot
+    encoding depend only on (loci, sequences, in_window) and are shared by any
+    family that attributes the same experiment. Putting them in one directory
+    would imply they need producing twice.
 
     The reference mode is in the NAME because it changes the numbers: a
     frequency-mode run would otherwise silently overwrite a dinucleotide-mode
@@ -119,7 +129,7 @@ def attribution_path(experiment: str, attribute_type: str,
     know whether a job is already done -- two copies of this format string is
     exactly how a launcher starts re-running finished work.
     """
-    return (ATTR_DIR /
+    return (ATTR_DIR / family /
             f"{experiment}_attr_{attribute_type}_{reference_mode}.npz")
 
 
