@@ -102,11 +102,22 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   `bedGraphToBigWig`, `pints_caller` and `umi_tools`. **`bigWigToBedGraph` and `bigWigMerge` are gone**,
   and so is the `bpnet` CLI from this list — see the next bullet. The pipeline pulls FASTQs straight from ENA over HTTPS, so SRA Toolkit is not
   needed; homerTools, `fasterq-dump` and `proseq2.0` are no longer used anywhere.
-- **No site-specific values are hard-coded any more.** Launchers and `launch.py` take `--partition`/`-C`
-  at submit time and emit no such directive by default; container use is opt-in via `APPTAINER_IMAGE` /
-  `APPTAINER_BIND`; job environment setup defaults to activating this repo's mamba env + uv venv, with
-  `launch.py --setup-file` for site-specific module loads. Do not reintroduce cluster paths or partition
-  names into tracked files.
+- **Site-specific values: PARTITIONS AND THE GPU CONSTRAINT ARE NOW DEFAULTED; everything else is not.**
+  This reverses part of an earlier rule, deliberately and on request (2026-09-05) — typing
+  `--partition`/`-C` on every submission is its own error source. `src/launcher.py` holds
+  `GPU_PARTITION = "akundaje,owners"`, `CPU_PARTITION = "normal,akundaje,owners"` and `GPU_CONSTRAINT`,
+  the `|`-joined GPU SKU list copied from procap-atlas's cherimoya launchers (`|` is SLURM's OR, so any
+  one card satisfies it). Both stay overridable, so another site needs a flag rather than a patch.
+  **Which set a launcher gets is derived from ONE argument**, `_add_common_args(..., gpu=)`, so the
+  partition and the constraint cannot drift apart from each other or from `_emit`'s `gpus`. `-C` is
+  additionally gated on `gpus` at emission, so a global `--constraint` cannot leak onto a CPU job and
+  narrow it to GPU nodes for nothing.
+  **The `owners` partition caps jobs at 48:00:00** and is in every default here, so a longer `--time`
+  will simply not schedule there; `modisco motifs` sits exactly on that cap.
+  Everything else is unchanged: container use is opt-in via `APPTAINER_IMAGE` / `APPTAINER_BIND`; job
+  environment setup defaults to activating this repo's mamba env + uv venv, with `launch.py
+  --setup-file` for site-specific module loads. **Do not reintroduce cluster PATHS into tracked files**,
+  and note the `.sh` launchers still emit no partition or constraint of their own.
 - **Do not add an Apptainer definition to this repo.** Container images are maintained externally and
   authoritatively at [adamyhe/sherlock](https://github.com/adamyhe/sherlock) (`cherimoya/cherimoya.def`, base
   `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime`). A project-local `src/cherimoya/apptainer/` existed and
