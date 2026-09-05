@@ -204,7 +204,7 @@ python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type c
 # and extract_loci(ignore=...) blanks rather than drops those. Also writes the
 # one-hot array TF-MoDISco needs alongside the attributions.
 python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
-python src/bpnet/attribute/launch.py --use-filtered --dry-run
+python src/bpnet/attribute/launch.py --dry-run    # requires the filtered set
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -301,8 +301,16 @@ It also has to handle **bgzipped** input, since that is what `combine_peaks` wri
 
 `attribute.py` now catches this before the library does, because the library's message names neither the
 loci nor the remedy: it counts the offending rows, prints the first few, and prints the two commands
-that fix it. `launch.py --use-filtered` points attribution at the filtered BED and **errors if it is
-absent** rather than silently falling back to the peaks.
+that fix it.
+
+**The filtered set is the DEFAULT locus set, not an opt-in.** It was briefly a `--use-filtered` flag on
+the launcher, which had the default backwards: if `deep_lift_shap` cannot accept an N and
+`extract_loci(ignore=...)` always produces one, then attributing raw peaks is the broken path and must
+not be what happens when you pass nothing. So `attribute.py --loci` now defaults to
+`filtered_loci_path(exp.id)` and exits 1 with the `launch_filter.py` command if it is absent, and the
+launcher skips an unfiltered experiment rather than emitting a job that would fail. `--loci` survives
+only for a genuinely different locus set, and only then does its stem enter the output filename — the
+default run keeps the plain `attribution_path()` name.
 
 **The `--save-ohe` array is not a convenience either — TF-MoDISco requires it.** modisco takes
 one-hot sequences alongside contribution scores, so the OHE is a second required input rather than a
@@ -334,7 +342,7 @@ shared. Do not add a fourth copy of that block.
 | `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
 
-Run order is filter -> attribute: `launch_filter.py`, then `launch.py --use-filtered`.
+Run order is filter -> attribute: `launch_filter.py`, then `launch.py`. The second **skips any experiment the first has not covered**, because attribution of unfiltered peaks cannot work.
 
 **Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
 on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one

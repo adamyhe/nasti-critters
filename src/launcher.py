@@ -362,14 +362,6 @@ def _finish_attribute_parser(parser, launcher: str, script: Path):
         help="passed through to %(default)s-mode attribution, and part of the "
              "output filename, so the already-done check follows it",
     )
-    parser.add_argument(
-        "--use-filtered", action="store_true",
-        help="attribute the non-ACGT-filtered BED from launch_filter.py instead "
-             "of the experiment's peaks. REQUIRED wherever any peak window "
-             "contains an N: deep_lift_shap refuses a sequence with an unknown "
-             "base, in both reference modes. Errors if the filtered BED is "
-             "absent rather than silently falling back to the peaks",
-    )
     parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument(
         "--attr-args", type=str, default="",
@@ -425,23 +417,19 @@ def run_attribute(family: str, script: Path) -> None:
             skipped_untrained += len(types)
             continue
 
-        loci = None
-        if args.use_filtered:
-            loci = filtered_loci_path(exp_id)
-            if not loci.exists():
-                print(f"SKIP {exp_id}: --use-filtered but {loci.name} is absent; "
-                      f"run launch_filter.py first", file=sys.stderr)
-                skipped_missing += len(types)
-                continue
+        # The non-ACGT filtered set is attribute.py's default and is MANDATORY,
+        # not an option: deep_lift_shap refuses a sequence containing an unknown
+        # base and extract_loci(ignore=...) creates one for any window holding
+        # an N. So an experiment that has not been filtered cannot be attributed
+        # at all, and this skips it rather than emitting a job that will exit 1.
+        if not filtered_loci_path(exp_id).exists():
+            print(f"SKIP {exp_id}: not filtered yet; run launch_filter.py "
+                  f"-e {exp_id} first", file=sys.stderr)
+            skipped_missing += len(types)
+            continue
 
         for attribute_type in types:
             out = attribution_path(exp_id, attribute_type, args.reference_mode)
-            if loci is not None:
-                # Mirror attribute.py's naming, which puts the loci stem in the
-                # filename so a filtered run cannot overwrite a peaks-based one.
-                out = out.with_name(
-                    f"{exp_id}_{loci.name.split('.')[0]}_attr_"
-                    f"{attribute_type}_{args.reference_mode}.npz")
             if out.exists():
                 skipped_done += 1
                 continue
@@ -453,8 +441,6 @@ def run_attribute(family: str, script: Path) -> None:
                 f"--attribute-type {attribute_type} "
                 f"--reference-mode {args.reference_mode}"
             )
-            if loci is not None:
-                cmd += f" --loci {shlex.quote(str(loci))}"
             if args.models_dir:
                 cmd += f" --models-dir {shlex.quote(args.models_dir)}"
             if args.attr_args:

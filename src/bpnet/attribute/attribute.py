@@ -93,13 +93,14 @@ def main():
     )
     parser.add_argument(
         "--loci", type=str, default=None, metavar="BED",
-        help="attribute over this BED instead of the experiment's peaks. This "
-             "is what consumes filter_nonACGT_regions.py's output -- without "
-             "it that script's filtered BED and its --save-ohe array have no "
-             "reader, since attributions would still come from exp.peaks. When "
-             "given, the loci filename's stem goes into the default output name "
-             "so a run over a different locus set cannot overwrite the "
-             "peaks-based one",
+        help="attribute over this BED. DEFAULT is the experiment's non-ACGT "
+             "filtered set from launch_filter.py, which is mandatory rather "
+             "than a convenience: deep_lift_shap refuses a sequence containing "
+             "an unknown base, and extract_loci(ignore=...) blanks such a "
+             "position rather than dropping the locus, so attributing the raw "
+             "peaks fails wherever any window holds an N. Override only for a "
+             "genuinely different locus set -- its filename stem then goes into "
+             "the output name so it cannot overwrite the default run",
     )
     parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument(
@@ -132,9 +133,25 @@ def main():
             print(f"Error: missing {m}", file=sys.stderr)
         sys.exit(1)
 
+    # The filtered set is the DEFAULT, not an opt-in: see --loci's help. Fail
+    # here with the command that produces it rather than letting extract_loci
+    # succeed and deep_lift_shap raise something that names neither.
+    default_loci = filtered_loci_path(exp.id)
+    loci_path = Path(args.loci).resolve() if args.loci else default_loci
+    if not loci_path.exists():
+        print(
+            f"Error: loci not found: {loci_path}\n"
+            + ("" if args.loci else
+               f"  The non-ACGT filtered set is required before attribution. "
+               f"Build it with:\n"
+               f"    python src/bpnet/attribute/launch_filter.py -e {exp.id}"),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     params = load_params("bpnet", {})
     params.update({
-        "loci": str(Path(args.loci).resolve() if args.loci else exp.peaks),
+        "loci": str(loci_path),
         "sequences": str(exp.sequences),
         "signals": [str(x) for x in exp.signals],
         "controls": [str(x) for x in exp.controls] if exp.controls else None,
@@ -160,11 +177,11 @@ def main():
     # Upstream's path omits it; this is a deliberate small divergence.
     if args.output_fname:
         params["output_fname"] = str(REPO_ROOT / args.output_fname)
-    elif args.loci:
+    elif loci_path != default_loci:
         # A custom locus set gets its own name for the same reason the reference
         # mode does: different loci, different numbers, and nothing else on disk
         # would record which set produced the file.
-        stem = Path(args.loci).name.split(".")[0]
+        stem = loci_path.name.split(".")[0]
         params["output_fname"] = str(
             ATTR_DIR / f"{exp.id}_{stem}_attr_{args.attribute_type}"
                         f"_{args.reference_mode}.npz")

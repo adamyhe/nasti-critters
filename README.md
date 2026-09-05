@@ -776,7 +776,9 @@ python src/bpnet/attribute/launch.py --dry-run
 python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
 ```
 
-A fourth covers the non-ACGT locus filter, which attribution **requires**:
+A fourth covers the non-ACGT locus filter, which attribution **requires** and
+therefore runs first — the attribution launcher skips any experiment it has not
+covered:
 `deep_lift_shap` rejects any window containing an unknown base, in both
 reference modes, and `extract_loci(ignore=...)` blanks such positions rather
 than dropping the locus. It also writes the one-hot array TF-MoDISco needs
