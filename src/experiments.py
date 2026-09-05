@@ -133,17 +133,24 @@ def attribution_path(family: str, experiment: str, attribute_type: str,
             f"{experiment}_attr_{attribute_type}_{reference_mode}.npz")
 
 
-def modisco_h5_path(experiment: str, attribute_type: str,
+def modisco_h5_path(family: str, experiment: str, attribute_type: str,
                     reference_mode: str) -> Path:
-    """`modisco motifs` output. Named after the attributions it was run on."""
-    return (MODISCO_DIR /
+    """`modisco motifs` output, under `modisco/{family}/`.
+
+    Family-keyed for the same reason `attribution_path` is: motifs are
+    discovered FROM a model's attributions, so two families running on the same
+    experiment produce different files. Named after the attributions it consumed
+    -- both the head and the reference mode -- so the .h5 says what it came from
+    without opening it.
+    """
+    return (MODISCO_DIR / family /
             f"{experiment}_{attribute_type}_{reference_mode}.modisco.h5")
 
 
-def modisco_report_dir(experiment: str, attribute_type: str,
+def modisco_report_dir(family: str, experiment: str, attribute_type: str,
                        reference_mode: str) -> Path:
     """`modisco report` output directory, beside the .h5 it summarises."""
-    return (MODISCO_DIR /
+    return (MODISCO_DIR / family /
             f"{experiment}_{attribute_type}_{reference_mode}.modisco")
 
 

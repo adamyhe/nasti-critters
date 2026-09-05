@@ -310,11 +310,13 @@ training plus the one that did not: it is an **ensemble attribution, not a held-
 reading it as evidence of generalisation would be wrong. `benchmark_predictions.py` is the per-fold
 held-out path and is where generalisation numbers come from.
 
-## attributions/ is split by family; the filtered BED and OHE are not
+## attributions/ and modisco/ are split by family; the filtered BED and OHE are not
 
     attributions/{experiment}_filtered.bed          shared
     attributions/{experiment}_ohe.npz               shared
     attributions/{family}/{experiment}_attr_{type}_{mode}.npz
+    modisco/{family}/{experiment}_{type}_{mode}.modisco.h5
+    modisco/{family}/{experiment}_{type}_{mode}.modisco/
 
 **The split follows what produces each file.** Attributions come out of a MODEL, so bpnet's and
 cherimoya's are different files and belong under `attributions/{family}/` beside the `models/{family}/`
@@ -328,9 +330,10 @@ know which family it was filtering for, which it does not.
 level rather than accepting a flag, because cherimoya attribution is blocked on rescale rules, not on
 plumbing.
 
-`modisco/` is deliberately NOT family-split, for the same reason: its only producer is BPNet
-attributions, and a `modisco/bpnet/` with no sibling would be structure without content. Revisit if
-cherimoya attribution ever unblocks.
+`modisco/` is split the same way — `modisco/{family}/{experiment}_{type}_{mode}.modisco.h5` and the
+matching `.modisco/` report directory — since motifs are discovered FROM a model's attributions and
+inherit their provenance. Only `bpnet/` exists today, because cherimoya attribution is blocked, but the
+level is there so the second family does not need a migration.
 
 ## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
 

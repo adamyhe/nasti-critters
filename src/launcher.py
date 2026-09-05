@@ -741,7 +741,8 @@ def run_modisco(family: str) -> None:
             total += 1
             attr = attribution_path(family, exp_id, attribute_type,
                                     args.reference_mode)
-            out = modisco_h5_path(exp_id, attribute_type, args.reference_mode)
+            out = modisco_h5_path(family, exp_id, attribute_type,
+                                  args.reference_mode)
             if out.exists():
                 skipped_done += 1
                 continue
@@ -843,8 +844,10 @@ def run_modisco_report(family: str) -> None:
 
         for attribute_type in types:
             total += 1
-            h5 = modisco_h5_path(exp_id, attribute_type, args.reference_mode)
-            out = modisco_report_dir(exp_id, attribute_type, args.reference_mode)
+            h5 = modisco_h5_path(family, exp_id, attribute_type,
+                                 args.reference_mode)
+            out = modisco_report_dir(family, exp_id, attribute_type,
+                                     args.reference_mode)
             if out.exists():
                 skipped_done += 1
                 continue
