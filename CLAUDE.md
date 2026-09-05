@@ -470,12 +470,17 @@ Note upstream's `benchmark_bpnet.py` also reports `orientation_index_pearson`, w
 here computes. Not an oversight to fix silently — adding it means defining the orientation index the
 same way upstream does.
 
-**Progress bars are ON by default in both, via `--no-progress` to suppress.** They are tangermeme's
+**Progress bars are ON by default in the benchmarks and in `attribute.py`, via `--no-progress` to
+suppress.** They are tangermeme's
 `verbose` argument to `extract_loci` and `predict`, which is *only* the tqdm bar, so it is wired to
 `--no-progress` rather than to `-v`: a long benchmark should show progress without turning on every
 other message. Bars go to stderr, so stdout stays clean for the printed metrics and can be piped.
-`benchmark_predictions.py` had **no `-v` flag at all**, so `params["verbose"]` was permanently `false`
-from `config/bpnet_params.json` and no bar could ever appear; it has one now.
+`benchmark_predictions.py` and `attribute.py` both had **no `-v` flag at all**, so `params["verbose"]`
+was permanently `false` from `config/bpnet_params.json` and no bar could ever appear; both have one now.
+
+`attribute.py` also gets an **outer bar over folds**, which is the one that matters there: each fold is a
+whole `deep_lift_shap` pass over every locus, so without it the only feedback for minutes at a time is
+tangermeme's inner bar restarting from zero with no indication of how many more times it will do so.
 
 **Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
 `data_loader` are imported *inside* `main()`, after argparse and path validation, so
