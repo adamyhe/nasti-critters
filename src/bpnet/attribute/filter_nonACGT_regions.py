@@ -7,8 +7,21 @@ depends only on (loci, sequences, in_window). Written from attribute.py it was
 recomputed and rewritten on every attribution run -- once per head, per
 reference mode, per experiment -- all producing the same array.
 
-**The rows line up with the output BED, and with attribute.py's X.** Three
-things make that true and all three have to hold:
+**This script is standalone — nothing invokes it.** Not attribute.py, not the
+launchers, not the Snakemake DAG. It is a preprocessing step you run by hand,
+and its output only reaches attribution if you point `attribute.py --loci` at
+the filtered BED. Without that flag attribute.py reads `exp.peaks` and this
+script's output has no reader at all.
+
+**It is not redundant with `extract_loci(ignore=...)`, which does something
+different.** `ignore` sets an all-zero column at a non-ACGT position and KEEPS
+the locus (verified: a window containing one N comes back as 1 row with exactly
+1 blank column). This script DROPS the locus. So use it where a blanked position
+would be a problem — variant-effect loci, say, where the original `snp_bed`
+naming came from — and skip it where zero columns are acceptable.
+
+**Given `--loci`, the rows line up with the output BED and with attribute.py's
+X.** Three things make that true and all three have to hold:
 
 * the OHE is built by the same `tangermeme.io.extract_loci` call attribute.py
   makes, not by a hand-rolled encoder, so the channel order and `ignore`

@@ -39,7 +39,10 @@ from experiments import (  # noqa: E402
     Experiment,
     attribution_path,
     experiment_ids,
+    filtered_loci_path,
+    load_params,
     model_path,
+    ohe_path,
 )
 
 
@@ -164,7 +167,8 @@ def _select_experiments(parser, args) -> list[str]:
     return experiments
 
 
-def _emit(args, log_dir: Path, setup: str, job_name: str, command: str) -> bool:
+def _emit(args, log_dir: Path, setup: str, job_name: str, command: str,
+          *, gpus: int = 1) -> bool:
     """Emit one job in whichever of the three modes is active.
 
     Returns True if a job was emitted. Shared by the fit and attribution
@@ -180,25 +184,27 @@ def _emit(args, log_dir: Path, setup: str, job_name: str, command: str) -> bool:
         "#SBATCH --ntasks=1",
         "#SBATCH --ntasks-per-node=1",
         "#SBATCH --nodes=1",
-        "#SBATCH --gpus=1",
         f"#SBATCH --cpus-per-task={args.cpus_per_task}",
         f"#SBATCH --mem={args.mem}",
         f"#SBATCH --time={args.time}",
         f"#SBATCH --output={log_dir}/{job_name}.out",
         f"#SBATCH --error={log_dir}/{job_name}.err",
     ]
+    # gpus=0 for CPU-only work. Requesting a GPU for it would queue behind the
+    # GPU partition and hold an idle card for the duration.
+    if gpus:
+        directives.insert(4, f"#SBATCH --gpus={gpus}")
     if getattr(args, "requeue", False):
         directives.append("#SBATCH --requeue")
     if args.constraint:
-        directives.insert(5, f"#SBATCH -C {args.constraint}")
+        directives.insert(4, f"#SBATCH -C {args.constraint}")
     if args.partition:
-        directives.insert(5, f"#SBATCH --partition={args.partition}")
+        directives.insert(4, f"#SBATCH --partition={args.partition}")
 
-    sbatch_script = "\n".join(
-        ["#!/bin/bash -l", *directives, "", setup, "",
-         "command -v nvidia-smi >/dev/null && nvidia-smi -L || true",
-         command, ""]
-    )
+    body = ["#!/bin/bash -l", *directives, "", setup, ""]
+    if gpus:
+        body.append("command -v nvidia-smi >/dev/null && nvidia-smi -L || true")
+    sbatch_script = "\n".join([*body, command, ""])
 
     if args.dry_run:
         print(f"--- {job_name} ---")
@@ -435,6 +441,115 @@ def run_attribute(family: str, script: Path) -> None:
         f"\n{_action(args)} {submitted} {family} attribution jobs of {total} "
         f"(experiment x type); skipped {skipped_done} already done, "
         f"{skipped_missing} missing data, {skipped_untrained} not fully trained"
+        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
+
+def build_filter_parser(family: str, script: Path) -> argparse.ArgumentParser:
+    launcher = f"src/{family}/attribute/launch_filter.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate non-ACGT locus-filtering jobs, one per experiment.
+
+            Runs {script.name} over each experiment's peaks, writing a filtered
+            BED and its one-hot encoding. This step is OPTIONAL and nothing
+            downstream requires it: attribute.py reads the experiment's peaks
+            unless pointed at the filtered BED with --loci. It matters where a
+            blanked position is unacceptable -- `extract_loci(ignore=...)` keeps
+            a locus containing an N and zeroes that column, where this drops the
+            locus outright.
+
+            CPU-only, so these jobs request NO GPU. That is the reason this is a
+            separate launcher rather than another --attribute-type: sending
+            filtering to the GPU partition would queue it behind training and
+            hold an idle card while it reads a FASTA.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_common_args(parser, launcher)
+    parser.add_argument(
+        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        help="limit to these experiment IDs (default: every one in the config)",
+    )
+    parser.add_argument(
+        "--in-window", type=int, default=None,
+        help="window checked for non-ACGT bases (default: in_window from "
+             "config/bpnet_params.json, 2114). Must match what attribute.py "
+             "will use, or the filter tests a different span than the model sees",
+    )
+    parser.add_argument(
+        "--no-ohe", dest="save_ohe", action="store_false",
+        help="write only the filtered BED, skipping the one-hot encoding",
+    )
+    parser.add_argument(
+        "--filter-args", type=str, default="",
+        help=f"extra arguments forwarded to {script.name}",
+    )
+    return parser
+
+
+def run_filter(family: str, script: Path) -> None:
+    """Enumerate and emit one locus-filtering job per experiment."""
+    parser = build_filter_parser(family, script)
+    args = parser.parse_args()
+    in_window = args.in_window or load_params("bpnet")["in_window"]
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / f"{family}_filter"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = skipped_experiments = 0
+    total = 0
+    for exp_id in experiments:
+        try:
+            exp = Experiment.load(exp_id)
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        total += 1
+
+        # Only peaks and sequences are read, so gate on those rather than on
+        # exp.missing, which also demands negatives and trained-model inputs
+        # this step has nothing to do with.
+        absent = exp.missing_paths(kinds=("peaks", "sequences"))
+        if absent:
+            print(f"SKIP {exp_id}: missing data — {', '.join(absent)}",
+                  file=sys.stderr)
+            skipped_missing += 1
+            continue
+
+        out_bed = filtered_loci_path(exp_id)
+        out_ohe = ohe_path(exp_id)
+        if out_bed.exists() and (not args.save_ohe or out_ohe.exists()):
+            skipped_done += 1
+            continue
+
+        cmd = (
+            f"python {shlex.quote(str(script))} "
+            f"-b {shlex.quote(str(exp.peaks))} "
+            f"-f {shlex.quote(str(exp.sequences))} "
+            f"-o {shlex.quote(str(out_bed))} "
+            f"-w {in_window} -v"
+        )
+        if args.save_ohe:
+            cmd += f" --save-ohe {shlex.quote(str(out_ohe))}"
+        if args.filter_args:
+            cmd += f" {args.filter_args}"
+
+        submitted += _emit(args, log_dir, setup, f"{family}_filter_{exp_id}",
+                           cmd, gpus=0)
+
+    print(
+        f"\n{_action(args)} {submitted} {family} filter jobs of {total} "
+        f"(one per experiment); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing data"
         + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
         file=sys.stderr if args.print_commands else sys.stdout,
     )

@@ -96,6 +96,16 @@ def model_name(family: str, experiment: str, fold: int, suffix: str = "") -> str
     return str(model_dir(family, experiment, suffix) / f"{experiment}.fold{fold}")
 
 
+def filtered_loci_path(experiment: str) -> Path:
+    """BED of loci whose whole window is ACGT, from filter_nonACGT_regions.py."""
+    return ATTR_DIR / f"{experiment}_filtered.bed"
+
+
+def ohe_path(experiment: str) -> Path:
+    """One-hot encoding of `filtered_loci_path`, written by the same step."""
+    return ATTR_DIR / f"{experiment}_ohe.npz"
+
+
 def attribution_path(experiment: str, attribute_type: str,
                      reference_mode: str) -> Path:
     """Default output for an attribution run.

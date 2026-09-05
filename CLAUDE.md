@@ -197,9 +197,11 @@ python src/bpnet/attribute/attribute.py -e D.melanogaster-S2_PROcap --attribute-
 python src/bpnet/attribute/launch.py --dry-run
 python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
 
-# One-hot encoding of the attribution loci -- written ONCE, by the filter step
-python src/bpnet/attribute/filter_nonACGT_regions.py \
-    -b <peaks.bed> -f <genome.fa> -o <filtered.bed> --save-ohe attr/<exp>_ohe.npz
+# Optional, and STANDALONE -- nothing calls it. Drops loci whose window holds a
+# non-ACGT base, and writes the one-hot for what survives. Reaches attribution
+# only via --loci; without that, attribute.py reads exp.peaks and ignores both.
+python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
+python src/bpnet/attribute/attribute.py -e <exp> --loci attr/<exp>_filtered.bed
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -266,6 +268,25 @@ Deleting the reconstruction removed that too.
 `cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
 affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
 
+## `filter_nonACGT_regions.py` is standalone, and optional
+
+Nothing invokes it — not `attribute.py`, not any launcher, not the DAG. It is a manual preprocessing
+step, and **its output only reaches attribution through `attribute.py --loci`**, which exists for
+exactly that. Without the flag `attribute.py` reads `exp.peaks`, and the filtered BED plus its
+`--save-ohe` array have no reader.
+
+**It is not redundant with `extract_loci(ignore=...)`.** Verified against tangermeme 1.4.1: `ignore`
+sets an **all-zero column** at a non-ACGT position and KEEPS the locus — a window containing one N comes
+back as 1 row with exactly 1 blank column — where this script DROPS the locus. So the two are
+complementary, and which you want depends on whether a blank column is tolerable. For ordinary PRO-cap
+peak sets it usually is, which is why the default attribution path does not use this script. The
+`snp_bed` variable name is the tell for what it was written for: variant-effect loci, where a blanked
+position is not acceptable.
+
+**Passing `--loci` changes the default output name** (`attr/{exp}_{stem}_attr_{type}_{mode}.npz`), for
+the same reason the reference mode is in there: different loci give different numbers, and nothing else
+on disk would record which set produced the file.
+
 ## Launchers: three of them, one emission path
 
 `src/launcher.py` holds the selection rule and the emission machinery; the three
@@ -274,17 +295,25 @@ affect. That is the only other model-load site in the repo; audited 2026-09-04, 
 scripts) and the default (submit) — and the same SLURM flags, because `_add_common_args` and `_emit` are
 shared. Do not add a fourth copy of that block.
 
-| launcher | job unit | jobs | skips |
-| --- | --- | --- | --- |
-| `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | `.final.torch` exists, missing inputs, no fold assignment |
-| `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | same |
-| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | output npz exists, missing inputs, **folds not all trained** |
+| launcher | job unit | jobs | GPU | skips |
+| --- | --- | --- | --- | --- |
+| `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | yes | `.final.torch` exists, missing inputs, no fold assignment |
+| `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
+| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
+| `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
 
 **Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
 on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one
 job covers all folds of one experiment. It follows that a partly trained experiment is not partly
 attributable — `attribute.py` exits 1 — so the launcher skips it and reports `3/5 folds trained` rather
 than just refusing.
+
+**`launch_filter.py` requests NO GPU, which is why it is a fourth launcher rather than a flag on the
+third.** `filter_nonACGT_regions.py` reads a FASTA and one-hot encodes; sending that to the GPU
+partition would queue it behind training and then hold an idle card. `_emit(..., gpus=0)` omits the
+`#SBATCH --gpus` directive and the `nvidia-smi` line; every other launcher passes the default 1.
+It also gates on `missing_paths(kinds=("peaks", "sequences"))` rather than on `exp.missing`, which would
+additionally demand negatives and trained models that this step has nothing to do with.
 
 **The already-done check must predict the output path**, and the reference mode is part of that path, so
 `experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two

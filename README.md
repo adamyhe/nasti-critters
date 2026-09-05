@@ -776,7 +776,15 @@ python src/bpnet/attribute/launch.py --dry-run
 python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
 ```
 
-All three are thin wrappers over `src/launcher.py`. The selection logic — which
+A fourth covers the optional non-ACGT locus filter. It requests **no GPU** —
+that step reads a FASTA and one-hot encodes, so a GPU reservation would queue it
+behind training and hold an idle card:
+
+```bash
+python src/bpnet/attribute/launch_filter.py --dry-run
+```
+
+All four are thin wrappers over `src/launcher.py`. The selection logic — which
 (experiment, fold) pairs exist, which finished, which lack inputs — is
 family-agnostic because `src/experiments.py` is keyed by family, so there is one
 implementation rather than two that can drift. The only family difference is

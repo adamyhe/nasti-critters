@@ -19,6 +19,7 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
     Experiment,
+    attribution_path,
     IGNORE,
     load_model,
     load_params,
@@ -88,6 +89,16 @@ def main():
         choices=["counts", "profile"],
         default="profile",
     )
+    parser.add_argument(
+        "--loci", type=str, default=None, metavar="BED",
+        help="attribute over this BED instead of the experiment's peaks. This "
+             "is what consumes filter_nonACGT_regions.py's output -- without "
+             "it that script's filtered BED and its --save-ohe array have no "
+             "reader, since attributions would still come from exp.peaks. When "
+             "given, the loci filename's stem goes into the default output name "
+             "so a run over a different locus set cannot overwrite the "
+             "peaks-based one",
+    )
     parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument(
         "--reference-mode",
@@ -121,7 +132,7 @@ def main():
 
     params = load_params("bpnet", {})
     params.update({
-        "loci": str(exp.peaks),
+        "loci": str(Path(args.loci).resolve() if args.loci else exp.peaks),
         "sequences": str(exp.sequences),
         "signals": [str(x) for x in exp.signals],
         "controls": [str(x) for x in exp.controls] if exp.controls else None,
@@ -145,11 +156,19 @@ def main():
     # numbers: without it, a frequency-mode run silently overwrites a
     # dinucleotide-mode one and nothing on disk records which produced it.
     # Upstream's path omits it; this is a deliberate small divergence.
-    params["output_fname"] = str(
-        REPO_ROOT / (args.output_fname
-                     or f"attr/{exp.id}_attr_{args.attribute_type}"
+    if args.output_fname:
+        params["output_fname"] = str(REPO_ROOT / args.output_fname)
+    elif args.loci:
+        # A custom locus set gets its own name for the same reason the reference
+        # mode does: different loci, different numbers, and nothing else on disk
+        # would record which set produced the file.
+        stem = Path(args.loci).name.split(".")[0]
+        params["output_fname"] = str(
+            REPO_ROOT / f"attr/{exp.id}_{stem}_attr_{args.attribute_type}"
                         f"_{args.reference_mode}.npz")
-    )
+    else:
+        params["output_fname"] = str(
+            attribution_path(exp.id, args.attribute_type, args.reference_mode))
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
