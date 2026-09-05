@@ -107,7 +107,6 @@ def main():
              "that reference is deterministic and repeats would be identical",
     )
     parser.add_argument("--output-fname", type=str, default=None)
-    parser.add_argument("--save-ohe", type=str, default=None)
     args = parser.parse_args()
 
     try:
@@ -151,7 +150,6 @@ def main():
                      or f"attr/{exp.id}_attr_{args.attribute_type}"
                         f"_{args.reference_mode}.npz")
     )
-    params["save_ohe"] = str(REPO_ROOT / args.save_ohe) if args.save_ohe else None
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
@@ -178,10 +176,6 @@ def main():
         max_counts=None,
         ignore=IGNORE,
     ).to(torch.float32)
-
-    if params["save_ohe"] is not None:
-        Path(params["save_ohe"]).parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(params["save_ohe"], X.to(torch.uint8).numpy())
 
     attributions = []
     for model_path in params["model_fnames"]:
