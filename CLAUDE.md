@@ -205,6 +205,10 @@ python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type c
 # one-hot array TF-MoDISco needs alongside the attributions.
 python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
 python src/bpnet/attribute/launch.py --dry-run    # requires the filtered set
+
+# TF-MoDISco: motifs then report. Both CPU-only; motifs is long (allow days).
+python src/bpnet/modisco/launch.py --dry-run
+python src/bpnet/modisco/launch_report.py --dry-run
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -359,7 +363,7 @@ the same reason the reference mode is in there: different loci give different nu
 on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
 check follows.
 
-## Launchers: three of them, one emission path
+## Launchers: six of them, one emission path
 
 `src/launcher.py` holds the selection rule and the emission machinery; the three
 `launch.py` files are thin wrappers. All three take the same emission modes —
@@ -373,6 +377,8 @@ shared. Do not add a fourth copy of that block.
 | `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
 | `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
+| `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 42 x types | **no** | .h5 exists, attribution or OHE npz missing |
+| `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 42 x types | **no** | report dir exists, .h5 or MEME db missing |
 
 Run order is filter -> attribute: `launch_filter.py`, then `launch.py`. The second **skips any experiment the first has not covered**, because attribution of unfiltered peaks cannot work.
 
@@ -392,6 +398,49 @@ additionally demand negatives and trained models that this step has nothing to d
 **The already-done check must predict the output path**, and the reference mode is part of that path, so
 `experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two
 copies of that format string is exactly how a launcher starts re-running finished work.
+
+## TF-MoDISco
+
+`src/bpnet/modisco/` follows procap-atlas's scripting: `modisco motifs` then `modisco report`, one job
+per (experiment x attribute type), with their parameters — `-n 1000000` seqlets, `-l 50` leiden
+clusters, `-w 1000` window, and `--lite` on the report.
+
+    launch_filter.py -> attribute/launch.py -> modisco/launch.py -> modisco/launch_report.py
+
+**`modisco motifs` needs BOTH npz files**: the attribution and the one-hot. That is what
+`filter_nonACGT_regions.py --save-ohe` is for, and it is why the OHE lives with the filter rather than
+with attribution — it must describe exactly the loci that were attributed.
+
+**Both stages are CPU-only** (`gpus=0`), and `motifs` is *long* — upstream allows two days and 32 CPUs,
+so raise `--time` and `--cpus-per-task` rather than accepting the 6-hour fit default.
+
+**The MEME database is chosen PER SPECIES, and this is the one place the port could not follow upstream.**
+procap-atlas hardcodes JASPAR CORE **vertebrates**, which it can afford to because it is human-only;
+reporting a yeast or plant motif against a vertebrate database yields matches that mean nothing. So
+`config/genomes.yaml` carries `jaspar_collection` per species and `experiments.motif_db_path()` resolves
+it:
+
+| collection | species |
+| --- | --- |
+| vertebrates | M. musculus, C. griseus |
+| insects | D. melanogaster |
+| nematodes | C. elegans |
+| fungi | S. cerevisiae, S. pombe |
+| plants | A. thaliana, C. reinhardtii, P. patens, S. moellendorffii, G. arboreum, G. hirsutum |
+
+**Nothing fetches those files** — download them from JASPAR into `data/motifs/` as
+`JASPAR2026_CORE_{collection}_non-redundant_pfms_meme.txt`. They are deliberately not a pipeline step:
+the report is a convenience layer and the database has no effect on which motifs modisco discovers.
+`--motif-db` overrides with a single file for every experiment, which is rarely right here.
+
+`modisco-lite` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
+transitively, because these scripts invoke its `modisco` CLI — same reasoning as `pybigtools`. Note it
+ships the entry point as an old-style `data/scripts/modisco`, not a `console_script`.
+
+**Not ported: upstream's `hitcall/` tree** (Fi-NeMo hit calling, `compute_trim_floor.py`,
+`link_hits_to_compendium.py`) and `modisco/relaunch_timeout.py`. The first depends on `finemo`, which is
+Linux-only and a further scope step; the second exists to resubmit jobs that hit a wall clock, which is
+a site policy rather than a pipeline stage.
 
 ## Where benchmark output goes
 

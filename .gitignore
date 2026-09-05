@@ -192,6 +192,7 @@ logs/
 predictions/
 performance_metrics/
 attributions/
+modisco/
 data/annotation/
 
 # QC output, including the stats tables. These are RUN ARTIFACTS and are

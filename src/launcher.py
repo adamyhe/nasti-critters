@@ -41,6 +41,9 @@ from experiments import (  # noqa: E402
     experiment_ids,
     filtered_loci_path,
     load_params,
+    modisco_h5_path,
+    modisco_report_dir,
+    motif_db_path,
     model_path,
     ohe_path,
 )
@@ -561,6 +564,197 @@ def run_filter(family: str, script: Path) -> None:
         f"\n{_action(args)} {submitted} {family} filter jobs of {total} "
         f"(one per experiment); skipped {skipped_done} already done, "
         f"{skipped_missing} missing data"
+        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
+
+def _add_modisco_args(parser, launcher: str) -> None:
+    """Shared by the motifs and report launchers."""
+    _add_common_args(parser, launcher)
+    parser.add_argument(
+        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        help="limit to these experiment IDs (default: every one in the config)",
+    )
+    parser.add_argument(
+        "--attribute-type", dest="attribute_types", action="append",
+        choices=("profile", "counts"), default=None, metavar="TYPE",
+        help="repeatable; one job per type per experiment (default: profile)",
+    )
+    parser.add_argument(
+        "--reference-mode", choices=("frequency", "dinucleotide"),
+        default="frequency",
+        help="which attribution run to consume; part of the input and output "
+             "names, so the already-done check follows it",
+    )
+
+
+def run_modisco(family: str) -> None:
+    """`modisco motifs`, one job per (experiment, attribute type).
+
+    Consumes the attribution npz and the one-hot npz -- modisco needs both, and
+    the OHE is why filter_nonACGT_regions.py writes one. Parameters mirror
+    procap-atlas's: -n 1000000 seqlets, -l 50 leiden clusters, -w 1000 window.
+    """
+    launcher = f"src/{family}/modisco/launch.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate `modisco motifs` jobs for {family} attributions.
+
+            One job per (experiment x attribute type), consuming that run's
+            attribution npz plus the experiment's one-hot npz. Both come from
+            the attribution stage, so the order is
+            launch_filter.py -> attribute/launch.py -> here.
+
+            CPU-only: tfmodisco-lite does not use a GPU, so these jobs request
+            none. They are long, though -- upstream allows two days -- so raise
+            --time rather than assuming the fit default fits.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --attribute-type profile --attribute-type counts
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_modisco_args(parser, launcher)
+    parser.add_argument("-n", "--n-seqlets", type=int, default=1_000_000,
+                        help="max seqlets (default: %(default)s)")
+    parser.add_argument("-l", "--leiden", type=int, default=50,
+                        help="leiden clusters (default: %(default)s)")
+    parser.add_argument("-w", "--window", type=int, default=1000,
+                        help="seqlet window (default: %(default)s)")
+    parser.add_argument("--modisco-args", type=str, default="",
+                        help="extra arguments forwarded to `modisco motifs`")
+    args = parser.parse_args()
+    types = args.attribute_types or ["profile"]
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / f"{family}_modisco"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = 0
+    total = 0
+    for exp_id in experiments:
+        ohe = ohe_path(exp_id)
+        for attribute_type in types:
+            total += 1
+            attr = attribution_path(exp_id, attribute_type, args.reference_mode)
+            out = modisco_h5_path(exp_id, attribute_type, args.reference_mode)
+            if out.exists():
+                skipped_done += 1
+                continue
+            absent = [str(p) for p in (ohe, attr) if not p.exists()]
+            if absent:
+                print(f"SKIP {exp_id} {attribute_type}: missing "
+                      f"{', '.join(absent)}", file=sys.stderr)
+                skipped_missing += 1
+                continue
+
+            out.parent.mkdir(parents=True, exist_ok=True)
+            cmd = (
+                f"modisco motifs -s {shlex.quote(str(ohe))} "
+                f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(out))} "
+                f"-n {args.n_seqlets} -l {args.leiden} -w {args.window} -v"
+            )
+            if args.modisco_args:
+                cmd += f" {args.modisco_args}"
+            submitted += _emit(
+                args, log_dir, setup,
+                f"{family}_modisco_{exp_id}_{attribute_type}", cmd, gpus=0)
+
+    print(
+        f"\n{_action(args)} {submitted} {family} modisco jobs of {total} "
+        f"(experiment x type); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing inputs",
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
+
+def run_modisco_report(family: str) -> None:
+    """`modisco report`, one job per completed .h5.
+
+    Run after run_modisco. The MEME database is chosen PER SPECIES rather than
+    hardcoded -- see motif_db_path() for why a vertebrate database is wrong for
+    ten of these twelve species.
+    """
+    launcher = f"src/{family}/modisco/launch_report.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate `modisco report` jobs for completed {family} modisco runs.
+
+            Skips an experiment whose .h5 is missing (run launch.py first) or
+            whose report directory already exists. The MEME motif database is
+            resolved per species from config/genomes.yaml's jaspar_collection;
+            nothing fetches those files, so download them into data/motifs/.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_modisco_args(parser, launcher)
+    parser.add_argument(
+        "--motif-db", type=str, default=None, metavar="MEME",
+        help="override the per-species MEME database with one file for every "
+             "experiment. Rarely right in this repo -- see motif_db_path()",
+    )
+    parser.add_argument("--report-args", type=str, default="",
+                        help="extra arguments forwarded to `modisco report`")
+    args = parser.parse_args()
+    types = args.attribute_types or ["profile"]
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / f"{family}_modisco_report"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = skipped_experiments = 0
+    total = 0
+    for exp_id in experiments:
+        try:
+            species = Experiment.load(exp_id).species
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        try:
+            db = Path(args.motif_db) if args.motif_db else motif_db_path(species)
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+
+        for attribute_type in types:
+            total += 1
+            h5 = modisco_h5_path(exp_id, attribute_type, args.reference_mode)
+            out = modisco_report_dir(exp_id, attribute_type, args.reference_mode)
+            if out.exists():
+                skipped_done += 1
+                continue
+            absent = [str(p) for p in (h5, db) if not p.exists()]
+            if absent:
+                print(f"SKIP {exp_id} {attribute_type}: missing "
+                      f"{', '.join(absent)}", file=sys.stderr)
+                skipped_missing += 1
+                continue
+
+            cmd = (
+                f"modisco report -i {shlex.quote(str(h5))} "
+                f"-o {shlex.quote(str(out))} -m {shlex.quote(str(db))} --lite"
+            )
+            if args.report_args:
+                cmd += f" {args.report_args}"
+            submitted += _emit(
+                args, log_dir, setup,
+                f"{family}_modisco_report_{exp_id}_{attribute_type}", cmd, gpus=0)
+
+    print(
+        f"\n{_action(args)} {submitted} {family} modisco report jobs of {total} "
+        f"(experiment x type); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing inputs"
         + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
         file=sys.stderr if args.print_commands else sys.stdout,
     )

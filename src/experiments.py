@@ -51,6 +51,8 @@ CHROM_SPLITS_PATH = CONFIG / "chrom_splits.yaml"
 SPLITS_DIR = CONFIG / "splits"
 MODELS_DIR = REPO_ROOT / "models"
 ATTR_DIR = REPO_ROOT / "attributions"
+MODISCO_DIR = REPO_ROOT / "modisco"
+MOTIF_DB_DIR = REPO_ROOT / "data" / "motifs"
 
 # Bases that extract_loci should treat as unknown. Passed on every call in this
 # repo; kept here so the list cannot drift between scripts.
@@ -119,6 +121,49 @@ def attribution_path(experiment: str, attribute_type: str,
     """
     return (ATTR_DIR /
             f"{experiment}_attr_{attribute_type}_{reference_mode}.npz")
+
+
+def modisco_h5_path(experiment: str, attribute_type: str,
+                    reference_mode: str) -> Path:
+    """`modisco motifs` output. Named after the attributions it was run on."""
+    return (MODISCO_DIR /
+            f"{experiment}_{attribute_type}_{reference_mode}.modisco.h5")
+
+
+def modisco_report_dir(experiment: str, attribute_type: str,
+                       reference_mode: str) -> Path:
+    """`modisco report` output directory, beside the .h5 it summarises."""
+    return (MODISCO_DIR /
+            f"{experiment}_{attribute_type}_{reference_mode}.modisco")
+
+
+def motif_db_path(species: str) -> Path:
+    """MEME database for `modisco report`, chosen by the species' taxon.
+
+    procap-atlas hardcodes one path -- JASPAR CORE **vertebrates** -- because it
+    is human-only. This repo spans four taxa, and reporting a yeast or plant
+    motif against a vertebrate database produces matches that mean nothing. So
+    the collection is per species in `config/genomes.yaml`:
+
+        vertebrates  M. musculus, C. griseus
+        insects      D. melanogaster
+        nematodes    C. elegans
+        fungi        S. cerevisiae, S. pombe
+        plants       A. thaliana, C. reinhardtii, P. patens, S. moellendorffii,
+                     G. arboreum, G. hirsutum
+
+    The files are NOT fetched by anything -- download them from JASPAR into
+    `data/motifs/` yourself. They are a reporting convenience with no effect on
+    the motifs modisco discovers, which is why this is not a pipeline step.
+    """
+    genomes = _load(CONFIG / "genomes.yaml")["species"]
+    if species not in genomes:
+        raise KeyError(f"{species} not in config/genomes.yaml")
+    collection = genomes[species].get("jaspar_collection")
+    if not collection:
+        raise KeyError(f"no jaspar_collection for {species} in config/genomes.yaml")
+    return (MOTIF_DB_DIR /
+            f"JASPAR2026_CORE_{collection}_non-redundant_pfms_meme.txt")
 
 
 def load_model(path, *, map_location: str = "cpu"):
