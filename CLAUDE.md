@@ -200,8 +200,11 @@ python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type c
 # Optional, and STANDALONE -- nothing calls it. Drops loci whose window holds a
 # non-ACGT base, and writes the one-hot for what survives. Reaches attribution
 # only via --loci; without that, attribute.py reads exp.peaks and ignores both.
+# REQUIRED before attribution: deep_lift_shap rejects any window containing an N,
+# and extract_loci(ignore=...) blanks rather than drops those. Also writes the
+# one-hot array TF-MoDISco needs alongside the attributions.
 python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
-python src/bpnet/attribute/attribute.py -e <exp> --loci attr/<exp>_filtered.bed
+python src/bpnet/attribute/launch.py --use-filtered --dry-run
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -268,24 +271,42 @@ Deleting the reconstruction removed that too.
 `cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
 affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
 
-## `filter_nonACGT_regions.py` is standalone, and optional
+## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
 
-Nothing invokes it — not `attribute.py`, not any launcher, not the DAG. It is a manual preprocessing
-step, and **its output only reaches attribution through `attribute.py --loci`**, which exists for
-exactly that. Without the flag `attribute.py` reads `exp.peaks`, and the filtered BED plus its
-`--save-ohe` array have no reader.
+An earlier version of this section called it optional and said a blank column is usually tolerable.
+**Both were wrong.**
 
-**It is not redundant with `extract_loci(ignore=...)`.** Verified against tangermeme 1.4.1: `ignore`
-sets an **all-zero column** at a non-ACGT position and KEEPS the locus — a window containing one N comes
-back as 1 row with exactly 1 blank column — where this script DROPS the locus. So the two are
-complementary, and which you want depends on whether a blank column is tolerable. For ordinary PRO-cap
-peak sets it usually is, which is why the default attribution path does not use this script. The
-`snp_bed` variable name is the tell for what it was written for: variant-effect loci, where a blanked
-position is not acceptable.
+**`deep_lift_shap` refuses a sequence containing an unknown base.** Verified directly against tangermeme
+1.4.1 on a two-sequence fixture: a single all-zero column gives
+`ValueError: X must be one-hot encoded. and cannot have unknown characters.` — and it fails in **BOTH**
+reference modes, so the frequency default does not rescue it. The check is inside `deep_lift_shap`
+itself, not in the dinucleotide shuffle.
+
+**And `extract_loci(ignore=IGNORE)` is exactly what creates that column.** `ignore` KEEPS a locus
+containing an N and zeroes the column rather than dropping the locus (verified: one N gives 1 row with
+exactly 1 blank column). So the setting every `extract_loci` call in this repo passes is what makes
+attribution fail, and `filter_nonACGT_regions.py` — which DROPS such loci — is the remedy. That is the
+whole reason it exists; the `snp_bed` variable name is a leftover from where it was first used.
+
+`attribute.py` now catches this before the library does, because the library's message names neither the
+loci nor the remedy: it counts the offending rows, prints the first few, and prints the two commands
+that fix it. `launch.py --use-filtered` points attribution at the filtered BED and **errors if it is
+absent** rather than silently falling back to the peaks.
+
+**The `--save-ohe` array is not a convenience either — TF-MoDISco requires it.** modisco takes
+one-hot sequences alongside contribution scores, so the OHE is a second required input rather than a
+debugging aid. That is the strongest argument for it living in the filter step: it must describe exactly
+the loci that were attributed, and the filter is what decides which those are.
+
+**`attribute.py` saves HYPOTHETICAL attributions**, which is also what modisco wants
+(`hypothetical_contribs`): `hypothetical=True` is passed unconditionally, and the stored array is the
+mean over folds of those. Observed/actual contributions are `hypothetical * one_hot`, derivable from the
+two files, so the pair is complete for modisco and nothing else needs saving.
 
 **Passing `--loci` changes the default output name** (`attr/{exp}_{stem}_attr_{type}_{mode}.npz`), for
 the same reason the reference mode is in there: different loci give different numbers, and nothing else
-on disk would record which set produced the file.
+on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
+check follows.
 
 ## Launchers: three of them, one emission path
 
@@ -301,6 +322,8 @@ shared. Do not add a fourth copy of that block.
 | `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
 | `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
+
+Run order is filter -> attribute: `launch_filter.py`, then `launch.py --use-filtered`.
 
 **Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
 on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one

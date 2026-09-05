@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
     Experiment,
     attribution_path,
+    filtered_loci_path,
     IGNORE,
     load_model,
     load_params,
@@ -195,6 +196,31 @@ def main():
         max_counts=None,
         ignore=IGNORE,
     ).to(torch.float32)
+
+    # deep_lift_shap REFUSES a sequence with an unknown base -- `ValueError: X
+    # must be one-hot encoded. and cannot have unknown characters.` -- and
+    # `ignore=IGNORE` above is precisely what creates one: it keeps the locus and
+    # zeroes that column rather than dropping it (verified against tangermeme
+    # 1.4.1). Both reference modes fail; the frequency reference does not rescue
+    # it, since the check is in deep_lift_shap itself, not in the shuffle.
+    #
+    # Caught here because the library's message says nothing about which loci or
+    # what to do, and the remedy is a whole separate script.
+    blank = (X.sum(dim=1) == 0).any(dim=-1)
+    if blank.any():
+        n = int(blank.sum())
+        first = [int(i) for i in blank.nonzero()[:5, 0]]
+        print(
+            f"Error: {n:,} of {len(X):,} loci contain a non-ACGT base "
+            f"(rows {first}{'...' if n > 5 else ''}). deep_lift_shap cannot "
+            f"attribute these.\n"
+            f"  Filter them out first, then attribute the filtered set:\n"
+            f"    python src/bpnet/attribute/launch_filter.py -e {exp.id}\n"
+            f"    python src/bpnet/attribute/attribute.py -e {exp.id} "
+            f"--loci {filtered_loci_path(exp.id)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     attributions = []
     for model_path in params["model_fnames"]:

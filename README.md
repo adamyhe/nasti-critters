@@ -776,7 +776,11 @@ python src/bpnet/attribute/launch.py --dry-run
 python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
 ```
 
-A fourth covers the optional non-ACGT locus filter. It requests **no GPU** —
+A fourth covers the non-ACGT locus filter, which attribution **requires**:
+`deep_lift_shap` rejects any window containing an unknown base, in both
+reference modes, and `extract_loci(ignore=...)` blanks such positions rather
+than dropping the locus. It also writes the one-hot array TF-MoDISco needs
+alongside the attributions. It requests **no GPU** —
 that step reads a FASTA and one-hot encodes, so a GPU reservation would queue it
 behind training and hold an idle card:
 
