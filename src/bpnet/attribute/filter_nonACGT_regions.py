@@ -40,6 +40,7 @@ detects that automatically.
 """
 
 import argparse
+import gzip
 import sys
 from pathlib import Path
 
@@ -53,42 +54,65 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import IGNORE, load_params  # noqa: E402
 
 
+def _open_text(path):
+    """Open a BED that may or may not be bgzipped."""
+    return gzip.open(path, "rt") if str(path).endswith(".gz") else open(path)
+
+
 def filter_nonACGT_regions(bed_fp, fa_fp, in_window=2114, verbose=False):
-    # pyfaidx, and this exact coordinate arithmetic, to match
-    # procap-atlas/src/preprocess/_filter_nonACGT_regions.py. Two differences
-    # from the version this replaces: it used pyfastx (1-based, inclusive-end)
-    # where upstream and tangermeme both use pyfaidx, and it derived `end` from
-    # the centre rather than from the clamped `start`, so a region near a contig
-    # start produced a short window and was dropped instead of being shifted.
-    # dtype={0: str} is load-bearing: A.thaliana (1-5), C.reinhardtii (1-17)
-    # and P.patens (1-27) name chromosomes with bare digits, which pandas
-    # infers as int64. The str() below papers over it for the filtering
-    # itself, but the DataFrame is also handed to extract_loci by
-    # save_ohe(), where an int64 chromosome is the corpus-wide trap
-    # documented in CLAUDE.md.
-    snp_bed = pd.read_csv(bed_fp, sep="\t", header=None, dtype={0: str})
+    """Drop loci whose `in_window` window contains a non-ACGT base.
+
+    Returns `(kept_lines, coords)`: the surviving input lines VERBATIM, and a
+    BED3 DataFrame of their coordinates for save_ohe(). Both are in input order
+    and the same length.
+
+    **Read line by line rather than with pandas, because a PINTS peak file is
+    RAGGED.** `combine_peaks` concatenates the unidirectional and bidirectional
+    calls, which carry different numbers of columns, so
+    `pd.read_csv(bed_fp, sep="\t", header=None)` dies with
+    `Expected 6 fields in line 2, saw 9`. Adding `usecols=[0, 1, 2]` fixes the
+    read -- that is why load_bed() elsewhere in this repo is unaffected -- but
+    would be wrong here, because this function's output is written back out as a
+    BED and upstream deliberately keeps PINTS' strand/confidence/class/summit
+    columns rather than cutting to BED3; the summit column is what makes
+    `extract_loci(summits=True)` possible. Keeping the raw line preserves every
+    column whatever their number, and sidesteps pandas' ragged-file handling.
+
+    Coordinate arithmetic matches
+    procap-atlas/src/preprocess/_filter_nonACGT_regions.py: pyfaidx (0-based,
+    exclusive end, as tangermeme uses), and `end` derived from the CLAMPED start
+    so a region near a contig start is shifted rather than dropped for being
+    short.
+    """
+    with _open_text(bed_fp) as fh:
+        lines = [line.rstrip("\n") for line in fh
+                 if line.strip() and not line.startswith(("#", "track", "browser"))]
+
     fa = pyfaidx.Fasta(fa_fp)
     chroms = set(fa.keys())
-    wholesome = []
-    for row in tqdm.tqdm(
-        snp_bed.itertuples(), total=snp_bed.shape[0], disable=not verbose
-    ):
-        chrom = str(row[1])
-        center = (row[2] + row[3]) // 2
+    kept, coords = [], []
+    for line in tqdm.tqdm(lines, disable=not verbose):
+        fields = line.split("\t")
+        # str() on the chromosome for the same reason load_bed forces dtype:
+        # A.thaliana, C.reinhardtii and P.patens name chromosomes with digits.
+        chrom, lo, hi = str(fields[0]), int(fields[1]), int(fields[2])
+        center = (lo + hi) // 2
         start = max(0, center - in_window // 2)
         end = start + in_window
         if chrom in chroms:
             seq = str(fa[chrom][start:end]).upper()
-            is_wholesome = all([c in "ACGT" for c in seq]) and len(seq) == in_window
+            ok = len(seq) == in_window and all(c in "ACGT" for c in seq)
         else:
-            is_wholesome = False
-        wholesome.append(is_wholesome)
+            ok = False
+        if ok:
+            kept.append(line)
+            coords.append((chrom, lo, hi))
 
     print(
-        f"Filtered out {sum(~np.array(wholesome))} due to non-ACGT characters, "
-        f"length != {in_window}, or invalid chromosome."
+        f"Filtered out {len(lines) - len(kept)} of {len(lines)} due to non-ACGT "
+        f"characters, length != {in_window}, or invalid chromosome."
     )
-    return snp_bed[wholesome]
+    return kept, pd.DataFrame(coords, columns=["chrom", "start", "end"])
 
 
 def save_ohe(loci, fa_fp, out_fp, in_window=2114, out_window=1000, verbose=False):
@@ -162,15 +186,17 @@ if __name__ == "__main__":
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
-    filter_bed = filter_nonACGT_regions(
+    kept_lines, coords = filter_nonACGT_regions(
         args.bed_fp, args.fa_fp, args.in_window, args.verbose
     )
-    filter_bed.to_csv(args.out_fp, sep="\t", index=False, header=False)
+    Path(args.out_fp).parent.mkdir(parents=True, exist_ok=True)
+    with open(args.out_fp, "w") as fh:
+        fh.write("".join(line + "\n" for line in kept_lines))
 
     if args.save_ohe is not None:
         out_window = args.out_window
         if out_window is None:
             out_window = load_params("bpnet")["out_window"]
-        save_ohe(filter_bed, args.fa_fp, args.save_ohe,
+        save_ohe(coords, args.fa_fp, args.save_ohe,
                  in_window=args.in_window, out_window=out_window,
                  verbose=args.verbose)

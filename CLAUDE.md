@@ -288,6 +288,17 @@ exactly 1 blank column). So the setting every `extract_loci` call in this repo p
 attribution fail, and `filter_nonACGT_regions.py` — which DROPS such loci — is the remedy. That is the
 whole reason it exists; the `snp_bed` variable name is a leftover from where it was first used.
 
+**A PINTS peak file is RAGGED, and the filter script has to read it line by line because of that.**
+`combine_peaks` concatenates the unidirectional and bidirectional calls, which carry different numbers
+of columns, so `pd.read_csv(peaks, sep="\t", header=None)` dies with
+`Expected 6 fields in line 2, saw 9`. **`load_bed()` is unaffected** — its `usecols=[0, 1, 2]` with three
+matching `names` reads a ragged file fine, which is why training, benchmarking and attribution never hit
+this. Adding `usecols` to the filter script would fix the read and be wrong: its output is written back
+out as a BED, and upstream deliberately keeps PINTS' strand/confidence/class/summit columns rather than
+cutting to BED3 — the summit column is what makes `extract_loci(summits=True)` possible. So it keeps the
+raw line, which preserves every column whatever their number, and returns `(kept_lines, coords)`.
+It also has to handle **bgzipped** input, since that is what `combine_peaks` writes.
+
 `attribute.py` now catches this before the library does, because the library's message names neither the
 loci nor the remedy: it counts the offending rows, prints the first few, and prints the two commands
 that fix it. `launch.py --use-filtered` points attribution at the filtered BED and **errors if it is
