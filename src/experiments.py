@@ -50,6 +50,7 @@ EXPERIMENTS_PATH = CONFIG / "experiment_config.yaml"
 CHROM_SPLITS_PATH = CONFIG / "chrom_splits.yaml"
 SPLITS_DIR = CONFIG / "splits"
 MODELS_DIR = REPO_ROOT / "models"
+ATTR_DIR = REPO_ROOT / "attr"
 
 # Bases that extract_loci should treat as unknown. Passed on every call in this
 # repo; kept here so the list cannot drift between scripts.
@@ -93,6 +94,21 @@ def model_path(family: str, experiment: str, fold: int, *, final: bool = False,
 def model_name(family: str, experiment: str, fold: int, suffix: str = "") -> str:
     """Value to pass as a model's `name`; the library appends .torch/.final.torch."""
     return str(model_dir(family, experiment, suffix) / f"{experiment}.fold{fold}")
+
+
+def attribution_path(experiment: str, attribute_type: str,
+                     reference_mode: str) -> Path:
+    """Default output for an attribution run.
+
+    The reference mode is in the NAME because it changes the numbers: a
+    frequency-mode run would otherwise silently overwrite a dinucleotide-mode
+    one with nothing on disk recording which produced it. Defined here rather
+    than in attribute.py because the launcher has to predict the same path to
+    know whether a job is already done -- two copies of this format string is
+    exactly how a launcher starts re-running finished work.
+    """
+    return (ATTR_DIR /
+            f"{experiment}_attr_{attribute_type}_{reference_mode}.npz")
 
 
 def load_model(path, *, map_location: str = "cpu"):

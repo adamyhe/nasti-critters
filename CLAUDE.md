@@ -191,7 +191,15 @@ python src/cherimoya/fit/launch.py --print-commands | bash
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
 python src/bpnet/benchmark/benchmark_predictions.py
-python src/bpnet/attribute/attribute.py --attribute-type profile
+python src/bpnet/attribute/attribute.py -e D.melanogaster-S2_PROcap --attribute-type profile
+
+# Submit all attribution jobs; job unit is (experiment x type), NOT x fold
+python src/bpnet/attribute/launch.py --dry-run
+python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
+
+# One-hot encoding of the attribution loci -- written ONCE, by the filter step
+python src/bpnet/attribute/filter_nonACGT_regions.py \
+    -b <peaks.bed> -f <genome.fa> -o <filtered.bed> --save-ohe attr/<exp>_ohe.npz
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -257,6 +265,30 @@ Deleting the reconstruction removed that too.
 **Cherimoya does not go through `load_model()`.** It saves a dict payload and reconstructs via
 `cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
 affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
+
+## Launchers: three of them, one emission path
+
+`src/launcher.py` holds the selection rule and the emission machinery; the three
+`launch.py` files are thin wrappers. All three take the same emission modes —
+`--print-commands` (bare commands on stdout, skips and summary on stderr), `--dry-run` (full sbatch
+scripts) and the default (submit) — and the same SLURM flags, because `_add_common_args` and `_emit` are
+shared. Do not add a fourth copy of that block.
+
+| launcher | job unit | jobs | skips |
+| --- | --- | --- | --- |
+| `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | `.final.torch` exists, missing inputs, no fold assignment |
+| `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | same |
+| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | output npz exists, missing inputs, **folds not all trained** |
+
+**Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
+on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one
+job covers all folds of one experiment. It follows that a partly trained experiment is not partly
+attributable — `attribute.py` exits 1 — so the launcher skips it and reports `3/5 folds trained` rather
+than just refusing.
+
+**The already-done check must predict the output path**, and the reference mode is part of that path, so
+`experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two
+copies of that format string is exactly how a launcher starts re-running finished work.
 
 ## Where benchmark output goes
 
@@ -350,7 +382,7 @@ Two drivers, same steps:
   Run-level intermediates are keyed by *run*, not experiment, so a run shared by two experiments is
   mapped once. Scope is fetch -> negatives; `resolve_runs.py`/`build_experiment_config.py` stay outside
   (metadata, not DAG work) and training stays on `launch.py` — one per family, both thin wrappers over
-  `src/launcher.py`.
+  `src/launcher.py`, which also drives `src/bpnet/attribute/launch.py`.
 - **`src/data_preprocessing/run_procap_pipeline.py`** — single-experiment path, serial, caches on output
   existence. Useful for `-e <one>` debugging and `--fetch-genomes`/`--index-only`.
 

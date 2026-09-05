@@ -768,7 +768,15 @@ python src/cherimoya/fit/launch.py --dry-run
 python src/cherimoya/fit/launch.py --print-commands | bash
 ```
 
-Both are thin wrappers over `src/launcher.py`. The selection logic — which
+Attribution has one too, with a different job unit — `attribute.py` averages
+over every fold internally, so a job is (experiment × attribute type):
+
+```bash
+python src/bpnet/attribute/launch.py --dry-run
+python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
+```
+
+All three are thin wrappers over `src/launcher.py`. The selection logic — which
 (experiment, fold) pairs exist, which finished, which lack inputs — is
 family-agnostic because `src/experiments.py` is keyed by family, so there is one
 implementation rather than two that can drift. The only family difference is
