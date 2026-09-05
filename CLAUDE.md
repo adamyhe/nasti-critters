@@ -632,7 +632,7 @@ differed, now aligned:
 | cherimoya `muon_wd` | 0.03 | 0.01 | |
 | cherimoya `adam_lr` | 0.001 | 0.004 | |
 | cherimoya `adam_wd` | 0.0 | **0.2** | |
-| cherimoya `negatives_ratio` | 1/7 | 1/4 | upstream defaults both families to `gc:0.1429` |
+| ~~cherimoya `negatives_ratio`~~ | ~~1/7~~ | 1/4 | **reverted 2026-09-04** — procap-atlas overrides it, but 1/4 is `cherimoya.io.PeakGenerator`'s own default and is what this repo follows |
 | cherimoya `warmup_epochs` | 5, `--warmup-epochs` | hard-coded 5 | now configurable |
 | cherimoya `decay_epochs` | None, `--decay-epochs` | absent | now present |
 
@@ -2614,13 +2614,21 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
   `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
   log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
-- **Negatives ratio is 1/7 for BOTH families, i.e. negatives are 1/8 of a batch.** Two corrections have
-  landed on this line. It first read "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs", which was
-  backwards — the JSON is where 1/7 lives, and **0.1 is only `PeakGenerator`'s default and never
-  applies**, because both fit scripts pass `params["negatives_ratio"]`. It then read 1/7 for BPNet and
-  **1/4 for Cherimoya**, which was true of this repo and *not* of upstream: procap-atlas defaults both
-  families to `gc:0.1429`. Aligned 2026-09-03, so `config/cherimoya_params.json` is 0.142857… too. The
-  ratio is negatives per peak, so 1/7 means one negative for every seven peaks.
+- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya** — negatives are 1/8 and 1/5 of a batch.
+  Each family follows ITS OWN library's `PeakGenerator` default, which is the thing to remember, because
+  the two libraries disagree and the number has been wrong here in three different ways.
+  **Verified from the installed sources**: `bpnetlite`'s `PeakGenerator` defaults to `negative_ratio=0.1`
+  and `cherimoya.io.PeakGenerator` to `negative_ratio=0.25` (its `PeakNegativeSampler` uses 0.1, which is
+  the easy one to misread). `config/bpnet_params.json` sets 0.142857… — 1/7, which is procap-atlas's
+  choice rather than bpnet-lite's 0.1 — and `config/cherimoya_params.json` sets 0.25.
+  The history, since this line keeps attracting corrections: it first read "1/7 in `fit_bpnet.py`, 0.1 in
+  the JSON configs", which was backwards, since the JSON is where 1/7 lives and **0.1 never applies at
+  all** (both fit scripts pass `params["negatives_ratio"]` explicitly). It was then briefly set to 1/7
+  for both families on 2026-09-03, on the reasoning that procap-atlas's `--background` defaults to
+  `gc:0.1429` for both — that is true of procap-atlas but overrides cherimoya's own default, and
+  **1/4 was restored on 2026-09-04**. Note `max_jitter=500`, aligned in the same pass, IS cherimoya's
+  library default as well as upstream's, so only the ratio moved back.
+  The ratio is negatives per peak, so 1/4 means one negative for every four peaks.
   It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
   the pool available with the signal filter off:
 

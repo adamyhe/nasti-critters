@@ -193,9 +193,11 @@ def main():
     # negatives per peak, so a pool smaller than peaks * ratio recycles. This is
     # NOT inert: an earlier version of this comment claimed so on the grounds
     # that the script ran D. melanogaster only, which was never true of the
-    # script itself. Fly sits at 0.73-1.00 per peak against the configured 1/7
+    # script itself. Fly sits at 0.73-1.00 per peak against the configured 1/4
     # and is unaffected, but the dense yeast experiments are 0.013-0.28, so the
-    # cap engages hard there -- Spt5IAA4h would recycle each negative 10.3x.
+    # cap engages hard there -- Spt5IAA4h would recycle each negative 18x. Note
+    # the cap bites harder for cherimoya than for BPNet precisely because the
+    # configured ratio is higher: 1/4 against 1/7.
     configured_ratio = params["negatives_ratio"]
     available_ratio = len(negatives) / max(len(peaks), 1)
     if args.no_ratio_cap:
