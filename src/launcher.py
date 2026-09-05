@@ -675,12 +675,21 @@ def numba_env(args) -> dict[str, int]:
 
 
 def _add_modisco_args(
-    parser, launcher: str, *, default_cpus: int = 32,
-    default_time: str = "48:00:00",
+    parser, launcher: str, *, default_cpus: int, default_mem: str,
+    default_time: str,
 ) -> None:
-    """Shared by the motifs and report launchers."""
+    """Flags shared by the motifs and report launchers.
+
+    Resources are NOT shared and have no default here, deliberately. The two
+    commands differ by more than an order of magnitude in every dimension:
+    `modisco motifs` is numba-parallel and runs for many hours, `modisco report`
+    is single-threaded and finishes inside two. Defaulting them together meant
+    every report job reserved 32 idle cores for 48 hours, which queues badly and
+    wastes allocation. Making these required keyword arguments is what stops the
+    next caller inheriting the wrong set by omission.
+    """
     _add_common_args(parser, launcher, default_cpus=default_cpus,
-                     default_mem="64G", default_time=default_time)
+                     default_mem=default_mem, default_time=default_time)
     parser.add_argument(
         "-e",
         "--experiments",
@@ -738,7 +747,8 @@ def run_modisco(family: str) -> None:
             """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _add_modisco_args(parser, launcher)
+    _add_modisco_args(parser, launcher, default_cpus=32,
+                      default_mem="64G", default_time="48:00:00")
     parser.add_argument(
         "-n",
         "--n-seqlets",
@@ -850,7 +860,11 @@ def run_modisco_report(family: str) -> None:
             """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _add_modisco_args(parser, launcher)
+    # Single-threaded and short: it reads one .h5, matches its motifs
+    # against a MEME database and writes a report. numba_env then pins
+    # NUMBA_NUM_THREADS to 1, which is what it should be.
+    _add_modisco_args(parser, launcher, default_cpus=1,
+                      default_mem="16G", default_time="2:00:00")
     parser.add_argument(
         "--motif-db",
         type=str,

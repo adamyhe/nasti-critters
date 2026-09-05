@@ -486,10 +486,23 @@ clusters, `-w 1000` window, and `--lite` on the report.
 `filter_nonACGT_regions.py --save-ohe` is for, and it is why the OHE lives with the filter rather than
 with attribution — it must describe exactly the loci that were attributed.
 
-**Both stages are CPU-only** (`gpus=0`) and default to **32 CPUs, 64 GB and 48 hours**, against the fit
-launchers' 4 / 32G / 6h. `_add_common_args` takes those as parameters rather than hard-coding one set:
-a training fold and a tfmodisco run want very different walls, and a shared default that suits neither
-is how a 40-hour job gets killed at 6.
+**Both stages are CPU-only (`gpus=0`), and their resource defaults are NOT shared** — the two commands
+differ by more than an order of magnitude in every dimension:
+
+| | CPUs | mem | time | `NUMBA_NUM_THREADS` |
+| --- | --- | --- | --- | --- |
+| `modisco motifs` | 32 | 64G | 48:00:00 | 32 |
+| `modisco report` | **1** | 16G | **2:00:00** | **1** |
+| fit launchers (for contrast) | 4 | 32G | 6:00:00 | unset |
+
+`motifs` is numba-parallel and runs for many hours; **`report` is single-threaded and finishes inside
+two** — it reads one `.h5`, matches its motifs against a MEME database and writes a report. Defaulting
+them together meant every report job reserved 32 idle cores for 48 hours, which queues badly and wastes
+allocation.
+
+`_add_modisco_args` therefore takes `default_cpus`/`default_mem`/`default_time` as **required** keyword
+arguments with no fallback, so the next caller cannot inherit the wrong set by omission;
+`_add_common_args` takes them the same way with the fit values as its defaults.
 
 **`NUMBA_NUM_THREADS` is pinned to `--cpus-per-task` on every modisco job.** numba otherwise sets it
 from every core it can SEE, which on a shared node is the whole machine and not the slice SLURM granted
