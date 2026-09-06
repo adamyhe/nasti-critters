@@ -452,7 +452,14 @@ species:
       - CM104934.1
       - CM104935.1
     organelle_contigs: []
-    organelle_accessions: []
+    # RESTORED after the v5.5 -> ASM4749649v1 swap dropped them. Verified from
+    # the assembly report: ASM4749649v1 is the 17 nuclear chromosomes and
+    # NOTHING else -- no chloroplast, no mitochondrion -- exactly as v5.5 was,
+    # so the same two decoys are still required. 12.2% of
+    # C.reinhardtii-liquidculture_5GRO is organellar (12.1 cp / 0.1 mt), and
+    # without a sink those reads are attracted to nuclear NUPT/NUMT copies and
+    # manufacture initiation signal inside main_chromosomes.
+    organelle_accessions: [BK000554, U03843]   # cp 203,828 bp; mt 15,758 bp
     rdna_accession: null
     rdna_regions: []
     blacklist: null
@@ -503,7 +510,12 @@ species:
       - GWHFIHF00000025.1
       - GWHFIHF00000026.1
     organelle_contigs: []
-    organelle_accessions: []
+    # RESTORED after the Phypa_V3 -> V7 swap dropped them. V7 is 26 sequences
+    # and all 26 are chromosomes (confirmed against its NCBI mirror
+    # GCA_059467195.1: 26 chromosomes, 26 component sequences), so it carries
+    # no organelles either. 8.6% of P.patens-plateculture_5GRO is organellar
+    # (8.1 cp / 0.5 mt).
+    organelle_accessions: [AP005672, AB251495]   # cp 122,890 bp; mt 105,340 bp
     rdna_accession: null
     rdna_regions: []
     blacklist: null
