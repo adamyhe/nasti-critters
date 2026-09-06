@@ -115,6 +115,16 @@ def load_annotation(species: str, genome: dict, cache: Path,
     species cannot race for the same file.
     """
     url, fmt = genome["annotation_url"], genome["annotation_format"]
+    # No annotation for this assembly at all -- C. reinhardtii under
+    # ASM4749649v1. Return no TSSs rather than raising: metaplot() already
+    # returns (None, None, 0) for an empty site list, render() draws
+    # "no metaplot", and verdict() raises no metaplot line. The initiator logo
+    # and the summit-anchored metaplot are annotation-free and still carry the
+    # verdict, which is the reason the summit panel exists.
+    if url is None and local is None:
+        print("  no annotation for this assembly -- TSS metaplot skipped "
+              "(logo and summit metaplot are annotation-free)")
+        return []
     if local is None:
         cache.mkdir(parents=True, exist_ok=True)
         local = cache / Path(url).name

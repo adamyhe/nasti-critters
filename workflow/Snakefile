@@ -292,9 +292,30 @@ def decoy_fastas(species, ext=""):
 
 
 def annotation_path(species):
-    """Fetched annotation for a species. GFF3 for the Ensembl-named assemblies,
-    GTF for the UCSC ones -- the source is chosen so chromosome names match the
-    FASTA, and swapping it would silently yield zero features."""
+    """Fetched annotation for a species, or [] where there is none.
+
+    GFF3 for the Ensembl-named assemblies, GTF for the UCSC ones -- the source
+    is chosen so chromosome names match the FASTA, and swapping it would
+    silently yield zero features.
+
+    A NULL `annotation_url` returns NO DEPENDENCY rather than a path, because
+    `annotation_format` is then null too and the interpolated name
+    (`C.reinhardtii.None.gz`) is one no rule can produce. That is not a
+    hypothetical: moving C. reinhardtii to ASM4749649v1 left it the one species
+    with no annotation, which made BOTH consumers -- orientation_qc and
+    rrna_content -- unbuildable, so `snakemake qc` died at DAG construction for
+    that experiment rather than skipping a panel.
+
+    Degrading to no dependency is right rather than merely convenient: the
+    annotation is used for QC only, never for labels, folds or peak calling.
+    rrna_content already treats a missing annotation as NOT MEASURED (a blank
+    pct_rrna, which the stats table distinguishes from 0), and orientation_qc's
+    two annotation-free read-outs -- the initiator logo and the summit-anchored
+    metaplot -- are the ones that carry the orientation verdict anyway. Only the
+    TSS-anchored panel is lost.
+    """
+    if not GENOMES[species].get("annotation_url"):
+        return []
     return (f"{REPO_ROOT}/data/annotation/{species}."
             f"{GENOMES[species]['annotation_format']}.gz")
 
@@ -489,6 +510,23 @@ rule stats:
     input:
         f"{QC}/stats/experiment_stats.tsv",
         f"{QC}/stats/experiment_stats.md",
+
+
+rule orientation:
+    """Just the initiator logos and metaplots. `snakemake orientation -c8`.
+
+    A narrow target because the plots are the one QC output that is re-read by
+    eye after every change to how they are drawn, and `qc` drags in three
+    reports that read the RAW FASTQS -- ~202 GiB, routinely deleted after
+    mapping. Requesting only these two outputs keeps a plot refresh from
+    depending on files that may not be on disk. Target name BEFORE --config.
+
+    Both outputs are named even though the png is a co-output of the tsv, so
+    that a tree where only one was written still rebuilds.
+    """
+    input:
+        expand(f"{QC}/orientation/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/orientation/{{exp}}.orientation_qc.png", exp=TARGETS),
 
 
 rule fetch_only:
@@ -1256,6 +1294,9 @@ rule orientation_qc:
     params:
         script=f"{REPO_ROOT}/src/qc/orientation_qc.py",
         outdir=f"{QC}/orientation",
+        annotation=lambda w: (
+            f"--annotation {annotation_path(EXPERIMENTS[w.exp]['species'])}"
+            if annotation_path(EXPERIMENTS[w.exp]["species"]) else ""),
     resources:
         mem_mb=8000,
         runtime=60,
@@ -1264,7 +1305,10 @@ rule orientation_qc:
     shell:
         "mkdir -p $(dirname {log}) {params.outdir} && "
         "python {params.script} -e {wildcards.exp} --outdir {params.outdir} "
-        "--annotation {input.annotation} --tsv {output.tsv} > {log} 2>&1"
+        # Omitted entirely where the species has no annotation: an empty
+        # --annotation would be argparse's next flag, and the script's own
+        # fallback (fetch by URL) has nothing to fetch either.
+        "{params.annotation} --tsv {output.tsv} > {log} 2>&1"
 
 
 rule umi_report:
