@@ -6,6 +6,7 @@ read from models/bpnet/{experiment}/{experiment}.fold{f}.torch.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -18,8 +19,9 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
-    IGNORE,
     Experiment,
+    IGNORE,
+    load_model,
     load_params,
 )
 
@@ -43,7 +45,28 @@ def main():
         help="experiment ID as it appears in config/experiment_config.yaml",
     )
     parser.add_argument("--models-dir", type=str, default=None)
-    parser.add_argument("--output-fname", type=str, default=None)
+    parser.add_argument(
+        "--metrics-dir", type=str, default="performance_metrics/bpnet",
+        help="directory for the metrics JSON (default: %(default)s). Matches "
+             "benchmark_cherimoya.py, which has always written one; this script "
+             "only PRINTED its metrics until 2026-09-04",
+    )
+    parser.add_argument(
+        "--output-fname", type=str, default=None,
+        help="optional joblib dump of the raw predictions and signals. "
+             "Separate from --metrics-dir: this is the predictions, that is "
+             "the scores",
+    )
+    parser.add_argument(
+        "--no-progress", dest="progress", action="store_false",
+        help="suppress the tqdm progress bars from extract_loci and predict. "
+             "They are ON by default and go to stderr, so stdout stays clean "
+             "for the printed metrics",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="verbose output beyond the progress bars",
+    )
     args = parser.parse_args()
 
     try:
@@ -73,12 +96,13 @@ def main():
                   file=sys.stderr)
         sys.exit(1)
 
+    if args.verbose:
+        params["verbose"] = True
     params["output_fname"] = (
         str(Path(args.output_fname).resolve()) if args.output_fname else None
     )
 
     import torch
-    from bpnetlite.bpnet import BPNet
     from bpnetlite.performance import (
         jensen_shannon_distance,
         pearson_corr,
@@ -98,8 +122,6 @@ def main():
         torch.set_num_interop_threads(params["n_cpus"])
 
     loci = load_bed(params["loci"])
-    n_control_tracks = 0 if params["controls"] is None else len(params["controls"])
-    trimming = (params["in_window"] - params["out_window"]) // 2
 
     signals = []
     preds = []
@@ -113,7 +135,10 @@ def main():
             in_signals=params["controls"],
             in_window=params["in_window"],
             out_window=params["out_window"],
-            verbose=params["verbose"],
+            # tangermeme's `verbose` IS the tqdm bar here, so progress is wired
+            # to --no-progress rather than to -v: a long benchmark should show
+            # progress without also turning on every other message.
+            verbose=args.progress or params["verbose"],
             ignore=IGNORE,
         )
         if len(data) == 3:
@@ -124,29 +149,15 @@ def main():
             X_ctl = None
         signals.append(torch.abs(y))
 
-        model = BPNet(
-            n_filters=params["n_filters"],
-            n_outputs=len(params["signals"]),
-            n_control_tracks=n_control_tracks,
-            count_loss_weight=params["count_loss_weight"],
-            n_layers=params["n_layers"],
-            trimming=trimming,
-            verbose=params["verbose"],
-        )
-        model.load_state_dict(
-            torch.load(
-                model_path,
-                weights_only=True,
-                map_location=torch.device("cpu"),
-            )
-        )
+        # The checkpoint IS the model -- see load_model()'s docstring.
+        model = load_model(model_path)
 
         preds.append(
             predict(
                 model=model,
                 X=X,
                 args=X_ctl,
-                verbose=params["verbose"],
+                verbose=args.progress or params["verbose"],
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 batch_size=params["batch_size"],
             )
@@ -185,23 +196,75 @@ def main():
         for pred, signal in zip(preds, signals)
     ]
 
+    # Genome-wide aggregates: pooled across folds rather than averaged over
+    # them, so each locus counts once regardless of how large its fold was.
+    # Same construction as benchmark_cherimoya.py -- keep the two in step.
+    log_counts_pearson_all = pearson_corr(
+        torch.cat([pred[1].squeeze() for pred in preds]),
+        torch.cat([torch.log1p(signal.sum(dim=(-1, -2))) for signal in signals]),
+    ).item()
+    counts_spearman_all = spearman_corr(
+        torch.cat([pred[1].squeeze() for pred in preds]),
+        torch.cat([signal.sum(dim=(-1, -2)) for signal in signals]),
+    ).item()
+
+    print("\nPer-fold results:\n----------------")
     print(
-        f"Profile Pearson correlation: {[np.nanmedian(c) for c in profile_corr]}"
-        f" (n_nan={[np.isnan(c).mean() for c in profile_corr]})"
+        f"Profile Pearson correlation: {[np.nanmedian(c).item() for c in profile_corr]}"
+        f" (n_nan={[np.isnan(c).mean().item() for c in profile_corr]})"
     )
     print(
-        f"Profile Jensen-Shannon distance: {[np.nanmedian(j) for j in profile_jsd]} "
-        f"(n_nan={[np.isnan(j).mean() for j in profile_jsd]})"
+        f"Profile Jensen-Shannon distance: {[np.nanmedian(j).item() for j in profile_jsd]} "
+        f"(n_nan={[np.isnan(j).mean().item() for j in profile_jsd]})"
     )
     print(f"Counts Pearson correlation: {counts_pearson}")
-    print(f"Log Counts Pearson correlation: {log_counts_pearson}")
+    print(f"Log counts Pearson correlation: {log_counts_pearson}")
     print(f"Counts Spearman correlation: {counts_spearman}")
+
+    print("\nGenome-wide results:\n----------------")
+    print(f"Profile Pearson correlation: {np.nanmedian(np.concatenate(profile_corr))}")
+    print(
+        f"Profile Jensen-Shannon distance: {np.nanmedian(np.concatenate(profile_jsd))}"
+    )
+    print(f"Log counts Pearson correlation: {log_counts_pearson_all}")
+    print(f"Counts Spearman correlation: {counts_spearman_all}")
+
+    # Metrics JSON. Same shape as benchmark_cherimoya.py's so the two families
+    # are directly comparable; `counts_pearson` is extra here because this
+    # script already computed it.
+    metrics = {
+        "run_name": exp.id,
+        "model_paths": {str(f["fold"]): str(f["model"]) for f in folds},
+        "per_fold": {
+            str(fold): {
+                "profile_pearson": np.nanmedian(profile_corr[i]).item(),
+                "profile_jsd": np.nanmedian(profile_jsd[i]).item(),
+                "counts_pearson": counts_pearson[i],
+                "log_counts_pearson": log_counts_pearson[i],
+                "counts_spearman": counts_spearman[i],
+            }
+            for i, fold in enumerate(x["fold"] for x in folds)
+        },
+        "genome_wide": {
+            "profile_pearson": np.nanmedian(np.concatenate(profile_corr)).item(),
+            "profile_jsd": np.nanmedian(np.concatenate(profile_jsd)).item(),
+            "log_counts_pearson": log_counts_pearson_all,
+            "counts_spearman": counts_spearman_all,
+        },
+    }
+    metrics_dir = REPO_ROOT / args.metrics_dir
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = metrics_dir / f"{exp.id}.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+    print(f"\nMetrics saved to {metrics_path}")
 
     if params["output_fname"] is not None:
         import joblib
 
         Path(params["output_fname"]).parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({"preds": preds, "signals": signals}, params["output_fname"])
+        print(f"Predictions saved to {params['output_fname']}")
 
 
 if __name__ == "__main__":

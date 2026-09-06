@@ -33,6 +33,20 @@ six folds and everything else has five.
 
 The script uses Muon for 2D weight matrices and AdamW for the remaining parameters, with warmup plus cosine learning-rate schedules.
 
+`torch.compile()` is **on by default when training** and **off by default when benchmarking**. That
+asymmetry is deliberate, not an oversight: 50 epochs amortise compilation's warmup, one inference pass
+does not. `Cherimoya.load()` itself defaults to `compile=True`, so the benchmark had been compiling
+unconditionally with no way to stop it. Override either way:
+
+```bash
+python src/cherimoya/fit/fit_cherimoya.py -e <exp> -f 0 --no-compile
+python src/cherimoya/benchmark/benchmark_cherimoya.py -e <exp> --compile
+```
+
+Both are additionally gated on `torch.compile` being usable at all — it raises on Python 3.14+ below
+torch 2.10, where the limit is Dynamo rather than Triton — and the benchmark warns rather than silently
+ignoring `--compile` when it cannot be honoured.
+
 Cluster launchers run **natively** by default and take no site-specific values;
 pass partition and GPU constraints at submit time:
 
@@ -100,10 +114,18 @@ had already resolved it:
 | `PeakGenerator(signals=[params["signals"]])` — nested | a flat 2-element list now means two *independent unstranded* groups, breaking reverse-complement channel swapping |
 | `data_loader.py` is now a thin wrapper over `cherimoya.io` | it was a ~440-line frozen fork of the pre-refactor `PeakGenerator`, incompatible with the pinned version |
 
-`Cherimoya.load(path, device=...)` is unchanged and still compatible, so
-`benchmark_cherimoya.py` needed no changes. But `load()` reconstructs the model
-via `cls(**payload['config'])`, so a checkpoint written by a pre-0.2 cherimoya
-whose stored config contains `n_outputs` will not load under the pinned version.
+`Cherimoya.load(path, device=...)` is unchanged and still compatible, so the API
+port needed nothing on the benchmark side. Two later caveats do apply to it,
+neither from the 0.2 break: `load()` defaults to `compile=True`, which is why
+the benchmark now passes `compile=` explicitly (see above); and `load()`
+reconstructs the model via `cls(**payload['config'])`, so a checkpoint written
+by a pre-0.2 cherimoya whose stored config contains `n_outputs` will not load
+under the pinned version.
+
+Note also that cherimoya checkpoints are a **dict payload**, not a pickled
+module, so they are unaffected by PyTorch 2.6's `weights_only` default flip —
+unlike bpnet-lite's, which `torch.save(self, ...)` and must be read through
+`experiments.load_model()`.
 
 Historical note: the first Cherimoya models were trained while `cherimoya` was in
 early development, using commit `69f16dc7ff48ad094aafd4b93433972181c65d50`. Check

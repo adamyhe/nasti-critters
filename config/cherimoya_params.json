@@ -20,7 +20,7 @@
     "verbose": false,
     "controls": null,
     "blacklist": null,
-    "negatives_ratio": 0.14285714285714285,
+    "negatives_ratio": 0.25,
     "lw_lr": 0.001,
     "lw_wd": 0.0,
     "lw_momentum": 0.9

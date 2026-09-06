@@ -95,6 +95,40 @@ def model_name(family: str, experiment: str, fold: int, suffix: str = "") -> str
     return str(model_dir(family, experiment, suffix) / f"{experiment}.fold{fold}")
 
 
+def load_model(path, *, map_location: str = "cpu"):
+    """Load a bpnet-lite checkpoint. Returns the MODEL, not a state dict.
+
+    bpnet-lite persists with `torch.save(self, ...)` -- verified in
+    bpnetlite/bpnet.py, which does exactly that for both `{name}.torch` and
+    `{name}.final.torch` -- so a checkpoint is a pickled `nn.Module`, never a
+    state dict. Two consequences that both bit this repo:
+
+    * **`weights_only` must be False.** PyTorch 2.6 flipped its default to True,
+      which refuses any pickled global and fails with
+      `Unsupported global: GLOBAL bpnetlite.bpnet.BPNet was not an allowed
+      global by default`. Allowlisting via `add_safe_globals` is the wrong
+      remedy here: it would have to cover BPNet and every nested type it
+      pickles, and the checkpoints are this repo's own training output rather
+      than untrusted input. procap-atlas passes `weights_only=False` at every
+      bpnet-lite load site for the same reason.
+    * **Do NOT reconstruct a BPNet and call `load_state_dict`.** Both downstream
+      scripts did, which could not work -- `torch.load` returns a module, and
+      `load_state_dict` wants a Mapping -- and it carried a subtler hazard even
+      if the types had lined up: the architecture came from the CURRENT
+      `config/bpnet_params.json`, so a checkpoint trained under a different
+      `n_filters`/`n_layers` would be loaded into the wrong shape.
+
+    Cherimoya is NOT loaded through here. It saves a dict payload and
+    reconstructs via `cls(**payload['config'])` in its own `Cherimoya.load()`,
+    which is unaffected by the weights_only change.
+    """
+    import torch
+
+    return torch.load(
+        path, weights_only=False, map_location=torch.device(map_location)
+    )
+
+
 @dataclass
 class Experiment:
     """One experiment from config/experiment_config.yaml, with paths resolved."""

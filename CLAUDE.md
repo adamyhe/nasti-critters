@@ -232,6 +232,67 @@ need the old dm3 dataset, add it as an experiment rather than resurrecting a par
 `{name}.final.torch` exactly once at the end of `fit()`. `model_path(..., final=True)` is
 the only safe test of completion.
 
+**A bpnet-lite checkpoint IS a pickled module, not a state dict — load it with
+`experiments.load_model()`.** `bpnetlite/bpnet.py` persists with `torch.save(self, ...)` for both
+paths, verified in the installed source. Two things follow, and the downstream scripts got both wrong
+until 2026-09-04:
+
+- **`weights_only=False` is required.** PyTorch 2.6 flipped the default to `True`, so
+  `benchmark_predictions.py` died with `UnpicklingError: ... Unsupported global: GLOBAL
+  bpnetlite.bpnet.BPNet was not an allowed global by default`. Allowlisting with `add_safe_globals` is
+  the wrong remedy: it would have to cover BPNet and every type it pickles, and these checkpoints are
+  this repo's own training output, not untrusted input. procap-atlas passes `weights_only=False` at
+  every bpnet-lite load site.
+- **Do not reconstruct a `BPNet` and call `load_state_dict`.** Both scripts did, and it could never
+  have worked at any `weights_only` setting — reproduced on torch 2.10, it raises
+  `TypeError: Expected state_dict to be dict-like, got <class 'BPNet'>`. It also carried a quieter
+  hazard: the architecture came from the *current* `config/bpnet_params.json`, so a checkpoint trained
+  under a different `n_filters`/`n_layers` would be loaded into the wrong shape.
+
+`attribute.py` was additionally unrunnable one line earlier: it read `params["n_outputs"]` and
+`params["n_control_tracks"]`, which are set **nowhere** — absent from `bpnet_params.json`, from the
+`params.update()` block and from any CLI flag — so it raised `KeyError` before reaching the load.
+Deleting the reconstruction removed that too.
+
+**Cherimoya does not go through `load_model()`.** It saves a dict payload and reconstructs via
+`cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
+affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
+
+## Where benchmark output goes
+
+Both benchmark scripts now write the same three things; `performance_metrics/`, `predictions/` and
+`logs/` are all gitignored, so nothing here is committed.
+
+| | BPNet | Cherimoya |
+| --- | --- | --- |
+| metrics JSON | `performance_metrics/bpnet/{experiment}.json` | `performance_metrics/cherimoya/{experiment}.json` |
+| override | `--metrics-dir` | `--metrics-dir` |
+| raw predictions | `--output-fname` (joblib, opt-in) | `--save-output` -> `predictions/cherimoya/` (npz) |
+| printed | per-fold **and** genome-wide | per-fold **and** genome-wide |
+
+**`benchmark_predictions.py` saved NOTHING until 2026-09-04 — it only printed.** So every BPNet
+benchmark run before then left no artifact, while `benchmark_cherimoya.py` had always written a JSON.
+The JSON now carries the same shape as cherimoya's (`run_name`, `model_paths`, `per_fold`,
+`genome_wide`) so the two families are directly comparable, plus `counts_pearson`, which this script
+already computed and cherimoya's does not. It also gained the genome-wide block it was missing.
+
+**Genome-wide is POOLED across folds, not averaged over them** — `pearson_corr` over the
+concatenation, so each locus counts once regardless of how large its fold was. Averaging per-fold
+correlations would weight a small fold equally with a large one, and for C. elegans, where one fold is
+one chromosome, the fold sizes differ enough to matter. Same construction in both scripts; keep them in
+step.
+
+Note upstream's `benchmark_bpnet.py` also reports `orientation_index_pearson`, which neither script
+here computes. Not an oversight to fix silently — adding it means defining the orientation index the
+same way upstream does.
+
+**Progress bars are ON by default in both, via `--no-progress` to suppress.** They are tangermeme's
+`verbose` argument to `extract_loci` and `predict`, which is *only* the tqdm bar, so it is wired to
+`--no-progress` rather than to `-v`: a long benchmark should show progress without turning on every
+other message. Bars go to stderr, so stdout stays clean for the printed metrics and can be piped.
+`benchmark_predictions.py` had **no `-v` flag at all**, so `params["verbose"]` was permanently `false`
+from `config/bpnet_params.json` and no bar could ever appear; it has one now.
+
 **Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
 `data_loader` are imported *inside* `main()`, after argparse and path validation, so
 `--help` and missing-data errors stay instant on a login node and are testable without a
@@ -571,7 +632,7 @@ differed, now aligned:
 | cherimoya `muon_wd` | 0.03 | 0.01 | |
 | cherimoya `adam_lr` | 0.001 | 0.004 | |
 | cherimoya `adam_wd` | 0.0 | **0.2** | |
-| cherimoya `negatives_ratio` | 1/7 | 1/4 | upstream defaults both families to `gc:0.1429` |
+| ~~cherimoya `negatives_ratio`~~ | ~~1/7~~ | 1/4 | **reverted 2026-09-04** — procap-atlas overrides it, but 1/4 is `cherimoya.io.PeakGenerator`'s own default and is what this repo follows |
 | cherimoya `warmup_epochs` | 5, `--warmup-epochs` | hard-coded 5 | now configurable |
 | cherimoya `decay_epochs` | None, `--decay-epochs` | absent | now present |
 
@@ -609,6 +670,34 @@ Already synced:
   `from bpnetlite.bpnet import BPNet`, optional `blacklist`/`exclusion_lists`, `dtype=torch.float`, and
   `alpha` renamed to `count_loss_weight` (`--alpha` kept as an alias).
 - `src/cherimoya/fit/fit_cherimoya.py` — ported to the cherimoya >= 0.2 API (see below).
+- `src/bpnet/attribute/attribute.py` — **the DeepLIFT reference**, synced 2026-09-04. It was using
+  tangermeme's default dinucleotide shuffling (`n_shuffles=20`) where upstream defaults to a
+  **nucleotide-frequency reference**: one soft PFM per input sequence carrying that sequence's own
+  A/C/G/T frequencies at every position. `--reference-mode {frequency,dinucleotide}` selects, default
+  `frequency`, and `--n-shuffles` now has a CLI override (it was JSON-only).
+  **The reason is that a dinucleotide shuffle is not reliably NEUTRAL.** Upstream's locus diagnostics
+  found shuffles that produce cryptic promoter-like signal — for some loci as active as, or more active
+  than, the genomic input — which makes the baseline reference-sensitive, the one thing a DeepLIFT
+  reference must not be. **That argument is stronger here than upstream**, because several of these
+  genomes are far denser than human: S. cerevisiae carries 1.2-4.1 peaks per 2114 bp window, so nearly
+  every window contains a promoter and a composition-preserving shuffle is correspondingly more likely
+  to reassemble something initiation-competent. Same reasoning that moved the initiator PWM to relative
+  entropy against *local* composition.
+  Two implementation details that matter: the reference is passed as a **callable**, so it is built per
+  batch and never reaches tangermeme's tensor-reference one-hot validator, which would reject a soft
+  tensor; and frequency mode forces **`n_shuffles=1`**, since that reference is deterministic and
+  further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
+  at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
+  soft, and `n=0` rejected.
+  **The default output path now carries the mode** (`attr/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  divergence from upstream's mode-less name: the two references give different numbers, and without it
+  a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
+
+Also not copied from their attribution tree: `--head orientation` (attributes the profile orientation
+index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible ReLU form of
+the binary maximum) and `src/bpnet/attribute/launch.py`. Both are real capability gaps rather than
+rejected ideas — the orientation head is the same metric as the `orientation_index_pearson` our
+benchmarks do not report.
 
 Deliberately not copied: `--background NAME:RATIO` multi-source negatives (its `ccre` source is
 GRCh38-only), `--min-reads` (needs their `config/n_reads.txt`), and their hitcall/modisco/predict/
@@ -631,7 +720,16 @@ breaks are fixed, ported from procap-atlas:
 - `PeakGenerator(signals=[params["signals"]])` — **nested**. A flat 2-element list now means two independent
   unstranded groups, which breaks reverse-complement channel swapping. `params["signals"]` itself stays flat
   for `extract_loci` and for `signal_groups`.
-- `Cherimoya.load(path, device=...)` is unchanged and still compatible.
+- `Cherimoya.load(path, device=...)` is unchanged and still compatible — but **it defaults to
+  `compile=True`**, so `benchmark_cherimoya.py` was compiling unconditionally until 2026-09-04. Both
+  scripts now take an explicit flag, with **deliberately opposite defaults**, because the warmup
+  economics differ: `benchmark_cherimoya.py --compile` is **opt-in** (one inference pass over the test
+  set does not amortise compilation), while `fit_cherimoya.py --no-compile` is **opt-out** (50 epochs
+  do). Both stay gated on `sys.version_info < (3, 14) or torch.__version__ >= "2.10"` — `torch.compile`
+  raises unconditionally on Python 3.14+ below torch 2.10, and the limit is Dynamo, not Triton. The
+  benchmark warns when `--compile` is asked for and cannot be honoured, rather than silently ignoring
+  it. Not applicable to this repo's own lock (torch 2.13 on Python 3.11); it matters where a site
+  interpreter differs.
 
 Note `load()` reconstructs via `cls(**payload['config'])`, so a checkpoint saved by a pre-0.2 cherimoya
 whose stored config contains `n_outputs` will fail to load under the pinned version.
@@ -2516,13 +2614,60 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
   `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
   log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
-- **Negatives ratio is 1/7 for BOTH families, i.e. negatives are 1/8 of a batch.** Two corrections have
-  landed on this line. It first read "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs", which was
-  backwards — the JSON is where 1/7 lives, and **0.1 is only `PeakGenerator`'s default and never
-  applies**, because both fit scripts pass `params["negatives_ratio"]`. It then read 1/7 for BPNet and
-  **1/4 for Cherimoya**, which was true of this repo and *not* of upstream: procap-atlas defaults both
-  families to `gc:0.1429`. Aligned 2026-09-03, so `config/cherimoya_params.json` is 0.142857… too. The
-  ratio is negatives per peak, so 1/7 means one negative for every seven peaks.
+- **Cherimoya has THREE sources of defaults and they disagree — checked 2026-09-04 against the 0.2.0
+  wheel.** Worth having in one place, because "cherimoya's default" is ambiguous:
+  `cherimoya_cli.defaults.default_fit_parameters` (its CLI), the Python API's own signatures
+  (`Cherimoya.__init__`, `fit()`, `io.PeakGenerator`), and procap-atlas.
+
+  | | CLI | API | procap-atlas | here |
+  | --- | --- | --- | --- | --- |
+  | `negative_ratio` | 0.25 | 0.25 | 1/7 | **0.25** |
+  | `max_jitter` | 500 | 500 | 500 | **500** |
+  | `n_filters` / `n_layers` | 128 / 9 | 128 / 9 | 128 / 9 | 128 / 9 |
+  | `expansion` / `residual_scale` | 2 / 0.15 | 2 / 0.15 | unset | unset -> 2 / 0.15 |
+  | `muon_lr`/`wd`, `adam_lr`/`wd`, `lw_*` | 0.025/0.03, 0.001/0.0, … | — | same | same |
+  | `max_epochs` | **20** | **50** | 50 | 50 |
+  | `early_stopping` | **5** | **None** | None | None |
+  | warmup epochs | **2** | — | 5 | 5 |
+  | `dtype` | float32 | float32 | float32 | **bfloat16** |
+
+  Three things fall out.
+
+  **The CLI's schedule is exactly the `20_5_2` config procap-atlas swept and rejected** — max_epochs 20,
+  early_stopping 5, warmup 2. So upstream's comparison was, in effect, testing cherimoya's own CLI
+  default and finding `50_None_5` better on every benchmark metric.
+
+  **On that schedule the API and the CLI disagree with each other**, and we follow the API:
+  `Cherimoya.fit()` is declared `max_epochs=50, early_stopping=None`, which is also procap-atlas's
+  choice and ours. So `max_epochs: 50, early_stopping: null` here is not a departure from cherimoya at
+  all — it matches the library's *function* default, and only the CLI wrapper differs.
+
+  **`expansion` and `residual_scale` are not passed by `fit_cherimoya.py` and do not need to be**: the
+  class defaults (2, 0.15) are identical to the CLI's, so the architecture is the same either way.
+
+  **`dtype=torch.bfloat16` is the one place this repo diverges from BOTH sources**, and it was never
+  recorded as a decision — cherimoya's CLI, its `fit()` signature and procap-atlas all use `float32`
+  (upstream passes `dtype=torch.float32` explicitly). `fit()` applies it through
+  `torch.autocast(device_type=device, dtype=dtype)`, so this is autocast precision for the whole
+  training loop, not a storage detail. Faster on Ampere and later, and usually harmless, but it is an
+  unflagged numerical divergence in a repo that otherwise tracks upstream — **decide it deliberately
+  rather than inheriting it.**
+
+- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya** — negatives are 1/8 and 1/5 of a batch.
+  Each family follows ITS OWN library's `PeakGenerator` default, which is the thing to remember, because
+  the two libraries disagree and the number has been wrong here in three different ways.
+  **Verified from the installed sources**: `bpnetlite`'s `PeakGenerator` defaults to `negative_ratio=0.1`
+  and `cherimoya.io.PeakGenerator` to `negative_ratio=0.25` (its `PeakNegativeSampler` uses 0.1, which is
+  the easy one to misread). `config/bpnet_params.json` sets 0.142857… — 1/7, which is procap-atlas's
+  choice rather than bpnet-lite's 0.1 — and `config/cherimoya_params.json` sets 0.25.
+  The history, since this line keeps attracting corrections: it first read "1/7 in `fit_bpnet.py`, 0.1 in
+  the JSON configs", which was backwards, since the JSON is where 1/7 lives and **0.1 never applies at
+  all** (both fit scripts pass `params["negatives_ratio"]` explicitly). It was then briefly set to 1/7
+  for both families on 2026-09-03, on the reasoning that procap-atlas's `--background` defaults to
+  `gc:0.1429` for both — that is true of procap-atlas but overrides cherimoya's own default, and
+  **1/4 was restored on 2026-09-04**. Note `max_jitter=500`, aligned in the same pass, IS cherimoya's
+  library default as well as upstream's, so only the ratio moved back.
+  The ratio is negatives per peak, so 1/4 means one negative for every four peaks.
   It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
   the pool available with the signal filter off:
 
@@ -2656,7 +2801,9 @@ every non-yeast experiment alone.
 - `load_bed()` reads only columns 0–2 with `dtype={"chrom": str}` — chromosome names must stay strings
   (S. cerevisiae uses roman numerals, dm has `4`/`X`).
 - Cherimoya optimization splits parameters: **Muon** for 2-D weight matrices except `linear.weight`, **AdamW**
-  for everything else, each with linear warmup → cosine decay, trained in `bfloat16`. Warmup was
+  for everything else, each with linear warmup → cosine decay, trained in `bfloat16` — which is a
+  divergence from cherimoya's own default and from procap-atlas, both `float32`; see the defaults table
+  above. Warmup was
   hard-coded at 5 epochs and is now `warmup_epochs` in the config with a `--warmup-epochs` flag, plus
   `decay_epochs` / `--decay-epochs` to decouple the decay's length from `max_epochs` — both ported from
   upstream, both no-ops at their defaults (5 and None give exactly the previous schedule, verified: 4,500

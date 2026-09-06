@@ -50,6 +50,24 @@ def main():
     parser.add_argument("--predictions-dir", type=str, default="predictions/cherimoya")
     parser.add_argument("--save-output", action="store_true")
     parser.add_argument("-b", "--batch-size", type=int, default=None)
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="enable torch.compile() during inference (default: DISABLED). "
+             "Cherimoya.load() itself defaults to compile=True, so this script "
+             "was compiling unconditionally; benchmarking is a single inference "
+             "pass over the test set, and compilation's warmup cost is not "
+             "worth it for one pass. Contrast fit_cherimoya.py, where it is on "
+             "by default because 50 epochs amortise the warmup. Also gated on "
+             "torch.compile being usable at all -- it raises on Python 3.14+ "
+             "below torch 2.10",
+    )
+    parser.add_argument(
+        "--no-progress", dest="progress", action="store_false",
+        help="suppress the tqdm progress bars from extract_loci and predict. "
+             "They are ON by default and go to stderr, so stdout stays clean "
+             "for the printed metrics",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -94,6 +112,20 @@ def main():
     # P.patens 1-27) hit a dtype bug in tangermeme's BED reading. Self-retiring
     # no-op once tangermeme is fixed -- see src/tangermeme_compat.py.
     patch_numeric_chroms(verbose=params["verbose"])
+
+    # torch.compile has no Python 3.14 support below torch 2.10; the limit is
+    # Dynamo, not Triton itself. torch.__version__ is a TorchVersion, which
+    # supports PEP 440-aware comparison against a plain string.
+    compile_supported = args.compile and (
+        sys.version_info < (3, 14) or torch.__version__ >= "2.10"
+    )
+    if args.compile and not compile_supported:
+        print(
+            "Warning: --compile requested but torch.compile is unsupported "
+            f"on Python {'.'.join(map(str, sys.version_info[:3]))} with "
+            f"torch {torch.__version__}; running without compilation.",
+            file=sys.stderr,
+        )
     from tangermeme.predict import predict
 
     loci = load_bed(params["loci"])
@@ -113,7 +145,10 @@ def main():
             in_signals=params["controls"],
             in_window=params["in_window"],
             out_window=params["out_window"],
-            verbose=params["verbose"],
+            # tangermeme's `verbose` IS the tqdm bar here, so progress is wired
+            # to --no-progress rather than to -v. Keep in step with
+            # benchmark_predictions.py.
+            verbose=args.progress or params["verbose"],
             ignore=IGNORE,
             exclusion_lists=params["blacklist"],
         )
@@ -125,13 +160,17 @@ def main():
             X_ctl = None
         signals.append(torch.abs(y))
 
-        model = Cherimoya.load(model_path, device="cuda" if torch.cuda.is_available() else "cpu")
+        model = Cherimoya.load(
+            model_path,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            compile=compile_supported,
+        )
         preds.append(
             predict(
                 model=model,
                 X=X,
                 args=X_ctl,
-                verbose=params["verbose"],
+                verbose=args.progress or params["verbose"],
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 batch_size=params["batch_size"],
             )
