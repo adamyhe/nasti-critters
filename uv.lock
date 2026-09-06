@@ -42,6 +42,7 @@ conflicts = [[
 overrides = [
     { name = "cykhash", marker = "sys_platform == 'nonexistent'" },
     { name = "macs3", marker = "sys_platform == 'nonexistent'" },
+    { name = "modisco-lite", marker = "sys_platform == 'nonexistent'" },
 ]
 
 [[package]]
@@ -69,7 +70,7 @@ dependencies = [
     { name = "bam2bw" },
     { name = "h5py" },
     { name = "macs3", marker = "sys_platform == 'nonexistent' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
-    { name = "modisco-lite" },
+    { name = "modisco-lite", marker = "sys_platform == 'nonexistent' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "pandas" },
@@ -909,20 +910,20 @@ name = "modisco-lite"
 version = "2.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h5py" },
-    { name = "hdf5plugin" },
-    { name = "igraph" },
-    { name = "leidenalg" },
-    { name = "logomaker" },
-    { name = "memelite" },
-    { name = "numba" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
-    { name = "pandas" },
-    { name = "scikit-learn" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
-    { name = "tqdm" },
+    { name = "h5py", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "hdf5plugin", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "igraph", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "leidenalg", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "logomaker", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "memelite", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "numba", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version < '3.12' and sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (python_full_version < '3.12' and sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (python_full_version >= '3.12' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (python_full_version >= '3.12' and sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (python_full_version < '3.12' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "pandas", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "scikit-learn", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version < '3.12' and sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (python_full_version < '3.12' and sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (python_full_version >= '3.12' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (python_full_version >= '3.12' and sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (python_full_version >= '3.12' and sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (python_full_version < '3.12' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
+    { name = "tqdm", marker = "(sys_platform != 'emscripten' and sys_platform != 'linux' and sys_platform != 'win32') or (sys_platform == 'linux' and extra == 'extra-14-nasti-critters-cherimoya') or (sys_platform == 'linux' and extra != 'extra-14-nasti-critters-sherlock') or (sys_platform == 'emscripten' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock') or (sys_platform == 'win32' and extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/1ab29c4531fa20eaf03e1fcfcf5cd695df00bae8b5d5291daee5810d039d/modisco_lite-2.4.0.tar.gz", hash = "sha256:fe84ba75b6cca31bb8bc9c71de5a42fb59e0d993c7b4c236d91980e9c38cc47b", size = 37948, upload-time = "2025-06-09T19:25:02.948Z" }
 wheels = [
@@ -956,7 +957,7 @@ dependencies = [
     { name = "joblib" },
     { name = "leidenalg" },
     { name = "matplotlib" },
-    { name = "modisco-lite" },
+    { name = "modisco" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "pandas" },
@@ -984,7 +985,7 @@ requires-dist = [
     { name = "joblib" },
     { name = "leidenalg", specifier = "==0.10.2" },
     { name = "matplotlib" },
-    { name = "modisco-lite", specifier = ">=2.0.0" },
+    { name = "modisco", specifier = ">=2.0.0" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "pillow", specifier = "<12.3.0" },

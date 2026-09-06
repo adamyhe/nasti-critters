@@ -25,13 +25,22 @@ requires-python = ">=3.11"
 # Requires-Dist: tangermeme (torch>=2.0) and bpnet-lite (torch>=1.9.0) both look
 # innocuous and are not.
 dependencies = [
-    # tfmodisco-lite. A transitive dep of bpnet-lite too, but declared directly
-    # because src/bpnet/modisco/ invokes its `modisco` CLI -- same reasoning as
-    # pybigtools. It ships the entry point as an old-style data/scripts/modisco
-    # rather than a console_script. Needs NO torch: numpy, scipy, numba,
-    # scikit-learn, leidenalg, igraph, tqdm, pandas, logomaker, h5py,
-    # hdf5plugin, memelite.
-    "modisco-lite>=2.0.0",
+    # tfmodisco. Declared directly because src/bpnet/modisco/ invokes its
+    # `modisco` CLI -- same reasoning as pybigtools. It ships the entry point as
+    # an old-style data/scripts/modisco rather than a console_script. Needs NO
+    # torch: numpy, scipy, numba, scikit-learn, leidenalg, igraph, tqdm, pandas,
+    # logomaker, h5py, hdf5plugin, memelite, jinja2.
+    #
+    # **`modisco`, NOT the deprecated `modisco-lite`.** They are the same project
+    # renamed: `modisco` 2.5.2 installs the same top-level `modiscolite/` package
+    # and the same `modisco` script, so installing both collides on every file.
+    # cherimoya 0.2.0 already requires `modisco>=2.0.0`; bpnet-lite 1.0.0 on PyPI
+    # still requires `modisco-lite>=2.0.0`, which is why the override below
+    # exists. Verified the CLI surface is unchanged across the rename --
+    # subcommands motifs/report/convert/meme, and `-n/--max_seqlets`,
+    # `-l/--n_leiden` (default 2), `-w/--window`, `-m/--meme_db`, `-l/--lite`
+    # all identical -- so src/bpnet/modisco/ needed no change.
+    "modisco>=2.0.0",
     # leidenalg 0.11.0 moved its linux wheels from manylinux_2_17 to
     # manylinux_2_26/2_28, so on Sherlock -- glibc < 2.28, the same boundary
     # that caps torch at 2.6.0, which is manylinux1 where 2.7.0 is 2_28 -- uv
@@ -145,6 +154,14 @@ conflicts = [
 override-dependencies = [
     "macs3 ; sys_platform == 'nonexistent'",
     "cykhash ; sys_platform == 'nonexistent'",
+    # modisco-lite is the DEPRECATED name for the same project. bpnet-lite 1.0.0
+    # still requires it while cherimoya 0.2.0 has moved to `modisco`, so
+    # `--extra torch` would otherwise install both -- and they ship the same
+    # `modiscolite/` package and the same `modisco` script, so the second to
+    # install silently overwrites the first. Dropped by the same unsatisfiable
+    # marker used for macs3; `modisco` in the base set provides everything it
+    # would have.
+    "modisco-lite ; sys_platform == 'nonexistent'",
 ]
 package = false
 

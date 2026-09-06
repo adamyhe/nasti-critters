@@ -709,7 +709,7 @@ def numba_env(args) -> dict[str, int]:
     node is the whole machine rather than the slice SLURM granted. A job holding
     32 CPUs on a 128-core node then spawns 128 threads, oversubscribes its own
     cgroup and can run slower than if it had asked for less -- while degrading
-    whatever else is on the node. tfmodisco-lite is numba-heavy throughout, so
+    whatever else is on the node. tfmodisco is numba-heavy throughout, so
     this matters here more than anywhere else in the repo.
     """
     return {"NUMBA_NUM_THREADS": args.cpus_per_task}
@@ -777,7 +777,7 @@ def run_modisco(family: str) -> None:
             the attribution stage, so the order is
             launch_filter.py -> attribute/launch.py -> here.
 
-            CPU-only: tfmodisco-lite does not use a GPU, so these jobs request
+            CPU-only: tfmodisco does not use a GPU, so these jobs request
             none. They are long, though -- upstream allows two days -- so raise
             --time rather than assuming the fit default fits.
 
@@ -804,8 +804,8 @@ def run_modisco(family: str) -> None:
         default=2,
         help="number of Leiden CLUSTERINGS to run, each with a different random "
              "seed -- restarts, NOT clusters (default: %(default)s, which is "
-             "modisco-lite's own default). procap-atlas passes 50 and calls it "
-             "'leiden clusters'; that description is wrong per modisco-lite's "
+             "modisco's own default). procap-atlas passes 50 and calls it "
+             "'leiden clusters'; that description is wrong per modisco's "
              "own --n_leiden help, and 50 restarts is 25x the library default "
              "in compute",
     )

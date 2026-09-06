@@ -120,7 +120,7 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
 
   | pin | why |
   | --- | --- |
-  | `leidenalg==0.10.2` | 0.11.0 moved from `manylinux_2_17` to `2_26/2_28`; the sdist build fails. Arrives via **modisco-lite**, so a tfmodisco-only install is affected |
+  | `leidenalg==0.10.2` | 0.11.0 moved from `manylinux_2_17` to `2_26/2_28`; the sdist build fails. Arrives via **modisco**, so a tfmodisco-only install is affected |
   | `igraph<1.0` | leidenalg's own dependency, same jump — 1.0.0 is 2_28-only, 0.11.9 is the last 2_17 |
   | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
   | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
@@ -141,10 +141,10 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   through Apptainer. It does not work: **conda's torch build does not reliably use CUDA.** The version
   list is not the problem, so re-checking it proves nothing; this was established by experience on the
   cluster.
-- **`modisco-lite` cannot move to `environment.yml`, though by this repo's own rule it belongs there.**
+- **`modisco` cannot move to `environment.yml`, though by this repo's own rule it belongs there.**
   Nothing imports `modiscolite`; `src/bpnet/modisco/` only ever shells out to the `modisco` CLI, exactly
   like `umi_tools` and `pints_caller`. But it is PyPI-only — checked 2026-09-05, HTTP 404 for
-  `modisco-lite`, `modiscolite`, `tfmodisco-lite`, `tfmodisco` and `modisco` on **both** bioconda and
+  `modisco`, `modisco-lite`, `modiscolite`, `tfmodisco-lite` and `tfmodisco` on **both** bioconda and
   conda-forge, and its `memelite` dependency is 404 there too. Same situation as `tangermeme`. Do not
   re-litigate this without re-checking those names.
 - Two package-name traps, both already handled — do not "fix" them back: the peak caller is **`pyPINTS`**
@@ -541,6 +541,25 @@ to see spread, not significance.
 Cherimoya is not deployment-ready, so treat anything this produces as a development comparison rather
 than a result.
 
+## TF-MoDISco: the package is `modisco`, NOT `modisco-lite`
+
+`modisco-lite` is the **deprecated name for the same project**, and both are on PyPI — `modisco` 2.5.2
+against `modisco-lite` 2.4.0. They are not two packages: `modisco` installs the same top-level
+`modiscolite/` package and the same `modisco` script, so anything installing both gets whichever landed
+second, silently.
+
+That is a live risk here rather than a hypothetical, because the two upstreams disagree:
+**cherimoya 0.2.0 requires `modisco>=2.0.0`, bpnet-lite 1.0.0 on PyPI still requires
+`modisco-lite>=2.0.0`** — so `uv sync --extra torch` would pull both. `[tool.uv] override-dependencies`
+drops `modisco-lite` behind the same unsatisfiable marker used for `macs3`; verified with
+`uv export`, where it appears as `modisco-lite==2.4.0 ; sys_platform == 'nonexistent'` and never
+resolves, while `modisco==2.5.2` installs.
+
+**The CLI surface is identical across the rename**, checked rather than assumed: subcommands
+`motifs`/`report`/`convert`/`meme`, and `-n/--max_seqlets`, `-l/--n_leiden` (still defaulting to 2),
+`-w/--window`, `-m/--meme_db`, `-l/--lite` all unchanged. So `src/bpnet/modisco/` needed no edit. The
+only dependency difference is that `modisco` adds `jinja2`.
+
 ## TF-MoDISco
 
 `src/bpnet/modisco/` follows procap-atlas's scripting: `modisco motifs` then `modisco report`, one job
@@ -586,7 +605,7 @@ arguments with no fallback, so the next caller cannot inherit the wrong set by o
 **`NUMBA_NUM_THREADS` is pinned to `--cpus-per-task` on every modisco job.** numba otherwise sets it
 from every core it can SEE, which on a shared node is the whole machine and not the slice SLURM granted
 — a job holding 32 CPUs on a 128-core node spawns 128 threads, oversubscribes its own cgroup and can run
-slower than if it had asked for less, while degrading everything else on the node. tfmodisco-lite is
+slower than if it had asked for less, while degrading everything else on the node. tfmodisco is
 numba-heavy throughout, which is why this is set here and nowhere else.
 
 It rides on the command as a `VAR=value cmd` prefix rather than an `export` line in the sbatch body, so
@@ -612,7 +631,7 @@ it:
 the report is a convenience layer and the database has no effect on which motifs modisco discovers.
 `--motif-db` overrides with a single file for every experiment, which is rarely right here.
 
-`modisco-lite` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
+`modisco` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
 transitively, because these scripts invoke its `modisco` CLI — same reasoning as `pybigtools`. Note it
 ships the entry point as an old-style `data/scripts/modisco`, not a `console_script`.
 
