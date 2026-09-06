@@ -18,7 +18,10 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
+    ATTR_DIR,
     Experiment,
+    attribution_path,
+    filtered_loci_path,
     IGNORE,
     load_model,
     load_params,
@@ -88,6 +91,17 @@ def main():
         choices=["counts", "profile"],
         default="profile",
     )
+    parser.add_argument(
+        "--loci", type=str, default=None, metavar="BED",
+        help="attribute over this BED. DEFAULT is the experiment's non-ACGT "
+             "filtered set from launch_filter.py, which is mandatory rather "
+             "than a convenience: deep_lift_shap refuses a sequence containing "
+             "an unknown base, and extract_loci(ignore=...) blanks such a "
+             "position rather than dropping the locus, so attributing the raw "
+             "peaks fails wherever any window holds an N. Override only for a "
+             "genuinely different locus set -- its filename stem then goes into "
+             "the output name so it cannot overwrite the default run",
+    )
     parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument(
         "--reference-mode",
@@ -107,7 +121,6 @@ def main():
              "that reference is deterministic and repeats would be identical",
     )
     parser.add_argument("--output-fname", type=str, default=None)
-    parser.add_argument("--save-ohe", type=str, default=None)
     args = parser.parse_args()
 
     try:
@@ -120,9 +133,25 @@ def main():
             print(f"Error: missing {m}", file=sys.stderr)
         sys.exit(1)
 
+    # The filtered set is the DEFAULT, not an opt-in: see --loci's help. Fail
+    # here with the command that produces it rather than letting extract_loci
+    # succeed and deep_lift_shap raise something that names neither.
+    default_loci = filtered_loci_path(exp.id)
+    loci_path = Path(args.loci).resolve() if args.loci else default_loci
+    if not loci_path.exists():
+        print(
+            f"Error: loci not found: {loci_path}\n"
+            + ("" if args.loci else
+               f"  The non-ACGT filtered set is required before attribution. "
+               f"Build it with:\n"
+               f"    python src/bpnet/attribute/launch_filter.py -e {exp.id}"),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     params = load_params("bpnet", {})
     params.update({
-        "loci": str(exp.peaks),
+        "loci": str(loci_path),
         "sequences": str(exp.sequences),
         "signals": [str(x) for x in exp.signals],
         "controls": [str(x) for x in exp.controls] if exp.controls else None,
@@ -139,19 +168,37 @@ def main():
 
     params["attribute_type"] = args.attribute_type
     params["model_fnames"] = [str(f["model"]) for f in folds]
-    chroms = [c for f in folds for c in f["test_chroms"]]
+    # Every chromosome that appears in the fold assignment, i.e. no restriction
+    # in practice -- attribution deliberately covers ALL loci and averages each
+    # one over every fold's model, matching procap-atlas. It is an ensemble
+    # attribution, NOT a held-out estimate, which is why it does not mirror the
+    # per-fold structure benchmark_predictions.py uses.
+    #
+    # `test_chroms` is None under peak-level splits (S. pombe, S. moellendorffii)
+    # because filtering happens on the peak table instead, so flattening it
+    # directly raised `TypeError: 'NoneType' object is not iterable` for those
+    # two species. None here means no chromosome filter, which is the right
+    # answer: their peaks are all in the fold table already.
+    chroms = [c for f in folds for c in (f["test_chroms"] or [])] or None
     if args.n_shuffles is not None:
         params["n_shuffles"] = args.n_shuffles
     # The reference mode is in the default filename because it changes the
     # numbers: without it, a frequency-mode run silently overwrites a
     # dinucleotide-mode one and nothing on disk records which produced it.
     # Upstream's path omits it; this is a deliberate small divergence.
-    params["output_fname"] = str(
-        REPO_ROOT / (args.output_fname
-                     or f"attr/{exp.id}_attr_{args.attribute_type}"
+    if args.output_fname:
+        params["output_fname"] = str(REPO_ROOT / args.output_fname)
+    elif loci_path != default_loci:
+        # A custom locus set gets its own name for the same reason the reference
+        # mode does: different loci, different numbers, and nothing else on disk
+        # would record which set produced the file.
+        stem = loci_path.name.split(".")[0]
+        params["output_fname"] = str(
+            ATTR_DIR / f"{exp.id}_{stem}_attr_{args.attribute_type}"
                         f"_{args.reference_mode}.npz")
-    )
-    params["save_ohe"] = str(REPO_ROOT / args.save_ohe) if args.save_ohe else None
+    else:
+        params["output_fname"] = str(
+            attribution_path(exp.id, args.attribute_type, args.reference_mode))
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
@@ -179,9 +226,30 @@ def main():
         ignore=IGNORE,
     ).to(torch.float32)
 
-    if params["save_ohe"] is not None:
-        Path(params["save_ohe"]).parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(params["save_ohe"], X.to(torch.uint8).numpy())
+    # deep_lift_shap REFUSES a sequence with an unknown base -- `ValueError: X
+    # must be one-hot encoded. and cannot have unknown characters.` -- and
+    # `ignore=IGNORE` above is precisely what creates one: it keeps the locus and
+    # zeroes that column rather than dropping it (verified against tangermeme
+    # 1.4.1). Both reference modes fail; the frequency reference does not rescue
+    # it, since the check is in deep_lift_shap itself, not in the shuffle.
+    #
+    # Caught here because the library's message says nothing about which loci or
+    # what to do, and the remedy is a whole separate script.
+    blank = (X.sum(dim=1) == 0).any(dim=-1)
+    if blank.any():
+        n = int(blank.sum())
+        first = [int(i) for i in blank.nonzero()[:5, 0]]
+        print(
+            f"Error: {n:,} of {len(X):,} loci contain a non-ACGT base "
+            f"(rows {first}{'...' if n > 5 else ''}). deep_lift_shap cannot "
+            f"attribute these.\n"
+            f"  Filter them out first, then attribute the filtered set:\n"
+            f"    python src/bpnet/attribute/launch_filter.py -e {exp.id}\n"
+            f"    python src/bpnet/attribute/attribute.py -e {exp.id} "
+            f"--loci {filtered_loci_path(exp.id)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     attributions = []
     for model_path in params["model_fnames"]:

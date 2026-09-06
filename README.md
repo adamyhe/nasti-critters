@@ -768,7 +768,29 @@ python src/cherimoya/fit/launch.py --dry-run
 python src/cherimoya/fit/launch.py --print-commands | bash
 ```
 
-Both are thin wrappers over `src/launcher.py`. The selection logic — which
+Attribution has one too, with a different job unit — `attribute.py` averages
+over every fold internally, so a job is (experiment × attribute type):
+
+```bash
+python src/bpnet/attribute/launch.py --dry-run
+python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
+```
+
+A fourth covers the non-ACGT locus filter, which attribution **requires** and
+therefore runs first — the attribution launcher skips any experiment it has not
+covered:
+`deep_lift_shap` rejects any window containing an unknown base, in both
+reference modes, and `extract_loci(ignore=...)` blanks such positions rather
+than dropping the locus. It also writes the one-hot array TF-MoDISco needs
+alongside the attributions. It requests **no GPU** —
+that step reads a FASTA and one-hot encodes, so a GPU reservation would queue it
+behind training and hold an idle card:
+
+```bash
+python src/bpnet/attribute/launch_filter.py --dry-run
+```
+
+All four are thin wrappers over `src/launcher.py`. The selection logic — which
 (experiment, fold) pairs exist, which finished, which lack inputs — is
 family-agnostic because `src/experiments.py` is keyed by family, so there is one
 implementation rather than two that can drift. The only family difference is

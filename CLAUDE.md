@@ -38,7 +38,7 @@ Two model families are trained on the same data:
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
 did not exist yet. Both are ignored now (along with `logs/`, `predictions/`, `performance_metrics/`,
-`attr/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
+`attributions/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
 Every script resolves config/data paths relative to `REPO_ROOT`, computed from `__file__`, so scripts can be
 invoked from anywhere — but the launcher shell scripts assume the repo root as CWD.
 
@@ -191,7 +191,20 @@ python src/cherimoya/fit/launch.py --print-commands | bash
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
 python src/bpnet/benchmark/benchmark_predictions.py
-python src/bpnet/attribute/attribute.py --attribute-type profile
+python src/bpnet/attribute/attribute.py -e D.melanogaster-S2_PROcap --attribute-type profile
+
+# Submit all attribution jobs; job unit is (experiment x type), NOT x fold
+python src/bpnet/attribute/launch.py --dry-run
+python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
+
+# Optional, and STANDALONE -- nothing calls it. Drops loci whose window holds a
+# non-ACGT base, and writes the one-hot for what survives. Reaches attribution
+# only via --loci; without that, attribute.py reads exp.peaks and ignores both.
+# REQUIRED before attribution: deep_lift_shap rejects any window containing an N,
+# and extract_loci(ignore=...) blanks rather than drops those. Also writes the
+# one-hot array TF-MoDISco needs alongside the attributions.
+python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
+python src/bpnet/attribute/launch.py --dry-run    # requires the filtered set
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -257,6 +270,128 @@ Deleting the reconstruction removed that too.
 **Cherimoya does not go through `load_model()`.** It saves a dict payload and reconstructs via
 `cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
 affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
+
+## Peak-level splits were ignored by every downstream script
+
+S. pombe and S. moellendorffii assign folds per PEAK, not per chromosome, so `fold_split()` returns
+`test_chroms=None` for them and the filtering has to happen on the peak table. `fit_bpnet.py` and
+`fit_cherimoya.py` do that through `exp.fold_loci()`. **Nothing downstream did**, and the two failure
+modes were very different:
+
+- **`attribute.py` crashed.** `chroms = [c for f in folds for c in f["test_chroms"]]` raised
+  `TypeError: 'NoneType' object is not iterable`. Loud, and the reported symptom.
+- **Both benchmark scripts silently scored every fold's model on ALL loci** — its own training peaks
+  included — because `chroms=None` means "no chromosome filter" rather than "no loci". Metrics inflated,
+  no error. This is the worse one, and it was only found by chasing the crash.
+
+Fixes, and note they are deliberately different because the two scripts want different things:
+
+- `fold_loci()` gained **`test_loci`**. It already returned `train_loci`/`valid_loci` but only a
+  `n_test` COUNT, so benchmarking had nothing to filter with. Under chromosome-level splits it returns
+  every peak and `test_chroms` does the work, so that path is unchanged; under peak-level it returns the
+  fold's held-out peaks. Verified on a fixture: 4 of 20 loci for fold 0 of 5, zero train/test overlap,
+  and all 20 returned under chromosome-level.
+- Both benchmarks now extract `exp.fold_loci(loci, fold)["test_loci"]`.
+- `attribute.py` takes `[... for c in (f["test_chroms"] or [])] or None`, i.e. **no chromosome filter**
+  for peak-level species. That is correct rather than a workaround: their peaks are all in the fold
+  table, and attribution does not hold out anyway — see below.
+
+**Attribution deliberately does NOT hold out, and that is inherited, not accidental.** It extracts every
+locus once and attributes it with EVERY fold's model, then averages. Upstream's `attribute_bpnet.py`
+does the same, with `chroms=all_chrom`. So each locus is attributed by four models that saw it in
+training plus the one that did not: it is an **ensemble attribution, not a held-out estimate**, and
+reading it as evidence of generalisation would be wrong. `benchmark_predictions.py` is the per-fold
+held-out path and is where generalisation numbers come from.
+
+## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
+
+An earlier version of this section called it optional and said a blank column is usually tolerable.
+**Both were wrong.**
+
+**`deep_lift_shap` refuses a sequence containing an unknown base.** Verified directly against tangermeme
+1.4.1 on a two-sequence fixture: a single all-zero column gives
+`ValueError: X must be one-hot encoded. and cannot have unknown characters.` — and it fails in **BOTH**
+reference modes, so the frequency default does not rescue it. The check is inside `deep_lift_shap`
+itself, not in the dinucleotide shuffle.
+
+**And `extract_loci(ignore=IGNORE)` is exactly what creates that column.** `ignore` KEEPS a locus
+containing an N and zeroes the column rather than dropping the locus (verified: one N gives 1 row with
+exactly 1 blank column). So the setting every `extract_loci` call in this repo passes is what makes
+attribution fail, and `filter_nonACGT_regions.py` — which DROPS such loci — is the remedy. That is the
+whole reason it exists; the `snp_bed` variable name is a leftover from where it was first used.
+
+**A PINTS peak file is RAGGED, and the filter script has to read it line by line because of that.**
+`combine_peaks` concatenates the unidirectional and bidirectional calls, which carry different numbers
+of columns, so `pd.read_csv(peaks, sep="\t", header=None)` dies with
+`Expected 6 fields in line 2, saw 9`. **`load_bed()` is unaffected** — its `usecols=[0, 1, 2]` with three
+matching `names` reads a ragged file fine, which is why training, benchmarking and attribution never hit
+this. Adding `usecols` to the filter script would fix the read and be wrong: its output is written back
+out as a BED, and upstream deliberately keeps PINTS' strand/confidence/class/summit columns rather than
+cutting to BED3 — the summit column is what makes `extract_loci(summits=True)` possible. So it keeps the
+raw line, which preserves every column whatever their number, and returns `(kept_lines, coords)`.
+It also has to handle **bgzipped** input, since that is what `combine_peaks` writes.
+
+`attribute.py` now catches this before the library does, because the library's message names neither the
+loci nor the remedy: it counts the offending rows, prints the first few, and prints the two commands
+that fix it.
+
+**The filtered set is the DEFAULT locus set, not an opt-in.** It was briefly a `--use-filtered` flag on
+the launcher, which had the default backwards: if `deep_lift_shap` cannot accept an N and
+`extract_loci(ignore=...)` always produces one, then attributing raw peaks is the broken path and must
+not be what happens when you pass nothing. So `attribute.py --loci` now defaults to
+`filtered_loci_path(exp.id)` and exits 1 with the `launch_filter.py` command if it is absent, and the
+launcher skips an unfiltered experiment rather than emitting a job that would fail. `--loci` survives
+only for a genuinely different locus set, and only then does its stem enter the output filename — the
+default run keeps the plain `attribution_path()` name.
+
+**The `--save-ohe` array is not a convenience either — TF-MoDISco requires it.** modisco takes
+one-hot sequences alongside contribution scores, so the OHE is a second required input rather than a
+debugging aid. That is the strongest argument for it living in the filter step: it must describe exactly
+the loci that were attributed, and the filter is what decides which those are.
+
+**`attribute.py` saves HYPOTHETICAL attributions**, which is also what modisco wants
+(`hypothetical_contribs`): `hypothetical=True` is passed unconditionally, and the stored array is the
+mean over folds of those. Observed/actual contributions are `hypothetical * one_hot`, derivable from the
+two files, so the pair is complete for modisco and nothing else needs saving.
+
+**Passing `--loci` changes the default output name** (`attributions/{exp}_{stem}_attr_{type}_{mode}.npz`), for
+the same reason the reference mode is in there: different loci give different numbers, and nothing else
+on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
+check follows.
+
+## Launchers: three of them, one emission path
+
+`src/launcher.py` holds the selection rule and the emission machinery; the three
+`launch.py` files are thin wrappers. All three take the same emission modes —
+`--print-commands` (bare commands on stdout, skips and summary on stderr), `--dry-run` (full sbatch
+scripts) and the default (submit) — and the same SLURM flags, because `_add_common_args` and `_emit` are
+shared. Do not add a fourth copy of that block.
+
+| launcher | job unit | jobs | GPU | skips |
+| --- | --- | --- | --- | --- |
+| `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | yes | `.final.torch` exists, missing inputs, no fold assignment |
+| `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
+| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
+| `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
+
+Run order is filter -> attribute: `launch_filter.py`, then `launch.py`. The second **skips any experiment the first has not covered**, because attribution of unfiltered peaks cannot work.
+
+**Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
+on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one
+job covers all folds of one experiment. It follows that a partly trained experiment is not partly
+attributable — `attribute.py` exits 1 — so the launcher skips it and reports `3/5 folds trained` rather
+than just refusing.
+
+**`launch_filter.py` requests NO GPU, which is why it is a fourth launcher rather than a flag on the
+third.** `filter_nonACGT_regions.py` reads a FASTA and one-hot encodes; sending that to the GPU
+partition would queue it behind training and then hold an idle card. `_emit(..., gpus=0)` omits the
+`#SBATCH --gpus` directive and the `nvidia-smi` line; every other launcher passes the default 1.
+It also gates on `missing_paths(kinds=("peaks", "sequences"))` rather than on `exp.missing`, which would
+additionally demand negatives and trained models that this step has nothing to do with.
+
+**The already-done check must predict the output path**, and the reference mode is part of that path, so
+`experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two
+copies of that format string is exactly how a launcher starts re-running finished work.
 
 ## Where benchmark output goes
 
@@ -350,7 +485,7 @@ Two drivers, same steps:
   Run-level intermediates are keyed by *run*, not experiment, so a run shared by two experiments is
   mapped once. Scope is fetch -> negatives; `resolve_runs.py`/`build_experiment_config.py` stay outside
   (metadata, not DAG work) and training stays on `launch.py` — one per family, both thin wrappers over
-  `src/launcher.py`.
+  `src/launcher.py`, which also drives `src/bpnet/attribute/launch.py`.
 - **`src/data_preprocessing/run_procap_pipeline.py`** — single-experiment path, serial, caches on output
   existence. Useful for `-e <one>` debugging and `--fetch-genomes`/`--index-only`.
 
@@ -689,15 +824,32 @@ Already synced:
   further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
   at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
   soft, and `n=0` rejected.
-  **The default output path now carries the mode** (`attr/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  **The default output path now carries the mode** (`attributions/{exp}_attr_{type}_{mode}.npz`), a deliberate
   divergence from upstream's mode-less name: the two references give different numbers, and without it
   a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
 
-Also not copied from their attribution tree: `--head orientation` (attributes the profile orientation
-index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible ReLU form of
-the binary maximum) and `src/bpnet/attribute/launch.py`. Both are real capability gaps rather than
-rejected ideas — the orientation head is the same metric as the `orientation_index_pearson` our
-benchmarks do not report.
+Also not copied from their attribution tree: `--head orientation`, which attributes the profile
+orientation index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible
+ReLU form of the binary maximum. Same metric as the `orientation_index_pearson` our benchmarks do not
+report, so those two are one piece of work. (`attribute/launch.py` was the other gap here and is now
+closed.)
+
+**Cherimoya attribution is BLOCKED, not merely absent — do not start it.** There is no
+`src/cherimoya/attribute/` and it should stay that way for now: it needs DeepLIFT **rescale rules that
+are still in development and are not in tangermeme yet**. This is not a wrapper-writing exercise, and
+the missing piece is upstream of this repo entirely.
+
+What the code shows, for whoever picks it up when the rules land. The ordinary nonlinearities are
+already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax`, and those are the only
+activations `cherimoya/cheri.py` and `cherimoya.py` use — so the gap is at the WRAPPER level, exactly
+where bpnet-lite needs `{_ProfileLogitScaling: _nonlinear}`. `cherimoya/wrappers.py` defines
+`ControlWrapper`, `_ProfileLogitScaling`, `ProfileWrapper`, `LogCountWrapper` and
+**`ExpectedCountsWrapper`**. The first four mirror bpnet-lite's, but note cherimoya's
+`_ProfileLogitScaling` is its OWN class, so a rule keyed on bpnetlite's would not match it.
+`ExpectedCountsWrapper` is the one with no counterpart: it composes `torch.expm1` with a per-group
+`softmax` over `cat`/`split` tensors, and `expm1` is absent from tangermeme's rule table. Treat that as
+the visible candidate rather than the confirmed blocker — the authority here is that the rules are in
+development, not this inspection.
 
 Deliberately not copied: `--background NAME:RATIO` multi-source negatives (its `ccre` source is
 GRCh38-only), `--min-reads` (needs their `config/n_reads.txt`), and their hitcall/modisco/predict/

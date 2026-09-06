@@ -191,7 +191,7 @@ models/
 logs/
 predictions/
 performance_metrics/
-attr/
+attributions/
 data/annotation/
 
 # QC output, including the stats tables. These are RUN ARTIFACTS and are

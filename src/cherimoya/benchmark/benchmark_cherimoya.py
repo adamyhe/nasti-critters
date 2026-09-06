@@ -137,8 +137,17 @@ def main():
     preds = []
     for f in folds:
         fold, model_path, test_chroms = f["fold"], f["model"], f["test_chroms"]
+        # Peak-level species (S. pombe, S. moellendorffii) have test_chroms
+        # None, because their folds are assigned per PEAK rather than per
+        # chromosome. Passing that straight to extract_loci means "no
+        # chromosome filter", so every fold's model was being scored on ALL
+        # loci -- its own training peaks included -- silently, and with
+        # inflated metrics. fold_loci() applies the peak-level filter and is a
+        # no-op under chromosome-level splits, where it returns every peak and
+        # test_chroms does the work.
+        test_loci = exp.fold_loci(loci, fold)["test_loci"]
         data = extract_loci(
-            loci=loci,
+            loci=test_loci,
             sequences=params["sequences"],
             chroms=test_chroms,
             signals=params["signals"],
