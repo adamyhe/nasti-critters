@@ -29,20 +29,11 @@ dependencies = [
     "matplotlib",
     "scipy",
     "tangermeme>=1.0.0",
-    # Pinned by commit via [tool.uv.sources] below, not by version: the version this project needs (0.2.1) was never
-    # released to PyPI. Note: 0.2.1 differs from the published 0.2.0 only by the
-    # addition of a __version__ attribute in __init__.py -- cheri.py,
-    # cherimoya.py, io.py, losses.py, performance.py and wrappers.py are
-    # byte-identical between the two (verified by installing both). The pin is
-    # for exact agreement with the container image and immunity to tag movement,
-    # NOT because 0.2.0 trains differently.
-    "cherimoya",
-    # torch.optim.Muon landed in torch 2.10. fit_cherimoya.py falls back to
-    # `from muon import Muon`, but PyPI `muon` is a multi-omics framework, not
-    # the optimizer -- installing it would import the wrong package. Pinning
-    # torch >= 2.10 keeps the fallback from ever firing, so `muon` is
-    # deliberately NOT a dependency here.
-    "torch>=2.10",
+
+    # NOTE: torch and cherimoya are NOT here. They are mutually exclusive
+    # extras -- see [project.optional-dependencies] below and the conflicts
+    # declaration in [tool.uv]. Putting either in the base set forces one torch
+    # version across every environment, which is exactly what cannot be done.
 
     # NOTE: the ENCODE pipeline's Python-side tools are NOT here. pyPINTS
     # (pints_caller) and umi-tools are both CLI tools that this repo only ever
@@ -68,7 +59,6 @@ dependencies = [
     "tqdm",
 ]
 
-[project.optional-dependencies]
 # NO encode-exact extra. ENCODE converts BAM -> bigWig and merges replicates
 # with biodatatools 0.0.7, but the source document does not record the
 # subcommand, so that path was never implemented -- nothing imports
@@ -76,7 +66,53 @@ dependencies = [
 # unused package is a promise the repo cannot keep, so it is gone; the pin is
 # kept here as provenance for whoever implements it.
 
+[project.optional-dependencies]
+# TWO TORCH WORLDS, and they cannot be reconciled in one resolution.
+#
+# Sherlock's glibc tier has no manylinux wheel above torch 2.6.0, so anything
+# newer falls back to an sdist build that fails there. Cherimoya needs
+# `torch.optim.Muon`, which landed in **torch 2.10**. A single universal
+# resolution therefore cannot serve both, which is why torch is not a base
+# dependency and each world is an extra, declared mutually exclusive under
+# [tool.uv] so uv resolves them independently. Same arrangement as
+# procap-atlas, for the same cluster.
+#
+#     uv sync --extra sherlock     # BPNet, benchmarking, attribution, modisco
+#     uv sync --extra cherimoya    # everything, on modern-glibc hardware
+#
+# What `--extra sherlock` COSTS: no cherimoya, and no torch.optim.Muon, so
+# `fit_cherimoya.py` cannot run natively there -- it raises a pointed error
+# rather than falling back to PyPI `muon`, which is a multi-omics framework and
+# not the optimizer. Use the Apptainer image for cherimoya on Sherlock; images
+# are maintained at https://github.com/adamyhe/sherlock. Everything else in this
+# repo -- BPNet training, both benchmarks, attribution, tfmodisco -- runs fine
+# on 2.6.0.
+sherlock = [
+    "torch==2.6.0 ; sys_platform == 'linux'",
+    "torch ; sys_platform != 'linux'",
+]
+# Pinned by commit via [tool.uv.sources] below, not by version: 0.2.1 was never
+# released to PyPI. It differs from the published 0.2.0 only by a __version__
+# attribute in __init__.py -- cheri.py, cherimoya.py, io.py, losses.py,
+# performance.py and wrappers.py are byte-identical (verified by installing
+# both). The pin buys exact agreement with the container image and immunity to
+# tag movement, NOT different training results.
+cherimoya = [
+    "cherimoya",
+    "torch>=2.10",
+]
+
 [tool.uv]
+# The sherlock pin (torch==2.6.0) and the cherimoya extra (torch>=2.10) are
+# never installed together, so let uv resolve them independently rather than
+# failing to find one universal torch that satisfies both.
+conflicts = [
+    [
+        { extra = "sherlock" },
+        { extra = "cherimoya" },
+    ],
+]
+
 
 # macs3 is a transitive dependency of both bpnet-lite and cherimoya, and NOTHING
 # in this repo imports it. It ships no wheels at any version, so uv builds it

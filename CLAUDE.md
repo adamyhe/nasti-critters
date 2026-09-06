@@ -90,7 +90,28 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   and install with `conda-lock install --name nasti-critters conda-lock.yml`. `requirements.txt` is gone. Activate the venv last so its interpreter wins:
   `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync && source .venv/bin/activate`.
 - Version pins trace the ENCODE spec: `fastp=0.23.4`, `star=2.7.11a`, `samtools=1.18` (conda);
-  `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv). `torch>=2.10` is required for `torch.optim.Muon`.
+  `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv).
+- **TORCH IS NOT A BASE DEPENDENCY — it is two mutually exclusive extras, and Sherlock needs the pinned
+  one.** Sherlock's glibc tier has no manylinux wheel above **torch 2.6.0**, so anything newer falls back
+  to an sdist build that fails there; cherimoya needs `torch.optim.Muon`, which landed in **2.10**. One
+  universal resolution cannot serve both, so:
+
+      uv sync --extra sherlock     # torch==2.6.0 on linux
+      uv sync --extra cherimoya    # torch>=2.10 + cherimoya, modern-glibc only
+
+  `[tool.uv] conflicts` declares the pair exclusive so uv resolves them independently; the lock carries
+  both (2.6.0 and 2.13.0). Copied from procap-atlas, which is a reasonable authority here because **it
+  runs entirely on Sherlock** — the 2.6.0 pin is validated on the same cluster rather than inferred.
+- **`--extra sherlock` is also what modisco jobs need, and a torch-free extra is NOT possible.**
+  tfmodisco-lite needs no torch of its own, so a `modisco` extra looks tempting — but `bpnet-lite` is a
+  base dependency and requires `torch>=1.9.0`, so torch arrives whatever extras are passed. The extra's
+  job is to make the torch that arrives one that has wheels, not to avoid it.
+- **`modisco-lite` cannot move to `environment.yml`, though by this repo's own rule it belongs there.**
+  Nothing imports `modiscolite`; `src/bpnet/modisco/` only ever shells out to the `modisco` CLI, exactly
+  like `umi_tools` and `pints_caller`. But it is PyPI-only — checked 2026-09-05, HTTP 404 for
+  `modisco-lite`, `modiscolite`, `tfmodisco-lite`, `tfmodisco` and `modisco` on **both** bioconda and
+  conda-forge, and its `memelite` dependency is 404 there too. Same situation as `tangermeme`. Do not
+  re-litigate this without re-checking those names.
 - Two package-name traps, both already handled — do not "fix" them back: the peak caller is **`pyPINTS`**
   (PyPI `pints` is unrelated time-series inference), and PyPI **`muon` is a multi-omics framework**, not the
   optimizer. `fit_cherimoya.py` imports `torch.optim.Muon` and raises a pointed error rather than falling
