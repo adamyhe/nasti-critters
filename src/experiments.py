@@ -51,6 +51,8 @@ CHROM_SPLITS_PATH = CONFIG / "chrom_splits.yaml"
 SPLITS_DIR = CONFIG / "splits"
 MODELS_DIR = REPO_ROOT / "models"
 ATTR_DIR = REPO_ROOT / "attributions"
+MODISCO_DIR = REPO_ROOT / "modisco"
+MOTIF_DB_DIR = REPO_ROOT / "data" / "motifs"
 
 # Bases that extract_loci should treat as unknown. Passed on every call in this
 # repo; kept here so the list cannot drift between scripts.
@@ -98,17 +100,27 @@ def model_name(family: str, experiment: str, fold: int, suffix: str = "") -> str
 
 def filtered_loci_path(experiment: str) -> Path:
     """BED of loci whose whole window is ACGT, from filter_nonACGT_regions.py."""
+    # NOT under a family subdirectory: the filter depends only on loci and
+    # sequence, so every family attributing this experiment shares it.
     return ATTR_DIR / f"{experiment}_filtered.bed"
 
 
 def ohe_path(experiment: str) -> Path:
     """One-hot encoding of `filtered_loci_path`, written by the same step."""
+    # Family-agnostic, like filtered_loci_path -- see attribution_path().
     return ATTR_DIR / f"{experiment}_ohe.npz"
 
 
-def attribution_path(experiment: str, attribute_type: str,
+def attribution_path(family: str, experiment: str, attribute_type: str,
                      reference_mode: str) -> Path:
-    """Default output for an attribution run.
+    """Default output for an attribution run, under `attributions/{family}/`.
+
+    **Family-keyed where `filtered_loci_path` and `ohe_path` are not**, and the
+    split is the point: attributions are produced BY a model, so bpnet's and
+    cherimoya's are different files, while the filtered BED and its one-hot
+    encoding depend only on (loci, sequences, in_window) and are shared by any
+    family that attributes the same experiment. Putting them in one directory
+    would imply they need producing twice.
 
     The reference mode is in the NAME because it changes the numbers: a
     frequency-mode run would otherwise silently overwrite a dinucleotide-mode
@@ -117,8 +129,58 @@ def attribution_path(experiment: str, attribute_type: str,
     know whether a job is already done -- two copies of this format string is
     exactly how a launcher starts re-running finished work.
     """
-    return (ATTR_DIR /
+    return (ATTR_DIR / family /
             f"{experiment}_attr_{attribute_type}_{reference_mode}.npz")
+
+
+def modisco_h5_path(family: str, experiment: str, attribute_type: str,
+                    reference_mode: str) -> Path:
+    """`modisco motifs` output, under `modisco/{family}/`.
+
+    Family-keyed for the same reason `attribution_path` is: motifs are
+    discovered FROM a model's attributions, so two families running on the same
+    experiment produce different files. Named after the attributions it consumed
+    -- both the head and the reference mode -- so the .h5 says what it came from
+    without opening it.
+    """
+    return (MODISCO_DIR / family /
+            f"{experiment}_{attribute_type}_{reference_mode}.modisco.h5")
+
+
+def modisco_report_dir(family: str, experiment: str, attribute_type: str,
+                       reference_mode: str) -> Path:
+    """`modisco report` output directory, beside the .h5 it summarises."""
+    return (MODISCO_DIR / family /
+            f"{experiment}_{attribute_type}_{reference_mode}.modisco")
+
+
+def motif_db_path(species: str) -> Path:
+    """MEME database for `modisco report`, chosen by the species' taxon.
+
+    procap-atlas hardcodes one path -- JASPAR CORE **vertebrates** -- because it
+    is human-only. This repo spans four taxa, and reporting a yeast or plant
+    motif against a vertebrate database produces matches that mean nothing. So
+    the collection is per species in `config/genomes.yaml`:
+
+        vertebrates  M. musculus, C. griseus
+        insects      D. melanogaster
+        nematodes    C. elegans
+        fungi        S. cerevisiae, S. pombe
+        plants       A. thaliana, C. reinhardtii, P. patens, S. moellendorffii,
+                     G. arboreum, G. hirsutum
+
+    The files are NOT fetched by anything -- download them from JASPAR into
+    `data/motifs/` yourself. They are a reporting convenience with no effect on
+    the motifs modisco discovers, which is why this is not a pipeline step.
+    """
+    genomes = _load(CONFIG / "genomes.yaml")["species"]
+    if species not in genomes:
+        raise KeyError(f"{species} not in config/genomes.yaml")
+    collection = genomes[species].get("jaspar_collection")
+    if not collection:
+        raise KeyError(f"no jaspar_collection for {species} in config/genomes.yaml")
+    return (MOTIF_DB_DIR /
+            f"JASPAR2026_CORE_{collection}_non-redundant_pfms_meme.txt")
 
 
 def load_model(path, *, map_location: str = "cpu"):

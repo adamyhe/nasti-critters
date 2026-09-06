@@ -188,6 +188,9 @@ python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0
 python src/cherimoya/fit/launch.py --dry-run
 python src/cherimoya/fit/launch.py --print-commands | bash
 
+# Compare the two model families on shared benchmark metrics
+python src/analysis/compare_bpnet_cherimoya.py
+
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
 python src/bpnet/benchmark/benchmark_predictions.py
@@ -205,6 +208,10 @@ python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type c
 # one-hot array TF-MoDISco needs alongside the attributions.
 python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
 python src/bpnet/attribute/launch.py --dry-run    # requires the filtered set
+
+# TF-MoDISco: motifs then report. Both CPU-only; motifs is long (allow days).
+python src/bpnet/modisco/launch.py --dry-run
+python src/bpnet/modisco/launch_report.py --dry-run
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -303,6 +310,31 @@ training plus the one that did not: it is an **ensemble attribution, not a held-
 reading it as evidence of generalisation would be wrong. `benchmark_predictions.py` is the per-fold
 held-out path and is where generalisation numbers come from.
 
+## attributions/ and modisco/ are split by family; the filtered BED and OHE are not
+
+    attributions/{experiment}_filtered.bed          shared
+    attributions/{experiment}_ohe.npz               shared
+    attributions/{family}/{experiment}_attr_{type}_{mode}.npz
+    modisco/{family}/{experiment}_{type}_{mode}.modisco.h5
+    modisco/{family}/{experiment}_{type}_{mode}.modisco/
+
+**The split follows what produces each file.** Attributions come out of a MODEL, so bpnet's and
+cherimoya's are different files and belong under `attributions/{family}/` beside the `models/{family}/`
+and `performance_metrics/{family}/` convention. The filtered BED and its one-hot encoding depend only on
+(loci, sequences, in_window), so every family attributing the same experiment shares them — putting them
+under a family directory would imply they need producing twice, and would mean `launch_filter.py` had to
+know which family it was filtering for, which it does not.
+
+`attribution_path()` therefore takes `family` first, matching `model_path()`; `filtered_loci_path()` and
+`ohe_path()` do not take one at all. `attribute.py` is BPNet-only and pins `FAMILY = "bpnet"` at module
+level rather than accepting a flag, because cherimoya attribution is blocked on rescale rules, not on
+plumbing.
+
+`modisco/` is split the same way — `modisco/{family}/{experiment}_{type}_{mode}.modisco.h5` and the
+matching `.modisco/` report directory — since motifs are discovered FROM a model's attributions and
+inherit their provenance. Only `bpnet/` exists today, because cherimoya attribution is blocked, but the
+level is there so the second family does not need a migration.
+
 ## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
 
 An earlier version of this section called it optional and said a blank column is usually tolerable.
@@ -354,12 +386,12 @@ the loci that were attributed, and the filter is what decides which those are.
 mean over folds of those. Observed/actual contributions are `hypothetical * one_hot`, derivable from the
 two files, so the pair is complete for modisco and nothing else needs saving.
 
-**Passing `--loci` changes the default output name** (`attributions/{exp}_{stem}_attr_{type}_{mode}.npz`), for
+**Passing `--loci` changes the default output name** (`attributions/bpnet/{exp}_{stem}_attr_{type}_{mode}.npz`), for
 the same reason the reference mode is in there: different loci give different numbers, and nothing else
 on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
 check follows.
 
-## Launchers: three of them, one emission path
+## Launchers: six of them, one emission path
 
 `src/launcher.py` holds the selection rule and the emission machinery; the three
 `launch.py` files are thin wrappers. All three take the same emission modes —
@@ -373,6 +405,8 @@ shared. Do not add a fourth copy of that block.
 | `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
 | `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
+| `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 42 x types | **no** | .h5 exists, attribution or OHE npz missing |
+| `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 42 x types | **no** | report dir exists, .h5 or MEME db missing |
 
 Run order is filter -> attribute: `launch_filter.py`, then `launch.py`. The second **skips any experiment the first has not covered**, because attribution of unfiltered peaks cannot work.
 
@@ -392,6 +426,133 @@ additionally demand negatives and trained models that this step has nothing to d
 **The already-done check must predict the output path**, and the reference mode is part of that path, so
 `experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two
 copies of that format string is exactly how a launcher starts re-running finished work.
+
+## Comparing the two model families
+
+`src/analysis/compare_bpnet_cherimoya.py` collates
+`performance_metrics/{bpnet,cherimoya}/{experiment}.json`, inner-joins on experiment, writes
+`plots/bpnet_vs_cherimoya/collated.tsv` and one figure per metric: a scatter with a y=x line plus a
+histogram of per-experiment deltas, with a Wilcoxon signed-rank test. Ported from procap-atlas's
+`src/analysis/compare_bpnet_cherimoya.py`, which is why it looks the way it does.
+
+It only works because **both benchmark scripts now write the same schema** — that was the point of
+giving `benchmark_predictions.py` a metrics JSON at all. The four shared metrics are
+`profile_pearson`, `profile_jsd`, `log_counts_pearson`, `counts_spearman`; BPNet's extra
+`counts_pearson` is skipped automatically rather than half-plotted.
+
+Two deliberate departures from upstream:
+
+- **Points are coloured by SPECIES, not read depth.** Upstream is human-only, so depth is its only
+  axis; here the question is whether one architecture wins uniformly or only on some clades, which a
+  12-species corpus can actually answer. `--colour-by depth` restores the upstream view from
+  `qc/stats/experiment_stats.tsv`.
+- **No consolidate step.** Upstream inner-joins two pre-consolidated TSVs; reading the per-experiment
+  JSONs directly removes a stage that could go stale against them.
+
+**`--aggregate` picks how folds are reduced, and the three options give genuinely different numbers.**
+The default is `fold-mean`, not the benchmark's `genome_wide` block:
+
+| | what it is | weights equally |
+| --- | --- | --- |
+| `fold-mean` *(default)* | mean of the per-fold metrics | every **fold** |
+| `genome-wide` | the benchmark's pooled block — one correlation over all folds' predictions concatenated | every **locus** |
+| `per-fold` | one row per fold | — |
+
+**`genome-wide` is NOT the mean of the per-fold correlations** and generally differs from it, which is
+why this is a choice rather than an implementation detail. Pooling lets a large fold pull the number
+harder; for C. elegans, where one fold is one chromosome, the fold sizes differ enough for that to
+matter.
+
+`fold-mean` also carries `{metric}_sd` and `n_folds` into the collated TSV and draws ±1 sd error bars on
+the scatter. That is worth having: a bare point invites reading a 0.01 gap between families as real when
+the folds behind it span 0.05.
+
+`per-fold`'s Wilcoxon p is **not interpretable** — folds of one experiment share an architecture, a
+library and a peak set, so 5 × 42 is not 210 independent pairs and the test is anticonservative. Use it
+to see spread, not significance.
+
+Cherimoya is not deployment-ready, so treat anything this produces as a development comparison rather
+than a result.
+
+## TF-MoDISco
+
+`src/bpnet/modisco/` follows procap-atlas's scripting: `modisco motifs` then `modisco report`, one job
+per (experiment x attribute type), with their parameters — `-n 1000000` seqlets, `-l 50` leiden
+clusters, `-w 1000` window, and `--lite` on the report.
+
+    launch_filter.py -> attribute/launch.py -> modisco/launch.py -> modisco/launch_report.py
+
+**`modisco motifs` needs BOTH npz files**: the attribution and the one-hot. That is what
+`filter_nonACGT_regions.py --save-ohe` is for, and it is why the OHE lives with the filter rather than
+with attribution — it must describe exactly the loci that were attributed.
+
+**Both stages are CPU-only (`gpus=0`), and their resource defaults are NOT shared** — the two commands
+differ by more than an order of magnitude in every dimension:
+
+| | CPUs | mem | time | `NUMBA_NUM_THREADS` |
+| --- | --- | --- | --- | --- |
+| `modisco motifs` | 32 | 64G | 48:00:00 | 32 |
+| `modisco report` | **4** | 16G | **2:00:00** | **4** |
+| fit launchers (for contrast) | 4 | 32G | 6:00:00 | unset |
+
+`motifs` is numba-parallel and runs for many hours; **`report` finishes inside two** — it reads one
+`.h5`, matches its motifs against a MEME database and writes logos. Defaulting them together meant every
+report job reserved 32 idle cores for 48 hours, which queues badly and wastes allocation.
+
+**`report` is not literally single-threaded, though, and the numba pin is NOT a no-op for it.** Traced
+2026-09-05 because the obvious reading is that only `motifs` touches numba: `modiscolite/report.py`
+imports none, but it calls `memelite.tomtom`, which is `@njit(parallel=True, cache=True)` over a
+`prange` and calls `numba.set_num_threads(n_jobs)`. `report.py` invokes it as
+`tomtom(ppms, target_pwms, n_nearest=top_n_matches)` — **no `n_jobs`** — so it takes memelite's default
+of `-1` and uses every numba thread available. Without the pin a 1-CPU report job would spawn one thread
+per core on the node, which is precisely the oversubscription the pin exists to stop.
+
+So report gets **4** cores: enough for that parallel section to be worth having, and far short of
+motifs' 32 because the tomtom call is small — tens of query motifs against a few hundred JASPAR targets
+— and the wall is dominated by logo rendering and HTML. The pin follows `--cpus-per-task`, so raising it
+is picked up by tomtom rather than ignored.
+
+`_add_modisco_args` therefore takes `default_cpus`/`default_mem`/`default_time` as **required** keyword
+arguments with no fallback, so the next caller cannot inherit the wrong set by omission;
+`_add_common_args` takes them the same way with the fit values as its defaults.
+
+**`NUMBA_NUM_THREADS` is pinned to `--cpus-per-task` on every modisco job.** numba otherwise sets it
+from every core it can SEE, which on a shared node is the whole machine and not the slice SLURM granted
+— a job holding 32 CPUs on a 128-core node spawns 128 threads, oversubscribes its own cgroup and can run
+slower than if it had asked for less, while degrading everything else on the node. tfmodisco-lite is
+numba-heavy throughout, which is why this is set here and nowhere else.
+
+It rides on the command as a `VAR=value cmd` prefix rather than an `export` line in the sbatch body, so
+one string carries it through all three emission modes. An `export` would silently vanish under
+`--print-commands` — the mode most likely to be run on a box where the variable matters.
+
+**The MEME database is chosen PER SPECIES, and this is the one place the port could not follow upstream.**
+procap-atlas hardcodes JASPAR CORE **vertebrates**, which it can afford to because it is human-only;
+reporting a yeast or plant motif against a vertebrate database yields matches that mean nothing. So
+`config/genomes.yaml` carries `jaspar_collection` per species and `experiments.motif_db_path()` resolves
+it:
+
+| collection | species |
+| --- | --- |
+| vertebrates | M. musculus, C. griseus |
+| insects | D. melanogaster |
+| nematodes | C. elegans |
+| fungi | S. cerevisiae, S. pombe |
+| plants | A. thaliana, C. reinhardtii, P. patens, S. moellendorffii, G. arboreum, G. hirsutum |
+
+**Nothing fetches those files** — download them from JASPAR into `data/motifs/` as
+`JASPAR2026_CORE_{collection}_non-redundant_pfms_meme.txt`. They are deliberately not a pipeline step:
+the report is a convenience layer and the database has no effect on which motifs modisco discovers.
+`--motif-db` overrides with a single file for every experiment, which is rarely right here.
+
+`modisco-lite` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
+transitively, because these scripts invoke its `modisco` CLI — same reasoning as `pybigtools`. Note it
+ships the entry point as an old-style `data/scripts/modisco`, not a `console_script`.
+
+**Not ported: upstream's `hitcall/` tree** (Fi-NeMo hit calling, `compute_trim_floor.py`,
+`link_hits_to_compendium.py`) and `modisco/relaunch_timeout.py`. The first depends on `finemo`, which is
+Linux-only and a further scope step; the second exists to resubmit jobs that hit a wall clock, which is
+a site policy rather than a pipeline stage.
 
 ## Where benchmark output goes
 
@@ -421,12 +582,17 @@ Note upstream's `benchmark_bpnet.py` also reports `orientation_index_pearson`, w
 here computes. Not an oversight to fix silently — adding it means defining the orientation index the
 same way upstream does.
 
-**Progress bars are ON by default in both, via `--no-progress` to suppress.** They are tangermeme's
+**Progress bars are ON by default in the benchmarks and in `attribute.py`, via `--no-progress` to
+suppress.** They are tangermeme's
 `verbose` argument to `extract_loci` and `predict`, which is *only* the tqdm bar, so it is wired to
 `--no-progress` rather than to `-v`: a long benchmark should show progress without turning on every
 other message. Bars go to stderr, so stdout stays clean for the printed metrics and can be piped.
-`benchmark_predictions.py` had **no `-v` flag at all**, so `params["verbose"]` was permanently `false`
-from `config/bpnet_params.json` and no bar could ever appear; it has one now.
+`benchmark_predictions.py` and `attribute.py` both had **no `-v` flag at all**, so `params["verbose"]`
+was permanently `false` from `config/bpnet_params.json` and no bar could ever appear; both have one now.
+
+`attribute.py` also gets an **outer bar over folds**, which is the one that matters there: each fold is a
+whole `deep_lift_shap` pass over every locus, so without it the only feedback for minutes at a time is
+tangermeme's inner bar restarting from zero with no indication of how many more times it will do so.
 
 **Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
 `data_loader` are imported *inside* `main()`, after argparse and path validation, so
@@ -824,7 +990,7 @@ Already synced:
   further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
   at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
   soft, and `n=0` rejected.
-  **The default output path now carries the mode** (`attributions/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  **The default output path now carries the mode** (`attributions/bpnet/{exp}_attr_{type}_{mode}.npz`), a deliberate
   divergence from upstream's mode-less name: the two references give different numbers, and without it
   a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
 

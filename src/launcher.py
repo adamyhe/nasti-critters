@@ -35,19 +35,23 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
-from experiments import (  # noqa: E402
+from experiments import (
     Experiment,
     attribution_path,
     experiment_ids,
     filtered_loci_path,
     load_params,
     model_path,
+    modisco_h5_path,
+    modisco_report_dir,
+    motif_db_path,
     ohe_path,
 )
 
 
-def build_parser(family: str, fit_script: Path, *,
-                 supports_controls: bool) -> argparse.ArgumentParser:
+def build_parser(
+    family: str, fit_script: Path, *, supports_controls: bool
+) -> argparse.ArgumentParser:
     rel = fit_script.relative_to(REPO_ROOT)
     launcher = f"src/{family}/fit/launch.py"
     parser = argparse.ArgumentParser(
@@ -81,62 +85,87 @@ def build_parser(family: str, fit_script: Path, *,
     )
     _add_common_args(parser, launcher)
     parser.add_argument(
-        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        "-e",
+        "--experiments",
+        nargs="+",
+        default=None,
+        metavar="EXP",
         help="limit to these experiment IDs (default: every one in the config)",
     )
     parser.add_argument(
-        "--requeue", action="store_true",
+        "--requeue",
+        action="store_true",
         help="submit with --requeue so pre-empted jobs are resubmitted by SLURM. "
-             "Each job retrains its fold from epoch 0 (neither bpnet-lite's nor "
-             "cherimoya's fit() has resume), but re-checks for a completed model "
-             "first.",
+        "Each job retrains its fold from epoch 0 (neither bpnet-lite's nor "
+        "cherimoya's fit() has resume), but re-checks for a completed model "
+        "first.",
     )
     if supports_controls:
         parser.add_argument(
-            "--controls", action="store_true",
+            "--controls",
+            action="store_true",
             help=f"train with bias-control tracks (passes --controls to "
-                 f"{rel.name} and checks for pl_control/mn_control paths in the "
-                 f"experiment config)",
+            f"{rel.name} and checks for pl_control/mn_control paths in the "
+            f"experiment config)",
         )
     parser.add_argument(
-        "--fit-args", type=str, default="",
-        help=f"extra arguments forwarded to {rel.name} "
-             f"(e.g. '--max-epochs 100')",
+        "--fit-args",
+        type=str,
+        default="",
+        help=f"extra arguments forwarded to {rel.name} (e.g. '--max-epochs 100')",
     )
     return parser
 
 
-def _add_common_args(parser: argparse.ArgumentParser, launcher: str) -> None:
+def _add_common_args(
+    parser: argparse.ArgumentParser,
+    launcher: str,
+    *,
+    default_cpus: int = 4,
+    default_mem: str = "32G",
+    default_time: str = "6:00:00",
+) -> None:
     """Emission mode + SLURM resources. Shared by every launcher kind."""
     emit = parser.add_mutually_exclusive_group()
     emit.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="print sbatch scripts without submitting",
     )
     emit.add_argument(
-        "--print-commands", action="store_true",
+        "--print-commands",
+        action="store_true",
         help="print one bare shell command per job to stdout and submit nothing. "
-             "For a non-SLURM box. The env setup block is NOT included -- "
-             "activate the mamba env and uv venv yourself first, exactly as "
-             "--setup-file would inside a job. Skip messages and the summary go "
-             "to stderr so stdout can be piped to bash or xargs",
+        "For a non-SLURM box. The env setup block is NOT included -- "
+        "activate the mamba env and uv venv yourself first, exactly as "
+        "--setup-file would inside a job. Skip messages and the summary go "
+        "to stderr so stdout can be piped to bash or xargs",
     )
     # SLURM resource flags. Site-specific by nature: no default, and the
     # corresponding #SBATCH line is omitted unless a value is given.
     parser.add_argument(
-        "--constraint", "--gpus", dest="constraint", type=str, default=None,
+        "--constraint",
+        "--gpus",
+        dest="constraint",
+        type=str,
+        default=None,
         help="value for #SBATCH -C (e.g. a GPU SKU/generation selector)",
     )
     parser.add_argument("--partition", type=str, default=None)
     parser.add_argument(
-        "--setup-file", type=str, default=None,
+        "--setup-file",
+        type=str,
+        default=None,
         help="shell snippet sourced before training: module loads, env "
-             "activation, etc. Defaults to activating the repo's mamba env "
-             "and uv venv.",
+        "activation, etc. Defaults to activating the repo's mamba env "
+        "and uv venv.",
     )
-    parser.add_argument("--cpus-per-task", type=int, default=4)
-    parser.add_argument("--mem", type=str, default="32G")
-    parser.add_argument("--time", type=str, default="6:00:00")
+    # Defaults are per launcher: a training fold and a tfmodisco run want very
+    # different walls, and a shared default that suits neither is how a 40-hour
+    # job gets killed at 6.
+    parser.add_argument("--cpus-per-task", type=int, default=default_cpus)
+    parser.add_argument("--mem", type=str, default=default_mem)
+    parser.add_argument("--time", type=str, default=default_time)
 
 
 def _setup_block(args) -> str:
@@ -167,14 +196,34 @@ def _select_experiments(parser, args) -> list[str]:
     return experiments
 
 
-def _emit(args, log_dir: Path, setup: str, job_name: str, command: str,
-          *, gpus: int = 1) -> bool:
+def _emit(
+    args,
+    log_dir: Path,
+    setup: str,
+    job_name: str,
+    command: str,
+    *,
+    gpus: int = 1,
+    env: dict[str, object] | None = None,
+) -> bool:
     """Emit one job in whichever of the three modes is active.
 
     Returns True if a job was emitted. Shared by the fit and attribution
     launchers so the sbatch directives, the setup block and the three modes
     cannot drift between them.
     """
+    # Environment goes on the command as a `VAR=value cmd` prefix rather than as
+    # an `export` line in the sbatch body, so the SAME string carries it in all
+    # three emission modes. An export would silently vanish under
+    # --print-commands, which is the mode most likely to run on a box where the
+    # variable matters.
+    if env:
+        command = (
+            " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
+            + " "
+            + command
+        )
+
     if args.print_commands:
         print(command)
         return True
@@ -313,7 +362,11 @@ def run(family: str, fit_script: Path, *, supports_controls: bool = False) -> No
     print(
         f"\n{action} {submitted} {family} jobs of {total} (experiment x fold); "
         f"skipped {skipped_trained} already trained, {skipped_missing} missing data"
-        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        + (
+            f", {skipped_experiments} experiments unusable"
+            if skipped_experiments
+            else ""
+        ),
         # stdout must stay pipeable when it carries commands.
         file=sys.stderr if args.print_commands else sys.stdout,
     )
@@ -321,8 +374,9 @@ def run(family: str, fit_script: Path, *, supports_controls: bool = False) -> No
 
 def build_attribute_parser(family: str, script: Path) -> argparse.ArgumentParser:
     launcher = f"src/{family}/attribute/launch.py"
-    return _finish_attribute_parser(argparse.ArgumentParser(
-        description=textwrap.dedent(f"""\
+    return _finish_attribute_parser(
+        argparse.ArgumentParser(
+            description=textwrap.dedent(f"""\
             Enumerate {family} attribution jobs.
 
             The job unit here is (experiment x attribute type), NOT
@@ -341,30 +395,44 @@ def build_attribute_parser(family: str, script: Path) -> argparse.ArgumentParser
                 python {launcher} --attribute-type profile --attribute-type counts
                 python {launcher} --print-commands | bash
             """),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    ), launcher, script)
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        ),
+        launcher,
+        script,
+    )
 
 
 def _finish_attribute_parser(parser, launcher: str, script: Path):
     _add_common_args(parser, launcher)
     parser.add_argument(
-        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        "-e",
+        "--experiments",
+        nargs="+",
+        default=None,
+        metavar="EXP",
         help="limit to these experiment IDs (default: every one in the config)",
     )
     parser.add_argument(
-        "--attribute-type", dest="attribute_types", action="append",
-        choices=("profile", "counts"), default=None, metavar="TYPE",
+        "--attribute-type",
+        dest="attribute_types",
+        action="append",
+        choices=("profile", "counts"),
+        default=None,
+        metavar="TYPE",
         help="repeatable; one job per type per experiment (default: profile)",
     )
     parser.add_argument(
-        "--reference-mode", choices=("frequency", "dinucleotide"),
+        "--reference-mode",
+        choices=("frequency", "dinucleotide"),
         default="frequency",
         help="passed through to %(default)s-mode attribution, and part of the "
-             "output filename, so the already-done check follows it",
+        "output filename, so the already-done check follows it",
     )
     parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument(
-        "--attr-args", type=str, default="",
+        "--attr-args",
+        type=str,
+        default="",
         help=f"extra arguments forwarded to {script.name}",
     )
     return parser
@@ -400,8 +468,10 @@ def run_attribute(family: str, script: Path) -> None:
         total += len(types)
 
         if exp.missing:
-            print(f"SKIP {exp_id}: missing data — {', '.join(exp.missing)}",
-                  file=sys.stderr)
+            print(
+                f"SKIP {exp_id}: missing data — {', '.join(exp.missing)}",
+                file=sys.stderr,
+            )
             skipped_missing += len(types)
             continue
 
@@ -412,8 +482,11 @@ def run_attribute(family: str, script: Path) -> None:
         folds = exp.all_folds(family, models_dir=args.models_dir)
         absent = [f for f in folds if not f["model"].exists()]
         if absent:
-            print(f"SKIP {exp_id}: {len(folds) - len(absent)}/{len(folds)} folds "
-                  f"trained; attribution needs all of them", file=sys.stderr)
+            print(
+                f"SKIP {exp_id}: {len(folds) - len(absent)}/{len(folds)} folds "
+                f"trained; attribution needs all of them",
+                file=sys.stderr,
+            )
             skipped_untrained += len(types)
             continue
 
@@ -423,13 +496,17 @@ def run_attribute(family: str, script: Path) -> None:
         # an N. So an experiment that has not been filtered cannot be attributed
         # at all, and this skips it rather than emitting a job that will exit 1.
         if not filtered_loci_path(exp_id).exists():
-            print(f"SKIP {exp_id}: not filtered yet; run launch_filter.py "
-                  f"-e {exp_id} first", file=sys.stderr)
+            print(
+                f"SKIP {exp_id}: not filtered yet; run launch_filter.py "
+                f"-e {exp_id} first",
+                file=sys.stderr,
+            )
             skipped_missing += len(types)
             continue
 
         for attribute_type in types:
-            out = attribution_path(exp_id, attribute_type, args.reference_mode)
+            out = attribution_path(family, exp_id, attribute_type,
+                                   args.reference_mode)
             if out.exists():
                 skipped_done += 1
                 continue
@@ -452,7 +529,11 @@ def run_attribute(family: str, script: Path) -> None:
         f"\n{_action(args)} {submitted} {family} attribution jobs of {total} "
         f"(experiment x type); skipped {skipped_done} already done, "
         f"{skipped_missing} missing data, {skipped_untrained} not fully trained"
-        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        + (
+            f", {skipped_experiments} experiments unusable"
+            if skipped_experiments
+            else ""
+        ),
         file=sys.stderr if args.print_commands else sys.stdout,
     )
 
@@ -484,21 +565,31 @@ def build_filter_parser(family: str, script: Path) -> argparse.ArgumentParser:
     )
     _add_common_args(parser, launcher)
     parser.add_argument(
-        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        "-e",
+        "--experiments",
+        nargs="+",
+        default=None,
+        metavar="EXP",
         help="limit to these experiment IDs (default: every one in the config)",
     )
     parser.add_argument(
-        "--in-window", type=int, default=None,
+        "--in-window",
+        type=int,
+        default=None,
         help="window checked for non-ACGT bases (default: in_window from "
-             "config/bpnet_params.json, 2114). Must match what attribute.py "
-             "will use, or the filter tests a different span than the model sees",
+        "config/bpnet_params.json, 2114). Must match what attribute.py "
+        "will use, or the filter tests a different span than the model sees",
     )
     parser.add_argument(
-        "--no-ohe", dest="save_ohe", action="store_false",
+        "--no-ohe",
+        dest="save_ohe",
+        action="store_false",
         help="write only the filtered BED, skipping the one-hot encoding",
     )
     parser.add_argument(
-        "--filter-args", type=str, default="",
+        "--filter-args",
+        type=str,
+        default="",
         help=f"extra arguments forwarded to {script.name}",
     )
     return parser
@@ -531,8 +622,7 @@ def run_filter(family: str, script: Path) -> None:
         # this step has nothing to do with.
         absent = exp.missing_paths(kinds=("peaks", "sequences"))
         if absent:
-            print(f"SKIP {exp_id}: missing data — {', '.join(absent)}",
-                  file=sys.stderr)
+            print(f"SKIP {exp_id}: missing data — {', '.join(absent)}", file=sys.stderr)
             skipped_missing += 1
             continue
 
@@ -554,13 +644,312 @@ def run_filter(family: str, script: Path) -> None:
         if args.filter_args:
             cmd += f" {args.filter_args}"
 
-        submitted += _emit(args, log_dir, setup, f"{family}_filter_{exp_id}",
-                           cmd, gpus=0)
+        submitted += _emit(
+            args, log_dir, setup, f"{family}_filter_{exp_id}", cmd, gpus=0
+        )
 
     print(
         f"\n{_action(args)} {submitted} {family} filter jobs of {total} "
         f"(one per experiment); skipped {skipped_done} already done, "
         f"{skipped_missing} missing data"
-        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        + (
+            f", {skipped_experiments} experiments unusable"
+            if skipped_experiments
+            else ""
+        ),
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
+
+def numba_env(args) -> dict[str, int]:
+    """Pin numba to the cores the job actually asked for.
+
+    numba sets `NUMBA_NUM_THREADS` from every core it can SEE, which on a shared
+    node is the whole machine rather than the slice SLURM granted. A job holding
+    32 CPUs on a 128-core node then spawns 128 threads, oversubscribes its own
+    cgroup and can run slower than if it had asked for less -- while degrading
+    whatever else is on the node. tfmodisco-lite is numba-heavy throughout, so
+    this matters here more than anywhere else in the repo.
+    """
+    return {"NUMBA_NUM_THREADS": args.cpus_per_task}
+
+
+def _add_modisco_args(
+    parser, launcher: str, *, default_cpus: int, default_mem: str,
+    default_time: str,
+) -> None:
+    """Flags shared by the motifs and report launchers.
+
+    Resources are NOT shared and have no default here, deliberately. The two
+    commands differ by more than an order of magnitude in every dimension:
+    `modisco motifs` is numba-parallel and runs for many hours, `modisco report`
+    is single-threaded and finishes inside two. Defaulting them together meant
+    every report job reserved 32 idle cores for 48 hours, which queues badly and
+    wastes allocation. Making these required keyword arguments is what stops the
+    next caller inheriting the wrong set by omission.
+    """
+    _add_common_args(parser, launcher, default_cpus=default_cpus,
+                     default_mem=default_mem, default_time=default_time)
+    parser.add_argument(
+        "-e",
+        "--experiments",
+        nargs="+",
+        default=None,
+        metavar="EXP",
+        help="limit to these experiment IDs (default: every one in the config)",
+    )
+    parser.add_argument(
+        "--attribute-type",
+        dest="attribute_types",
+        action="append",
+        choices=("profile", "counts"),
+        default=None,
+        metavar="TYPE",
+        help="repeatable; one job per type per experiment (default: profile)",
+    )
+    parser.add_argument(
+        "--reference-mode",
+        choices=("frequency", "dinucleotide"),
+        default="frequency",
+        help="which attribution run to consume; part of the input and output "
+        "names, so the already-done check follows it",
+    )
+
+
+def run_modisco(family: str) -> None:
+    """`modisco motifs`, one job per (experiment, attribute type).
+
+    Consumes the attribution npz and the one-hot npz -- modisco needs both, and
+    the OHE is why filter_nonACGT_regions.py writes one. Parameters follow
+    procap-atlas's -n 1000000 seqlets and -w 1000 window, but NOT its -l 50:
+    that argument is the number of Leiden CLUSTERINGS (random restarts), whose
+    library default is 2, and upstream's help text mislabels it as a count of
+    clusters.
+    """
+    launcher = f"src/{family}/modisco/launch.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate `modisco motifs` jobs for {family} attributions.
+
+            One job per (experiment x attribute type), consuming that run's
+            attribution npz plus the experiment's one-hot npz. Both come from
+            the attribution stage, so the order is
+            launch_filter.py -> attribute/launch.py -> here.
+
+            CPU-only: tfmodisco-lite does not use a GPU, so these jobs request
+            none. They are long, though -- upstream allows two days -- so raise
+            --time rather than assuming the fit default fits.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --attribute-type profile --attribute-type counts
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_modisco_args(parser, launcher, default_cpus=32,
+                      default_mem="64G", default_time="48:00:00")
+    parser.add_argument(
+        "-n",
+        "--n-seqlets",
+        type=int,
+        default=1_000_000,
+        help="max seqlets (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-l",
+        "--leiden",
+        type=int,
+        default=2,
+        help="number of Leiden CLUSTERINGS to run, each with a different random "
+             "seed -- restarts, NOT clusters (default: %(default)s, which is "
+             "modisco-lite's own default). procap-atlas passes 50 and calls it "
+             "'leiden clusters'; that description is wrong per modisco-lite's "
+             "own --n_leiden help, and 50 restarts is 25x the library default "
+             "in compute",
+    )
+    parser.add_argument(
+        "-w",
+        "--window",
+        type=int,
+        default=1000,
+        help="seqlet window (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--modisco-args",
+        type=str,
+        default="",
+        help="extra arguments forwarded to `modisco motifs`",
+    )
+    args = parser.parse_args()
+    types = args.attribute_types or ["profile"]
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / f"{family}_modisco"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = 0
+    total = 0
+    for exp_id in experiments:
+        ohe = ohe_path(exp_id)
+        for attribute_type in types:
+            total += 1
+            attr = attribution_path(family, exp_id, attribute_type,
+                                    args.reference_mode)
+            out = modisco_h5_path(family, exp_id, attribute_type,
+                                  args.reference_mode)
+            if out.exists():
+                skipped_done += 1
+                continue
+            absent = [str(p) for p in (ohe, attr) if not p.exists()]
+            if absent:
+                print(
+                    f"SKIP {exp_id} {attribute_type}: missing {', '.join(absent)}",
+                    file=sys.stderr,
+                )
+                skipped_missing += 1
+                continue
+
+            out.parent.mkdir(parents=True, exist_ok=True)
+            cmd = (
+                f"modisco motifs -s {shlex.quote(str(ohe))} "
+                f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(out))} "
+                f"-n {args.n_seqlets} -l {args.leiden} -w {args.window} -v"
+            )
+            if args.modisco_args:
+                cmd += f" {args.modisco_args}"
+            submitted += _emit(
+                args,
+                log_dir,
+                setup,
+                f"{family}_modisco_{exp_id}_{attribute_type}",
+                cmd,
+                gpus=0,
+                env=numba_env(args),
+            )
+
+    print(
+        f"\n{_action(args)} {submitted} {family} modisco jobs of {total} "
+        f"(experiment x type); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing inputs",
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
+
+def run_modisco_report(family: str) -> None:
+    """`modisco report`, one job per completed .h5.
+
+    Run after run_modisco. The MEME database is chosen PER SPECIES rather than
+    hardcoded -- see motif_db_path() for why a vertebrate database is wrong for
+    ten of these twelve species.
+    """
+    launcher = f"src/{family}/modisco/launch_report.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate `modisco report` jobs for completed {family} modisco runs.
+
+            Skips an experiment whose .h5 is missing (run launch.py first) or
+            whose report directory already exists. The MEME motif database is
+            resolved per species from config/genomes.yaml's jaspar_collection;
+            nothing fetches those files, so download them into data/motifs/.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Short: reads one .h5, matches its motifs against a MEME database and
+    # writes logos. NOT single-threaded, though -- it calls memelite.tomtom,
+    # which is @njit(parallel=True) and is handed no n_jobs, so it takes every
+    # numba thread it can see. 4 cores rather than 1 so that parallel section
+    # has something to use, and rather than 32 because the tomtom call is small
+    # and the wall is dominated by logo rendering. numba_env pins
+    # NUMBA_NUM_THREADS to whatever is requested, so the threads match the
+    # allocation instead of the node.
+    _add_modisco_args(parser, launcher, default_cpus=4,
+                      default_mem="16G", default_time="2:00:00")
+    parser.add_argument(
+        "--motif-db",
+        type=str,
+        default=None,
+        metavar="MEME",
+        help="override the per-species MEME database with one file for every "
+        "experiment. Rarely right in this repo -- see motif_db_path()",
+    )
+    parser.add_argument(
+        "--report-args",
+        type=str,
+        default="",
+        help="extra arguments forwarded to `modisco report`",
+    )
+    args = parser.parse_args()
+    types = args.attribute_types or ["profile"]
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / f"{family}_modisco_report"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = skipped_experiments = 0
+    total = 0
+    for exp_id in experiments:
+        try:
+            species = Experiment.load(exp_id).species
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        try:
+            db = Path(args.motif_db) if args.motif_db else motif_db_path(species)
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+
+        for attribute_type in types:
+            total += 1
+            h5 = modisco_h5_path(family, exp_id, attribute_type,
+                                 args.reference_mode)
+            out = modisco_report_dir(family, exp_id, attribute_type,
+                                     args.reference_mode)
+            if out.exists():
+                skipped_done += 1
+                continue
+            absent = [str(p) for p in (h5, db) if not p.exists()]
+            if absent:
+                print(
+                    f"SKIP {exp_id} {attribute_type}: missing {', '.join(absent)}",
+                    file=sys.stderr,
+                )
+                skipped_missing += 1
+                continue
+
+            cmd = (
+                f"modisco report -i {shlex.quote(str(h5))} "
+                f"-o {shlex.quote(str(out))} -m {shlex.quote(str(db))} --lite"
+            )
+            if args.report_args:
+                cmd += f" {args.report_args}"
+            submitted += _emit(
+                args,
+                log_dir,
+                setup,
+                f"{family}_modisco_report_{exp_id}_{attribute_type}",
+                cmd,
+                gpus=0,
+                env=numba_env(args),
+            )
+
+    print(
+        f"\n{_action(args)} {submitted} {family} modisco report jobs of {total} "
+        f"(experiment x type); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing inputs"
+        + (
+            f", {skipped_experiments} experiments unusable"
+            if skipped_experiments
+            else ""
+        ),
         file=sys.stderr if args.print_commands else sys.stdout,
     )

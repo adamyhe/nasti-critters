@@ -62,6 +62,10 @@
 
 species:
   D.melanogaster:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: insects
     assembly: dm6              # modENCODE/ENCODE standard for D. melanogaster
     n_chromosomes: 6    # 2L 2R 3L 3R 4 X; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -116,6 +120,10 @@ species:
       "rDNA" and the 211000* scaffolds out of the signal instead of using a decoy.
 
   M.musculus:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: vertebrates
     # mm10 (GRCm38), NOT mm39. ENCODE maps mouse data to mm9/mm10 and its
     # reference is mm10_no_alt_analysis_set_ENCODE.fasta, so mm10 is the standard
     # to remap onto. This overrides the manifest's recommended_realign_assembly
@@ -181,6 +189,10 @@ species:
       rDNA decoy matters most here. Resolve the accession before large-scale runs.
 
   C.elegans:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: nematodes
     assembly: ce11             # modENCODE/ENCODE standard for C. elegans
     n_chromosomes: 6    # I-V X; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -234,6 +246,10 @@ species:
       annotation alone (manifest Field Guide, "C. elegans caveat").
 
   S.cerevisiae:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: fungi
     assembly: R64-1-1
     n_chromosomes: 16    # I-XVI; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -287,6 +303,10 @@ species:
       separate decoy is less critical than for mammals.
 
   S.pombe:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: fungi
     assembly: ASM294v2
     n_chromosomes: 3    # I II III; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -337,6 +357,10 @@ species:
     rdna_note: rDNA repeats are present on chromosome III in the primary assembly.
 
   A.thaliana:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     assembly: TAIR10
     n_chromosomes: 5    # 1-5; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -402,6 +426,10 @@ species:
   # ---------------------------------------------------------------------------
 
   C.reinhardtii:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     # Fold assignment is REUSED UNCHANGED from earlier lab work, after checking
     # the two copies we hold against each other. Do not retune -- diverging
     # folds make models incomparable with our other work.
@@ -463,6 +491,10 @@ species:
       decoys; they are outside main_chromosomes so they cannot enter a fold.
 
   P.patens:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     # Fold assignment is REUSED UNCHANGED from earlier lab work, after checking
     # the two copies we hold against each other.
     assembly: Phypa_V3
@@ -513,6 +545,10 @@ species:
       Organelles stay in the index as decoys and are outside main_chromosomes.
 
   S.moellendorffii:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     # THE ONLY SPECIES HERE WITH NO CHROMOSOMES AT ALL. v1.0 is a 759-scaffold
     # JGI draft: Ensembl reports an EMPTY karyotype and zero chromosome-coord
     # regions, 212.6 Mb total, N50 1.75 Mb, largest scaffold 6.95 Mb.
@@ -593,6 +629,10 @@ species:
       decoys but are outside main_chromosomes, so they cannot enter a fold.
 
   C.griseus:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: vertebrates
     # Chinese hamster. NOT an ENCODE organism, so bare Ensembl names.
     # CriGri-PICRH-1.0 assembles only TEN chromosomes -- 2,3,4,5,6,7,8,9,10,X.
     # Chromosome 1 is genuinely NOT assembled: it remains unplaced as
@@ -676,6 +716,10 @@ species:
   # rrna_content.py can measure organellar content, and excluded from
   # main_chromosomes so they never reach a fold.
   G.arboreum:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     assembly: ASM2569848v2
     assembly_accession: GCF_025698485.1
     n_chromosomes: 13
@@ -714,6 +758,10 @@ species:
   # stricter, so expect a lower pct_unique for structural reasons rather than
   # library-quality ones. Read it against the measured value, not this note.
   G.hirsutum:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     assembly: Gossypium_hirsutum_v2.1
     assembly_accession: GCF_007990345.1
     n_chromosomes: 26

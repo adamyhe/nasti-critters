@@ -186,13 +186,20 @@ cython_debug/
 
 # Raw and processed genomics data: FASTQs, genomes, STAR indices, bigWigs,
 # peak calls. ~120 GiB of FASTQ alone for the full experiment set.
-data/
-models/
-logs/
-predictions/
-performance_metrics/
-attributions/
-data/annotation/
+# Anchored with a leading slash, matching /qc/ below. An UNANCHORED `modisco/`
+# matched src/bpnet/modisco/ too and silently untracked the tfmodisco launchers
+# -- git added nothing and reported nothing. Only `modisco` and `qc` actually
+# collide with a source directory today, but anchoring the whole block costs
+# nothing and stops the next one.
+/data/
+/models/
+/logs/
+/predictions/
+/performance_metrics/
+/plots/
+/attributions/
+/modisco/
+/data/annotation/
 
 # QC output, including the stats tables. These are RUN ARTIFACTS and are
 # deliberately not tracked: qc/stats/experiment_stats.{tsv,md} are also outputs

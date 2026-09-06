@@ -15,6 +15,9 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
+#: This script is BPNet-only; cherimoya attribution is blocked on
+#: DeepLIFT rescale rules for its LayerNorm (see CLAUDE.md).
+FAMILY = "bpnet"
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
@@ -121,6 +124,16 @@ def main():
              "that reference is deterministic and repeats would be identical",
     )
     parser.add_argument("--output-fname", type=str, default=None)
+    parser.add_argument(
+        "--no-progress", dest="progress", action="store_false",
+        help="suppress the tqdm progress bars. They are ON by default and go "
+             "to stderr. There are two: an outer bar over folds, since each is "
+             "a full deep_lift_shap pass, and tangermeme's own inner bars",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="verbose output beyond the progress bars",
+    )
     args = parser.parse_args()
 
     try:
@@ -150,6 +163,14 @@ def main():
         sys.exit(1)
 
     params = load_params("bpnet", {})
+    if args.verbose:
+        params["verbose"] = True
+    # tangermeme's `verbose` IS the tqdm bar, so progress is wired to
+    # --no-progress rather than to -v: attribution is a long job and should show
+    # progress without turning on every other message. Same split as the
+    # benchmark scripts. This script had no -v whatsoever, so params["verbose"]
+    # was permanently false from bpnet_params.json and no bar could ever appear.
+    progress = args.progress or params["verbose"]
     params.update({
         "loci": str(loci_path),
         "sequences": str(exp.sequences),
@@ -194,16 +215,18 @@ def main():
         # would record which set produced the file.
         stem = loci_path.name.split(".")[0]
         params["output_fname"] = str(
-            ATTR_DIR / f"{exp.id}_{stem}_attr_{args.attribute_type}"
-                        f"_{args.reference_mode}.npz")
+            ATTR_DIR / FAMILY / f"{exp.id}_{stem}_attr_{args.attribute_type}"
+                                f"_{args.reference_mode}.npz")
     else:
         params["output_fname"] = str(
-            attribution_path(exp.id, args.attribute_type, args.reference_mode))
+            attribution_path(FAMILY, exp.id, args.attribute_type,
+                             args.reference_mode))
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
     from bpnetlite.bpnet import ControlWrapper, CountWrapper, ProfileWrapper
     from tangermeme.deep_lift_shap import _nonlinear, deep_lift_shap
+    from tqdm import tqdm
     from tangermeme.io import extract_loci
     from tangermeme_compat import patch_numeric_chroms
 
@@ -220,7 +243,7 @@ def main():
         out_window=params["out_window"],
         chroms=chroms,
         max_jitter=0,
-        verbose=params["verbose"],
+        verbose=progress,
         min_counts=None,
         max_counts=None,
         ignore=IGNORE,
@@ -252,7 +275,14 @@ def main():
         sys.exit(1)
 
     attributions = []
-    for model_path in params["model_fnames"]:
+    # Outer bar over folds: each iteration is a whole deep_lift_shap pass over
+    # every locus, so without it the only feedback for minutes at a time is
+    # tangermeme's inner bar restarting from zero with no indication of how many
+    # more times it will do that.
+    for model_path in tqdm(
+        params["model_fnames"], desc=f"{exp.id} {args.attribute_type} folds",
+        unit="fold", disable=not progress,
+    ):
         # The checkpoint IS the model -- see load_model()'s docstring. The block
         # this replaced also read params["n_outputs"] and
         # params["n_control_tracks"], which are set NOWHERE: not in
@@ -283,7 +313,7 @@ def main():
             "batch_size": params["batch_size"],
             "n_shuffles": n_shuffles,
             "random_state": params["random_state"],
-            "verbose": params["verbose"],
+            "verbose": progress,
             "additional_nonlinear_ops": additional_nonlinear_ops,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
             "warning_threshold": 0.01,
