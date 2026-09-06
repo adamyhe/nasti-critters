@@ -16,8 +16,8 @@ Usage:
     python src/bpnet/fit/fit_bpnet.py -e S.pombe_PROcap -f 0
 """
 
-# Derived from csRNANet's src/bpnet/fit/fit.py
-# (commit 2590f0a579afc037e7786d67c69b347eeb302440).
+# Tracks kundajelab/procap-atlas's src/bpnet/fit/fit_bpnet.py, which is this
+# repo's source of truth for io, sampling and training standards.
 
 import argparse
 import sys
