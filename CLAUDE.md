@@ -1055,6 +1055,51 @@ The reverse is also worth knowing: a change *below* trim usually will NOT be pic
 because the intermediate chain is `temp()` and already deleted, so the params/code comparison has no
 output file to compare and the persistent files downstream look up to date. Force those explicitly.
 
+## One timestamp on a `.fai` re-fetches 74 FASTQs — use the standalone scripts
+
+Observed 2026-09-06 on the real tree: `snakemake orientation -n --rerun-triggers mtime`, asking for
+nothing but 42 plots, planned **701 jobs** — 74 `fetch_fastq`, 56 `trim`/`align`/`filter_unique`/
+`final_bam`, 10 `star_index`, 80 `bedgraph`/`bigwig`, 40 `pints`/`combine_peaks`. `snakemake stats` does
+the same. Nothing was wrong with the tree; the script edit was not the cause.
+
+**The chain is short and worth memorising, because any invalidation near the top of it rebuilds from
+FASTQ.** `chrom_sizes`' output is a **declared input of `bigwig`** (`sizes=`). So one `.fai` newer than
+one `.chrom.sizes` re-runs `chrom_sizes`, whose output is then newer than every bigWig ->
+`bigwig` -> needs `{strand}.bg`, `temp()` and deleted -> `bedgraph` -> needs `merged.bam`, `temp()` and
+deleted -> `merge_runs` -> `final_bam` -> `align` -> `trim` -> the FASTQs, deleted after mapping ->
+`fetch_fastq`. **The `temp()` design that makes the pipeline cheap to store is exactly what makes a
+top-of-chain mtime expensive to satisfy**, and on a tree whose STAR indices have been cleaned up it
+rebuilds those too. Read the `Reasons:` block to find the roots: "updated input files" lists the rules
+mtime actually triggered, and anything else is downstream of them.
+
+**The escape hatch is that every QC script runs standalone against what is already on disk**, which is
+why they take `-e`/`--all` at all. None of these touch the DAG:
+
+    python src/qc/experiment_stats.py --all -o qc/stats/experiment_stats.tsv \
+        --markdown qc/stats/experiment_stats.md
+    python src/qc/rrna_content.py -e <exp> --fastq-dir data/fastq -o qc/rrna/<exp>.tsv
+    xargs -P 8 -I{} python src/qc/orientation_qc.py -e {} --outdir qc/orientation \
+        --tsv qc/orientation/{}.tsv < experiments.txt
+
+Three traps in doing it that way. Run `rrna_content` **before** `experiment_stats --all`, which reads
+`qc/rrna/` opportunistically, or the adjusted mapping rate is computed from a stale rRNA figure. Loop
+`orientation_qc` per experiment rather than using `--all`: `--tsv` is a single path reopened per
+experiment, so `--all --tsv` leaves one file describing only the last one. And check
+`ls data/annotation/` before parallelising it — without `--annotation` the script fetches its own, and
+concurrent jobs on one species race for the same file, which is the whole reason the rule passes the
+path.
+
+**To make `snakemake` usable again afterwards, `--touch`** — but confirm first that the `.fai` are merely
+newer rather than different, and run it **after** regenerating by hand, since `--touch` marks the stale
+QC outputs current along with everything else:
+
+    snakemake orientation --touch --rerun-triggers mtime
+    snakemake orientation -n --rerun-triggers mtime      # expect ~nothing
+
+`--touch` asserts the existing outputs are correct. If a `.fai` differs in *content* from what the
+bigWigs were built against, that assertion is false and a real rebuild is owed — which is the one case
+where paying for the 701 jobs is the right answer.
+
 ## `--rerun-triggers mtime` CANNOT see a new input, so it cannot see a new decoy
 
 Measured on a fixture 2026-09-06, after
