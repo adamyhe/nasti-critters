@@ -464,11 +464,24 @@ def verdict(pwm, sense, anti, flank_pwm, flank_meta, tss_anchored=True):
         # system -- a numeric enrichment score was added here and removed again,
         # because deciding placement by eye is the actual requirement.
         def metanote(text, suspicious, hint):
+            """A suspicious reading is ALWAYS surfaced. `tss_anchored` sets its
+            severity, not its visibility.
+
+            This used to drop the "<--" marker entirely where the annotation is not
+            TSS-anchored, which meant such a reading was invisible to n_flagged and to
+            anything grepping for "<--": present in the prose, absent from triage. The
+            gate exists because that check went 0-for-11 on those species, so it must not
+            raise a hard flag -- but a silent downgrade is the wrong way to say so. Emit
+            REVIEW instead: it counts, it greps, and it says why it might be wrong.
+            """
             if not suspicious:
                 return text
             if tss_anchored:
                 return f"{text}  <-- {hint}"
-            return f"{text}  (advisory: annotation is not TSS-anchored)"
+            return (f"{text}  <-- REVIEW: {hint} -- but this metaplot may be measuring the "
+                    "ANNOTATION here (annotation_tss_anchored: false), where the check has "
+                    "a history of false positives. Confirm against the initiator PWM and "
+                    "the summit-anchored panel, both of which are annotation-free.")
 
         half = len(sense) // 2
         down, up = sense[half:].sum(), sense[:half].sum()
@@ -484,8 +497,9 @@ def verdict(pwm, sense, anti, flank_pwm, flank_meta, tss_anchored=True):
             if anti.sum() > sense.sum() else
             f"antisense/sense {anti.sum() / max(sense.sum(), 1e-9):.2f}")
         if not tss_anchored:
-            notes.append("metaplot ADVISORY for this species "
-                         "(annotation_tss_anchored: false)")
+            notes.append("metaplot is ADVISORY for this species "
+                         "(annotation_tss_anchored: false); any line above marked REVIEW "
+                         "is suspicious but may reflect the annotation, not the pipeline")
     return notes
 
 
@@ -564,11 +578,17 @@ def main():
         print(f"  wrote {out}")
         if args.tsv:
             args.tsv.parent.mkdir(parents=True, exist_ok=True)
-            flagged = [l for l in lines if "<--" in l]
+            # Two tallies, not one. A REVIEW item is surfaced and greppable like any
+            # other "<--" line, but it must not inflate n_flagged: the whole point of
+            # separating them is that the flagged count stays a count of things believed
+            # to be real.
+            review = [l for l in lines if "<-- REVIEW:" in l]
+            flagged = [l for l in lines if "<--" in l and "<-- REVIEW:" not in l]
             with open(args.tsv, "w") as f:
-                f.write("experiment\tspecies\tn_peak_maxima\tn_tss\tn_flagged\tnotes\n")
-                f.write(f"{exp_id}\t{exp.species}\t{n_pwm}\t{n_tss}\t{len(flagged)}\t"
-                        f"{'; '.join(lines)}\n")
+                f.write("experiment\tspecies\tn_peak_maxima\tn_tss\t"
+                        "n_flagged\tn_review\tnotes\n")
+                f.write(f"{exp_id}\t{exp.species}\t{n_pwm}\t{n_tss}\t"
+                        f"{len(flagged)}\t{len(review)}\t{'; '.join(lines)}\n")
             print(f"  wrote {args.tsv}")
         ran += 1
     print(f"\n{ran} experiment(s) plotted into {args.outdir}")
