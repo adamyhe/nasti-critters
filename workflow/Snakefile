@@ -787,7 +787,8 @@ rule merge_run_fastqs:
     cat is a valid gzip stream -- no recompression.
 
     A single-run sample is the overwhelming majority; it is hard-linked rather than copied
-    so the common case costs nothing.
+    so the common case costs nothing. That link is an OPTIMISATION AND MUST NEVER BE THE
+    THING THAT FAILS THE JOB -- see link_or_copy below.
     """
     input:
         lambda w: sample_input_fastqs(w.sample)
@@ -803,6 +804,28 @@ rule merge_run_fastqs:
         mkdir -p $(dirname {output.r1}) $(dirname {log})
         exec > {log} 2>&1
         set -o pipefail
+
+        # Hard-linking is a size optimisation, not a requirement, and a refused link
+        # says nothing about the data. Two ways it gets refused here, neither of which
+        # should cost a remap:
+        #   EXDEV  -- data/fastq and data/procap_work on different filesystems, which is
+        #             routine as soon as either is a symlink (FASTQs parked on $SCRATCH,
+        #             work on $OAK). Hard links cannot cross that boundary; copies can.
+        #   EPERM  -- fs.protected_hardlinks (on by default on RHEL/Rocky, so on Sherlock)
+        #             refuses a link to a source that is not writable by the caller unless
+        #             the caller owns it. fetch_fastq writes protected(), i.e. mode 0444,
+        #             so every source here is unwritable and only ownership is carrying it.
+        # Note ln -f is NOT one of the failure modes: GNU ln exits 0 when the destination
+        # is already a hard link to the source, so a re-run over its own output is fine.
+        link_or_copy() {{
+            src=$1; dst=$2
+            if [ -e "$dst" ] && [ "$src" -ef "$dst" ]; then return 0; fi
+            rm -f "$dst"
+            if ln "$src" "$dst"; then return 0; fi
+            echo "NOTE: hard link refused above -- copying $src -> $dst instead."
+            cp "$src" "$dst"
+        }}
+
         files=({input})
         if [ {params.paired} -eq 1 ]; then
             # Mates alternate _1,_2 per run (sample_input_fastqs preserves that order);
@@ -812,12 +835,12 @@ rule merge_run_fastqs:
             for ((i=0; i<${{#files[@]}}; i+=2)); do
                 m1+=("${{files[$i]}}"); m2+=("${{files[$((i+1))]}}")
             done
-            if [ ${{#m1[@]}} -eq 1 ]; then ln -f "${{m1[0]}}" {output.r1}
+            if [ ${{#m1[@]}} -eq 1 ]; then link_or_copy "${{m1[0]}}" {output.r1}
             else cat "${{m1[@]}}" > {output.r1}; fi
-            if [ ${{#m2[@]}} -eq 1 ]; then ln -f "${{m2[0]}}" {output.r2}
+            if [ ${{#m2[@]}} -eq 1 ]; then link_or_copy "${{m2[0]}}" {output.r2}
             else cat "${{m2[@]}}" > {output.r2}; fi
         else
-            if [ ${{#files[@]}} -eq 1 ]; then ln -f "${{files[0]}}" {output.r1}
+            if [ ${{#files[@]}} -eq 1 ]; then link_or_copy "${{files[0]}}" {output.r1}
             else cat "${{files[@]}}" > {output.r1}; fi
             : > {output.r2}
         fi
