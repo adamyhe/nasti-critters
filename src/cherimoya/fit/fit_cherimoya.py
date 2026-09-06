@@ -149,6 +149,19 @@ def main():
     print(f"Experiment: {exp.id} ({exp.entry['biosample']}, {exp.species})")
     print(f"Fold {args.fold}: test={test_chroms}, valid={valid_chroms}")
     print(f"Training chroms: {train_chroms}")
+    # Same cap as fit_bpnet.py -- see the long note there. negative_ratio is
+    # negatives per peak, so a pool smaller than peaks * ratio recycles. Inert
+    # for every experiment this script currently runs (D. melanogaster only,
+    # where the pool is 0.73-1.00 per peak against a configured 1/4), but it
+    # must not silently differ from the BPNet path.
+    configured_ratio = params["negatives_ratio"]
+    available_ratio = len(negatives) / max(len(peaks), 1)
+    if available_ratio < configured_ratio:
+        params["negatives_ratio"] = available_ratio
+        print(
+            f"negative_ratio capped {configured_ratio:.4f} -> {available_ratio:.4f}: "
+            f"{len(negatives):,} negatives for {len(peaks):,} peaks"
+        )
     print(
         "GC-matched negatives: "
         f"{len(negatives):,} loci, ratio={params['negatives_ratio']}"

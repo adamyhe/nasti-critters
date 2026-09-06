@@ -86,6 +86,14 @@ def main():
     parser.add_argument("--early-stopping", type=int, default=None)
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
+    parser.add_argument(
+        "--no-ratio-cap", action="store_true",
+        help="do not cap negatives_ratio at the available pool. The cap stops a "
+             "negative being drawn more than once per epoch, but it also lowers "
+             "the negative share of each batch (12.5%% -> ~1.3%% for the densest "
+             "yeast experiment). Use this to keep the configured batch "
+             "composition and accept the repeats",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -206,6 +214,41 @@ def main():
         )
     else:
         print(f"Fold {args.fold}: test={split['test_chroms']}, valid={split['valid_chroms']}")
+
+    # Cap negative_ratio at the pool actually available, so no negative is drawn
+    # more than once per epoch. `negative_ratio` is negatives PER PEAK in a
+    # batch, so an epoch over N peaks draws N * ratio; where the pool is smaller
+    # than that the same regions recycle. That is not hypothetical -- with the
+    # configured 1/7, `S.cerevisiae-Spt5IAA4h_PROcap` draws 3,377 from a pool of
+    # 327, about 10x over, because its peaks are denser than one per training
+    # window and almost no window is peak-free.
+    #
+    # Computed from the WHOLE-GENOME counts, not the fold's. PeakGenerator
+    # filters both peaks and negatives by the same `chroms`, so pool/peaks is
+    # near-constant across folds, and the exact per-fold counts are not knowable
+    # here without duplicating extract_loci. An approximate cap that is always
+    # in the right direction beats forking data_loader.py, which is
+    # byte-identical to procap-atlas's.
+    #
+    # Only ever engages for the yeasts: every other experiment's pool is at
+    # least 0.26 per peak, comfortably above 1/7.
+    # NOTE this addresses RECYCLING, not DIVERSITY, and they are orthogonal: the
+    # pool is the same N distinct windows whichever ratio is used. Capping only
+    # lowers how often each is seen, which also lowers the negative share of a
+    # batch -- 12.5% to about 1.3% for Spt5IAA4h. If the negative class's batch
+    # weight matters more than avoiding repeats, pass --no-ratio-cap.
+    configured_ratio = params["negatives_ratio"]
+    available_ratio = len(negatives) / max(len(peaks), 1)
+    if args.no_ratio_cap:
+        available_ratio = configured_ratio
+    if available_ratio < configured_ratio:
+        params["negatives_ratio"] = available_ratio
+        print(
+            f"negative_ratio capped {configured_ratio:.4f} -> {available_ratio:.4f}: "
+            f"{len(negatives):,} negatives for {len(peaks):,} peaks, so the "
+            f"configured ratio would recycle each negative "
+            f"{configured_ratio / available_ratio:.1f}x per epoch"
+        )
 
     # Training DataLoader. Delegated to data_loader.PeakGenerator (identical to
     # procap-atlas's) rather than reimplemented here: it already applies the

@@ -1733,6 +1733,60 @@ This also matches the project's stated design (one experiment == one species x o
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
 
+## Should the S. cerevisiae perturbation experiments be dropped?
+
+Asked 2026-09-03, on the grounds that Ino80/Spt5 depletion produces massive widespread transcription and
+that even their controls look poor. **Answer: no — keep and train them.** The evidence points the other
+way, and the framing has the yeast libraries ranked backwards.
+
+**The extra peaks carry the strongest initiator motif in the corpus's yeast set.** Ranked with every other
+S. cerevisiae experiment:
+
+| experiment | %rRNA | %uniq_adj | Inr bits | offset | orientation flags |
+| --- | --- | --- | --- | --- | --- |
+| `Spt5IAA1h` | 17.8 | 88.7 | **1.18** | −1 | 0 |
+| `Spt5IAA4h` | 4.5 | 79.8 | **1.18** | −1 | 0 |
+| `Ino80KD` | 8.9 | 77.2 | 1.09 | −1 | 0 |
+| `Ino80ctl` | 14.0 | 82.4 | 1.00 | −1 | 0 |
+| `Spt5EtOH` | **49.7** | 82.4 | 0.61 | +0 | 0 |
+| `S.cerevisiae_PROcap` (Booth WT) | **70.3** | **54.8** | **0.45** | −1 | 0 |
+
+A depleted sample calling 23,642 peaks at 1.18 bits is not calling noise — that is a stronger, correctly
+placed Inr than any other yeast library here. Adjusted mapping is 77-89% across all five; the raw 41.4%
+for `Spt5EtOH` is entirely its rRNA. **Dropping this study would remove the best yeast data and leave the
+worst**, since the independent Booth WT baseline is the weakest S. cerevisiae library in the corpus on
+rRNA, depth and motif alike.
+
+**And they are not the corpus's worst libraries — not close.** Ranked worst-first on rRNA, adjusted
+mapping, depth and motif together, the six below all sit beneath `Spt5EtOH`, and the four Ino80/Spt5
+depletion experiments sit in the better half:
+
+| experiment | %rRNA | %uniq_adj | signal | Inr |
+| --- | --- | --- | --- | --- |
+| `P.patens-plateculture_5GRO` | 47.4 | 27.8 | 2.4 M | 0.39 |
+| `C.reinhardtii-liquidculture_5GRO` | 39.1 | **20.7** | 6.3 M | 0.23 |
+| `S.cerevisiae_PROcap` | **70.3** | 54.8 | 4.9 M | 0.45 |
+| `S.moellendorffii-stemleaf_5GRO` | 26.1 | 36.8 | 6.9 M | 0.78 |
+| `M.musculus-BMDM_GROcap` | 30.7 | 84.2 | **4.0 M** | 0.42 |
+| `C.griseus-BMDM_GROcap` | 15.5 | 49.7 | 5.3 M | 0.65 |
+
+**Do not rank on Inr bits alone.** It is diluted by peak-set size, so `G.hirsutum` (0.11 over 171,640
+peaks) and `D.melanogaster-S2_5GROcap` (0.13 over 42,854) score low while being fine — both correctly
+placed at +0. Bits are only interpretable against a comparable peak count.
+
+**The real caveat is narrower than "these experiments are bad".** It is that *within-study, cross-condition*
+comparison in the Spt5 series is confounded: the vehicle control is 49.7% rRNA against 4.5% at IAA 4 h, an
+11-fold difference in cap-selection quality running in the same direction as the peak counts
+(10,811 -> 21,591 -> 23,642). That gradient is what Spt5 loss should do biologically, and it is also what
+differing library quality would do, and these data cannot separate them — note the rRNA difference runs
+*opposite* to the biology, since depleting Pol II elongation should raise the rRNA fraction, not cut it by
+11-fold. A depth-matched subsample would settle it.
+**That confound does not touch a per-experiment model**, which is all this repo builds — one experiment,
+one model, no multi-tasking. So: train them, and deprioritise any analysis that reads *across* the Spt5
+conditions. The `tier` column already encodes this — controls `include`, perturbations `conditional`.
+The Ino80 pair is much better matched (14.0% vs 8.9% rRNA, 35.4 vs 33.3 M signal) and shows almost no
+peak-count difference, which is itself a useful negative result.
+
 ## Cross-validation splits
 
 Convention everywhere: **test = fold `i`, validation = fold `(i+1) % n_folds`, train = the rest.**
@@ -1989,16 +2043,26 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   exists *only* to add these `abs()` calls around `bpnetlite`'s `PeakGenerator`. Any new code that reads
   signal must do the same.
 - **Non-ACGT.** Every `extract_loci` call passes `ignore=list("QWERYUIOPSDFHJKLZXVBNM")`.
-- **Outlier peaks: no signal-based filter is applied, deliberately.** Both fit scripts pass
-  `max_counts=None`, matching procap-atlas, which does the same in its `fit_bpnet.py` and
-  `fit_cherimoya.py`. The pre-unification `fit_bpnet.py` (at `a806e0d`) did drop peaks above
-  `quantile(total_signal, 0.99) * 1.2`; the port to `data_loader.PeakGenerator` removed it, which brought
-  this repo in line with upstream. Do not reinstate it casually: the threshold is data-dependent, so every
-  species and library gets a different effective cutoff, which is corrosive in a repo whose point is
-  cross-species comparison — and the top of a PRO-cap signal distribution is real biology (snRNA, histone,
-  ribosomal-protein promoters), i.e. the most informative loci for an initiation model. Upstream uses
-  signal quantiles only in *diagnostics* (`locus_diagnostics`, `generate_warning_flags.py`), never to drop
-  training data. Artifact removal is the exclusion lists' job, and those are canonical published lists —
+- **Outlier peaks ARE dropped, at `quantile(0.99) * 1.2`. An earlier version of this file said the
+  opposite and it was wrong.** The claim was that the port to `data_loader.PeakGenerator` removed the
+  filter the pre-unification `fit_bpnet.py` (at `a806e0d`) had. It did not remove it — it MOVED it. The
+  filter now lives inside `src/bpnet/fit/data_loader.py`:
+
+      outlier_threshold = torch.quantile(loci_counts, 0.99) * 1.2
+      outlier_idxs = loci_counts > outlier_threshold
+      ...
+      peak_sequences=X_peaks[0][~outlier_idxs],
+
+  `max_counts=None` in both fit scripts is true and was the evidence for the wrong claim, but it is a
+  *different* knob — `max_counts` is tangermeme's own cutoff inside `extract_loci`, and this quantile
+  filter is applied afterwards, on top. `data_loader.py` is byte-identical to procap-atlas's, so upstream
+  drops them too; this is inherited, not local.
+  **The objection the old text raised is therefore live, not avoided.** The threshold is data-dependent,
+  so every species and library gets a different effective cutoff, which is corrosive in a repo whose
+  point is cross-species comparison — and the top of a PRO-cap signal distribution is real biology
+  (snRNA, histone, ribosomal-protein promoters), i.e. the most informative loci for an initiation model.
+  Roughly the top 1% of peaks per experiment is being discarded. Decide deliberately whether to keep it;
+  do not assume it is off. Artifact removal is the exclusion lists' job, and those are canonical published lists —
   **do not hand-curate regions into them**, or folds and preprocessing stop being comparable with
   procap-atlas.
 - **The real gap this leaves:** S. cerevisiae and S. pombe have no published exclusion list *and* no
@@ -2050,8 +2114,283 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   ints and would match nothing), and raises if `main_chromosomes` and the FASTA disagree rather than
   silently emitting a short chrom.sizes. `ALPHA` stays per-experiment: it is a tuning parameter, not a
   property of the genome.
-- **Negatives ratio.** GC-matched negatives are sampled at a low ratio (1/7 in `fit_bpnet.py`, 0.1 in the
-  JSON configs) rather than a balanced mix.
+- **A purely numeric chromosome column silently drops EVERY peak inside `extract_matching_loci`.** Its
+  path branch is `pandas.read_csv(loci, sep='\t', usecols=[0,1,2], header=None, names=[...])` with **no
+  `dtype`**, so a BED whose first column is all digits infers as `int64`. The next line is
+  `numpy.isin(loci['chrom'], chroms)` against our all-string `chroms`, every comparison is False, `loci`
+  becomes empty, and the run dies further down on `zero-size array to reduction operation maximum` —
+  which names nothing.
+  This is the exact failure `main_chromosomes()`'s `str()` exists to prevent, happening one library
+  deeper. It took out **A. thaliana (1-5), C. reinhardtii (1-17) and P. patens (1-27)** — the only three
+  species with purely numeric names — and spared C. griseus purely because it has an `X`, which makes the
+  column `object`. Roman numerals and `chr`/`NC_` prefixes are safe for the same accidental reason.
+  **bpnet-lite has the same latent bug — verified, not assumed.** `pyfaidx.Fasta(...).keys()` returns
+  `str` unconditionally (checked on a FASTA with contigs `1`/`2`/`10`), so `bpnet negatives` passes string
+  `chroms` against the same int64 column and keeps **0 of 3** rows. It never surfaces upstream only
+  because bpnet-lite is used on human and mouse, where `chr`-prefixed names force `object` dtype. So this
+  is pre-existing rather than caused by dropping the CLI, and those three species never had working
+  negatives by either route.
+  Curiously the `chroms=None` fallback is the one safe path: it derives `chroms` from the loci column
+  itself, so `fa[numpy.int64(1)]` raises `TypeError: Record name must be a string, not int64` — loud
+  instead of silent. **The real fix belongs upstream**, as `dtype={0: str}` in that one `read_csv`; it
+  would fix the CLI too and is worth a tangermeme PR.
+  `sample_negatives` now reads the BED itself with `dtype={0: str}` and passes the **DataFrame**, which
+  skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
+  regression test uses all three naming styles on purpose.
+- **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
+  over the first full run (2026-09-03), negatives per peak:
+
+  | species | negatives/peak | negatives as % of all candidate windows |
+  | --- | --- | --- |
+  | S. cerevisiae (6 experiments) | **0.01-0.07** | 4.5-7.7% |
+  | S. pombe | **0.03** | 5.3% |
+  | C. elegans | 0.26-0.70 | 20-36% |
+  | D. melanogaster | 0.73-1.00 | 31-48% |
+  | everything else | **1.00** | 0.7-16% |
+
+  **The predictor is PEAKS PER 2114 bp WINDOW, not genome size**, and the cutoff is sharp at 1.0:
+
+  | experiment | bp per peak | peaks per window | negatives per peak |
+  | --- | --- | --- | --- |
+  | `S.cerevisiae-Spt5IAA4h` | 512 | **4.13** | 0.01 |
+  | `S.cerevisiae-Ino80ctl` | 784 | **2.70** | 0.02 |
+  | `S.pombe_PROcap` | 1,358 | **1.56** | 0.03 |
+  | `S.cerevisiae_PROcap` | 1,790 | **1.18** | 0.07 |
+  | `C.elegans-L3` | 2,792 | 0.76 | 0.26 |
+  | `D.melanogaster-S2_PROcap` | 5,641 | 0.37 | 1.00 |
+
+  Everything at or above one peak per window collapses; everything below it is fine. **Small genomes are
+  not the problem** — C. reinhardtii is 13.2 kb per peak and P. patens 46 kb, the two sparsest in the
+  corpus. It is the two yeasts, where the spacing between peaks is at or below the training window itself,
+  so no 2114 bp window can avoid one.
+
+  Worth knowing where those yeast peak counts come from, since they drive this. Against annotated TSSs,
+  `S.cerevisiae_PROcap` (Booth, 4.9 M signal) calls **6,759 peaks = 1.04 per TSS**, which is a textbook
+  number. The Spt5 and Ino80 experiments call 10,811-23,642, i.e. **1.7-3.6 per TSS**, and are only 7-22%
+  unidirectional against Booth's 59%. The Spt5 series rises with depletion time (10,811 EtOH -> 21,591
+  IAA1h -> 23,642 IAA4h), which is the direction Spt5 loss should push cryptic initiation — **but
+  `signal_reads` rises with it too** (11.3 -> 16.7 -> 18.5 M), so depth and biology are confounded here
+  and neither reading is established. Either way the yeast peak sets are 2-3x denser than the annotation,
+  which is what breaks negative sampling.
+
+  `extract_matching_loci` tiles each chromosome into NON-OVERLAPPING `in_window` blocks, so the entire
+  candidate pool is `genome / 2114` — about **5,700 windows for a 12 Mb yeast genome**. Windows
+  overlapping a peak are masked out, and `S.cerevisiae-Spt5IAA4h_PROcap` has **23,642 peaks, four times
+  more than there are windows in the whole genome**. Almost nothing survives. Every large genome instead
+  hits 1.00, meaning GC matching found a partner for essentially every peak and the peak count is the
+  binding constraint.
+
+  **`NEGATIVE_WINDOW` in `make_negatives.py` is the knob, and every run now reports the cost.** It
+  overrides the candidate-tiling width per species for GC matching only. Shrinking it places candidate
+  midpoints more finely; it does NOT shrink the training window, because both
+  `_resize_coords_generator` and the loader's `extract_loci` resize to the same midpoint. The written BED
+  intervals do take that width, so nothing downstream may depend on it. `out_window` is scaled with it,
+  since `extract_matching_loci` asserts `in_window >= out_window`.
+  Alongside it, `sample_negatives` prints negatives per peak and **`pct_peak_overlap`** — the share whose
+  *2114 bp* window overlaps a peak, which is what the model will see. On a synthetic 2.4 Mb genome with a
+  peak every 780 bp (S. cerevisiae density) the trade is stark:
+
+  | tiling | negatives | per peak | overlap a peak |
+  | --- | --- | --- | --- |
+  | 2114 (default) | **0** | 0.00 | — |
+  | 1200 | 2 | 0.00 | 0.0% |
+  | 600 | 620 | 0.20 | **99.7%** |
+  | 400 | 2,466 | 0.80 | **99.8%** |
+
+  So narrowing does not buy clean negatives at yeast density — it buys many contaminated ones. That
+  synthetic is uniform and therefore worst case; real yeast peaks cluster, which is why the real run finds
+  310 rather than 0 at the default. **`NEGATIVE_WINDOW` is deliberately empty**: set an entry only with a
+  measured `pct_peak_overlap` in front of you, and record why.
+  **`--no-signal-filter` is the other lever, and for a densely transcribed genome it is the one that
+  binds.** `bigwig=None` disables the signal restriction and nothing else: in `_extract_and_filter_chrom`
+  both the threshold and the `values <= signal_threshold` mask sit behind `if bigwig is not None`, while
+  GC matching, `max_n_perc` and the peak-tile mask are unconditional. On a synthetic genome at
+  `S.cerevisiae_PROcap` density (one peak per 1,840 bp, 1.15 per window):
+
+  | inter-peak signal | filter ON | filter OFF |
+  | --- | --- | --- |
+  | none | 792 negatives | 792 negatives (filter inert) |
+  | pervasive | **0 negatives** | 792 negatives, **median signal 41% of peak median** |
+
+  So where the genome is quiet between peaks the filter costs nothing, and where it is not the filter
+  alone takes the count to zero. Yeast is the second case. The bar is
+  `window signal <= signal_beta x (1st percentile of peak signal)`, which in a genome where essentially
+  everything is transcribed almost nothing clears.
+  **The recovered negatives are peak-free but not quiet** — 0.0% overlap a called peak, yet they carry a
+  large fraction of peak-level signal. Whether that is a defect depends on what negatives are for here:
+  they are not labelled zero, the loader extracts their real measured signal, so a GC-matched peak-free
+  window carrying ordinary background transcription is arguably a *better* sample of "non-peak yeast
+  genome" than an artificially quiet subset of it. `sample_negatives` now prints
+  `median signal N vs M in peaks = X%` on every run so this is measured per experiment rather than
+  assumed.
+
+  **Measured on the real `S.cerevisiae_PROcap`, and it is a clear gain:**
+
+  | | negatives | per peak | overlap a peak | median signal |
+  | --- | --- | --- | --- | --- |
+  | filter on | 440 | 0.07 | — | — |
+  | filter off | **1,905** | **0.28** | **0.0%** | 271 vs 961 in peaks (28.2%) |
+
+  **Read the 271 against the genome, not against the peaks.** An average 2114 bp window in this library
+  holds **853** reads (4.87 M over 12.07 Mb), so the negatives sit at **0.32x a random window** while the
+  *median* peak window sits at 1.13x. 28.2% sounds like contamination and is not: it is the peak median
+  that is unremarkable, because at 1.18 peaks per window essentially every window contains one and the
+  informative peaks are in the tail. So the filter was discarding 4.3x more negatives that are three times
+  quieter than average genome and never overlap a called peak.
+  **Every run now also reports the RANDOM-GENOME baseline**, from 2,000 random windows, because the peak
+  median is the misleading comparator wherever the peak set saturates the genome. Read
+  `negatives are Nx genome`, not the percentage against peaks.
+
+  **Turning the filter off is NOT a no-op on the large genomes, and an earlier version of this note said
+  it was.** The claim was that where the count is already capped at one negative per peak — 9 of the 23
+  measured experiments — removing the filter can change nothing. The COUNT cannot change, that part is
+  right. The COMPOSITION changes completely. Measured on a synthetic at 0.10 peaks per window, capped, with
+  heterogeneous background:
+
+  | | negatives | median signal | vs random genome |
+  | --- | --- | --- | --- |
+  | filter on | 559 | **0** | 0.00x |
+  | filter off | 559 | **24** | **0.67x** |
+
+  Identical count, different windows. `matched_loci_bin_count = min(bg, loci)` saturates per GC bin, but
+  the pool it draws from is `random_state.shuffle`d and truncated, so a larger pool means a different — and
+  noisier — sample. The earlier synthetic that showed no change had *uniform* background, so the filter
+  rejected nothing; it demonstrated only that the test was degenerate.
+
+  What this means for the choice. **With the filter on, negatives are the SILENT TAIL of the genome**
+  (median 0); with it off they are **representative peak-free background** (0.67x genome). Both are
+  defensible and they are different things, so this is not a free switch to flip corpus-wide — it would
+  change the negatives of every experiment, including the 33 that have no problem. bpnet-lite and
+  procap-atlas choose the silent tail, and this repo tracks their standards.
+  So the realistic options are: keep it on everywhere and accept that the dense yeast experiments train on
+  a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
+  departure**, accepting that their negatives then mean something slightly different from every other
+  species'. The second is what `NO_SIGNAL_FILTER` is for. It is not a comparability-free option — it just
+  makes the cost explicit and per-species rather than silent.
+
+  **All seven yeast experiments measured (2026-09-03), and the gain decays monotonically with density:**
+
+  | experiment | peaks/window | filter on | filter off | gain | negs/peak | median negative | median peak |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `S.cerevisiae_PROcap` | 1.18 | 440 | 1,905 | **4.3x** | 0.28 | 271 | 961 |
+  | `S.pombe_PROcap` | 1.56 | 311 | 947 | **3.0x** | 0.10 | 831 | 3,518 |
+  | `Spt5EtOH` | 1.89 | 257 | 738 | **2.9x** | 0.07 | 316 | 1,873 |
+  | `Ino80ctl` | 2.70 | 310 | 579 | 1.9x | 0.04 | 90 | 4,701 |
+  | `Ino80KD` | 2.95 | 313 | 520 | 1.7x | 0.03 | 95 | 4,975 |
+  | `Spt5IAA1h` | 3.78 | 348 | 419 | 1.2x | 0.02 | 41 | 2,956 |
+  | `Spt5IAA4h` | 4.14 | 301 | 327 | **1.1x** | 0.01 | 16 | 3,264 |
+
+  Two conclusions, and they point different ways.
+
+  **Turning the filter off is safe.** Zero peak overlap everywhere, and the recovered negatives are not
+  merely acceptable but very quiet — median 16 to 831 reads per 2114 bp against peak medians of
+  1,873-4,975. The densest experiment's negatives sit at 16 against a peak median of 3,264. There is no
+  contamination to trade against, so the earlier worry was unfounded at every density measured.
+
+  **But it does not rescue the dense experiments, and the crossover is near 2 peaks per window.** Below
+  it the signal threshold is what binds and removing it gains 3-4x; above it the supply of peak-free tiles
+  binds and removing it gains 10-20%. `Spt5IAA4h` goes 301 -> 327, still 0.014 negatives per peak, using
+  5.7% of all tiles in the genome — which is simply the peak-free fraction at 4.14 peaks per window.
+  **This corrects an earlier note here that `NEGATIVE_WINDOW` was probably unnecessary.** That was true
+  for `S.cerevisiae_PROcap`, where the filter bound; it is false for the four densest, where only finer
+  tiling could help and finer tiling costs the peak contamination measured above. For those four there is
+  no good option — with `negatives ratio 0.1` and 23,642 peaks, `Spt5IAA4h` draws ~2,364 negatives an
+  epoch from a pool of 327.
+  **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
+  yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
+  eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
+  non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so 300 windows may
+  be a fair sample of what exists; or the pool is too small to teach anything and yeast needs a different
+  background scheme (a strided rather than tiled candidate set would give many more, and would need an
+  upstream change). **Read yeast negatives-derived metrics with this in mind.**
+- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya, i.e. negatives are 1/8 and 1/5 of a batch.**
+  An earlier version of this line had it backwards, as "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs".
+  It is the other way round: `config/bpnet_params.json` sets `negatives_ratio: 0.142857…` and
+  `config/cherimoya_params.json` sets `0.25`, while **0.1 is only `PeakGenerator`'s default and never
+  applies**, because `fit_bpnet.py` passes `params["negatives_ratio"]`. The ratio is negatives per peak,
+  so 1/7 means one negative for every seven peaks.
+  It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
+  the pool available with the signal filter off:
+
+  | experiment | peaks | draws/epoch at 1/7 | pool | reuse |
+  | --- | --- | --- | --- | --- |
+  | `Spt5IAA4h` | 23,642 | 3,377 | 327 | **10.3x** |
+  | `Spt5IAA1h` | 21,591 | 3,084 | 419 | **7.4x** |
+  | `Ino80KD` | 16,865 | 2,409 | 520 | 4.6x |
+  | `Ino80ctl` | 15,431 | 2,204 | 579 | 3.8x |
+  | `Spt5EtOH` | 10,811 | 1,544 | 738 | 2.1x |
+  | `S.pombe_PROcap` | 9,208 | 1,315 | 947 | 1.4x |
+  | `S.cerevisiae_PROcap` | 6,759 | 966 | 1,905 | **0.5x** |
+
+  So `S.cerevisiae_PROcap` is fine once the filter is off — it cannot even use its pool once per epoch —
+  and the two Spt5 depletions recycle roughly ten and seven times over.
+- **`negative_ratio` is therefore CAPPED at the available pool**, in both `fit_bpnet.py` and
+  `fit_cherimoya.py`: `min(configured, len(negatives) / len(peaks))`, so no negative is drawn more than
+  once per epoch and the cap is printed when it engages. Chosen over loosening the signal filter because
+  it leaves the negatives themselves identical in kind to every other species — same silent-tail
+  definition — and changes only how often they are drawn.
+  Computed from **whole-genome** counts rather than the fold's: `PeakGenerator` filters peaks and
+  negatives by the same `chroms`, so `pool/peaks` is near-constant across folds, and the exact per-fold
+  numbers are not knowable at the call site without duplicating `extract_loci`. An approximate cap that
+  always errs in the right direction beats forking `data_loader.py`, which is byte-identical to
+  procap-atlas's.
+  **The cap addresses RECYCLING, not DIVERSITY, and they are orthogonal.** The pool is the same N distinct
+  windows at any ratio; capping only lowers how often each is seen, and with it the negative share of a
+  batch — 12.5% to ~1.3% for `Spt5IAA4h`. If the negative class's batch weight matters more than avoiding
+  repeats, `fit_bpnet.py --no-ratio-cap` keeps the configured composition. Neither setting adds a single
+  new background sequence.
+
+- **Negative DIVERSITY in the yeasts is capped by the genome, and no pipeline setting can raise it.**
+  S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and at 1.2-4.1 peaks per window
+  only 4.5-7.7% of them are peak-free. The measured pools of 257-440 are essentially all the peak-free
+  windows that exist. Poisson on the observed density predicts 91 free windows for `Spt5IAA4h` and 1,755
+  for `S.cerevisiae_PROcap`, bracketing what is found.
+
+  **In RELATIVE terms the pool is not impoverished at all**, which is worth knowing before treating it as
+  a defect:
+
+  | | pool | unique background sequence | share of genome |
+  | --- | --- | --- | --- |
+  | `Spt5IAA4h` | 301 | 636 kb | **5.27%** |
+  | `S.cerevisiae_PROcap` | 440 | 930 kb | **7.71%** |
+  | `S.pombe_PROcap` | 311 | 657 kb | **5.26%** |
+  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | **5.15%** |
+
+  Yeast negatives sample the same fraction of their genome as mouse negatives sample of theirs. What is
+  small is the genome, not the sampling.
+
+  **The asymmetry that IS real is negative vs positive unique sequence.** Yeast peak windows overlap
+  heavily, so their union is roughly the whole genome minus the peak-free part: ~11.4 Mb of positive
+  against 0.64 Mb of negative, about **1:18**. Mouse peak windows barely overlap, giving ~137 Mb against
+  ~137 Mb, about **1:1**. So a yeast model sees eighteen times more distinct positive than negative
+  sequence, where a mouse model sees parity — and that is structural, not a setting.
+
+  Levers, with what each actually buys:
+  - **Jitter on negatives.** `data_loader.py` passes `max_jitter=0` for the background while peaks get
+    the configured 200. Enabling it would add **+19%** unique sequence (2114 -> 2514 bp per locus), which
+    is augmentation rather than diversity, and it means forking a file that is byte-identical to
+    procap-atlas's. Not worth it for 19%.
+  - **Stricter peak calling.** The only lever that moves the number materially, because peak-free space
+    and peak count are the same quantity: fewer calls means more free windows. It also bears directly on
+    whether the yeast peak sets are over-called at 1.7-3.6 calls per annotated TSS against Booth's 1.04.
+    **The diversity problem and the possible over-calling are one problem seen twice.**
+  - **Accept it**, and treat yeast negatives-derived numbers as weakly supported.
+
+**Should the signal filter be loosened for the other experiments where negatives < peaks? No.** That is
+the wrong threshold — what matters is `pool/peaks` against `negatives_ratio`, not against 1. Sorted, the
+corpus has a clean gap with nothing in it:
+
+| | pool/peaks | vs 1/7 |
+| --- | --- | --- |
+| the 7 yeast experiments | 0.013 - 0.065 | **all below** |
+| `C.elegans-L3` (worst non-yeast) | **0.262** | 1.8x above |
+| `C.elegans` others, `D.melanogaster` | 0.57 - 1.00 | 4-7x above |
+| everything else | ~1.00 | 7x above |
+
+`C.elegans-L3` has 9,411 negatives for 35,923 peaks, which *looks* alarming and is not: at 1/7 an epoch
+draws 5,132, well inside the pool, so nothing recycles. Loosening the filter there would change what its
+negatives mean — silent tail to representative background — for **no training benefit at all**. Leave
+every non-yeast experiment alone.
 - Windows are `in_window=2114` / `out_window=1000` throughout; `trimming` is always
   `(in_window - out_window) // 2`.
 
