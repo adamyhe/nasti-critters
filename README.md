@@ -369,6 +369,13 @@ python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py
 ```
 
+Without SLURM, `--print-commands` emits the same job selection as bare shell
+commands, one per line, and submits nothing:
+
+```bash
+python src/bpnet/fit/launch.py --print-commands | bash
+```
+
 ### Open questions and resolved ones
 
 Every experiment now has a fold assignment — `launch.py` reports **214
@@ -548,7 +555,7 @@ peak-free background rather than the silent tail of the genome — so treat yeas
 negatives-derived metrics as not strictly comparable with the other ten.
 
 **Training caps `negatives_ratio` at the pool that actually exists.** The
-configured ratio is 1/7 for BPNet and 1/4 for Cherimoya (negatives per peak), and
+configured ratio is 1/7 for both families (negatives per peak), and
 the dense yeast experiments have far fewer negatives than that implies, so both
 fit scripts lower it to `len(negatives) / len(peaks)` and say so. No negative is
 then drawn more than once per epoch. Pass `--no-ratio-cap` to keep the configured
@@ -741,7 +748,31 @@ python src/bpnet/fit/fit_bpnet.py -e M.musculus-liver-young-female_ChROcap -f 0
 # Submit all (experiment x fold) jobs. --requeue helps on preemptible partitions.
 python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py --partition gpu --requeue
+
+# No SLURM: the same selection as bare commands, nothing submitted
+python src/bpnet/fit/launch.py --print-commands | bash
 ```
+
+`launch.py` has three emission modes over one selection rule — `--print-commands`
+(bare commands on stdout), `--dry-run` (full sbatch scripts) and the default
+(submit). The two flags are mutually exclusive. With `--print-commands`, skip
+messages and the summary go to **stderr**, so stdout stays pipeable; the env
+setup block is not included, so activate the mamba env and uv venv first. These
+are GPU jobs, so `| bash` runs them serially — use
+`| xargs -P N -I{} bash -c '{}'` only if N models are known to fit in VRAM.
+Cherimoya has the same launcher, over the same selection rule:
+
+```bash
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --print-commands | bash
+```
+
+Both are thin wrappers over `src/launcher.py`. The selection logic — which
+(experiment, fold) pairs exist, which finished, which lack inputs — is
+family-agnostic because `src/experiments.py` is keyed by family, so there is one
+implementation rather than two that can drift. The only family difference is
+`--controls`, which exists on the BPNet launcher and not the Cherimoya one,
+because `fit_cherimoya.py` has no such flag.
 
 A fold counts as done only when `{experiment}.fold{f}.final.torch` exists.
 bpnet-lite also writes `{experiment}.fold{f}.torch` whenever validation loss

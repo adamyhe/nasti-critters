@@ -18,16 +18,40 @@ python src/cherimoya/fit/fit_cherimoya.py -e S.cerevisiae-Ino80ctl_PROcap -f 0 -
 python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0 --n-filters 196
 ```
 
+For every (experiment, fold) pair, use the launcher — the same one BPNet uses,
+via `src/launcher.py`, so the selection rule cannot drift between families:
+
+```bash
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --partition gpu --requeue
+python src/cherimoya/fit/launch.py --print-commands | bash    # no SLURM
+```
+
+It skips folds whose `.final.torch` exists, skips experiments with missing
+inputs, and reads `n_folds()` per species — which matters, since C. elegans has
+six folds and everything else has five.
+
 The script uses Muon for 2D weight matrices and AdamW for the remaining parameters, with warmup plus cosine learning-rate schedules.
 
 Cluster launchers run **natively** by default and take no site-specific values;
 pass partition and GPU constraints at submit time:
 
 ```bash
-bash src/cherimoya/benchmark/cmd.sh
-sbatch --partition=gpu src/cherimoya/benchmark/slurm.sh
-sbatch --partition=gpu src/cherimoya/fit/slurm.sh          # array: one task per fold
+bash src/cherimoya/benchmark/cmd.sh -e D.melanogaster-S2_PROcap
+sbatch --partition=gpu src/cherimoya/benchmark/slurm.sh -e D.melanogaster-S2_PROcap
+sbatch --partition=gpu src/cherimoya/fit/slurm.sh D.melanogaster-S2_PROcap
 ```
+
+**The experiment is required in all three, and was previously absent from two of
+them.** `fit/slurm.sh` ran `-f $SLURM_ARRAY_TASK_ID` with no `-e`, so every array
+task exited 2; `benchmark/cmd.sh` hard-coded `D.melanogaster-S2_PROcap.json` as
+its already-done check while forwarding `"$@"` verbatim, so once fly had been
+benchmarked every other experiment reported "Skipping" and exited 0 without
+running. Both were single-experiment assumptions left over from before the
+config unification; `fit_cherimoya.py` itself has taken `-e` since `f9f60cf`.
+`fit/slurm.sh` also still carries a static `--array=0-4`, so pass
+`--array=0-5` for C. elegans or use the launcher, which gets it right per
+species.
 
 To run in a container instead, point them at an image; this repo does not define
 one, and should not — the authoritative images are maintained at

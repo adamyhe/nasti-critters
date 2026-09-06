@@ -83,7 +83,14 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--early-stopping", type=int, default=None)
+    parser.add_argument(
+        "--early-stopping", type=int, default=None,
+        help="stop after this many consecutive epochs without improvement "
+             "(default: None, from config/bpnet_params.json, training the full "
+             "--max-epochs budget). Deliberately OFF, matching procap-atlas: "
+             "re-enabling it there consistently made benchmark metrics worse, "
+             "including profile metrics, not just a profile/count tradeoff",
+    )
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
     parser.add_argument(
@@ -165,6 +172,12 @@ def main():
     import torch
     from bpnetlite.bpnet import BPNet
     from tangermeme.io import extract_loci
+    from tangermeme_compat import patch_numeric_chroms
+
+    # Numeric chromosome names (A.thaliana 1-5, C.reinhardtii 1-17,
+    # P.patens 1-27) hit a dtype bug in tangermeme's BED reading. Self-retiring
+    # no-op once tangermeme is fixed -- see src/tangermeme_compat.py.
+    patch_numeric_chroms(verbose=params["verbose"])
     from torch.optim import AdamW
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))

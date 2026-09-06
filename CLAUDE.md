@@ -22,8 +22,18 @@ multi-task conditions or assay families into shared heads.
 Two model families are trained on the same data:
 
 - **BPNet** (`bpnetlite.BPNet`) — the main, multi-species path.
-- **Cherimoya** — newer architecture, *D. melanogaster* only. Training and benchmarking work, but per
+- **Cherimoya** — newer architecture. Training and benchmarking work, but per
   `src/cherimoya/README.md` the models are **not deployment-ready**.
+  **It is NOT D. melanogaster-only, and this file said so until 2026-09-03.** `fit_cherimoya.py` takes
+  `-e` and resolves paths, species and folds through `src/experiments.py` exactly as `fit_bpnet.py` does,
+  and `config/cherimoya_params.json` holds no species-specific value — it has been corpus-capable since
+  `f9f60cf` ported it onto the unified config. What made it *look* single-species was that the surrounding
+  scripts were left at the pre-unification interface: `src/cherimoya/fit/slurm.sh` ran `-f
+  $SLURM_ARRAY_TASK_ID` with **no `-e`**, so every array task exited 2; `benchmark/cmd.sh` hard-coded
+  `D.melanogaster-S2_PROcap.json` as its already-done check while passing `"$@"` through, so once fly was
+  benchmarked every other experiment printed "Skipping" and exited 0; and there was no launcher at all.
+  All fixed, and `src/bpnet/fit/slurm.sh` had the same missing `-e` (plus a relative path and a
+  `--job-name=s2_fit` from the dm3 era).
 
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
@@ -168,8 +178,15 @@ python src/bpnet/fit/fit_bpnet.py -e D.melanogaster-S2_PROcap -f 0 -v
 python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py --time 12:00:00 --mem 32G
 
-# Train Cherimoya (D. melanogaster / dm3 config set only)
-python src/cherimoya/fit/fit_cherimoya.py -f 0
+# Same selection, no SLURM: bare commands on stdout, skips and summary on stderr
+python src/bpnet/fit/launch.py --print-commands | bash
+
+# Train Cherimoya, one experiment/fold -- any experiment, same interface as BPNet
+python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0
+
+# Submit all (experiment x fold) Cherimoya jobs; same launcher as BPNet
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --print-commands | bash
 
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
@@ -271,7 +288,8 @@ Two drivers, same steps:
   unconstrained, which is why the default is set rather than merely declared.
   Run-level intermediates are keyed by *run*, not experiment, so a run shared by two experiments is
   mapped once. Scope is fetch -> negatives; `resolve_runs.py`/`build_experiment_config.py` stay outside
-  (metadata, not DAG work) and training stays on `launch.py`.
+  (metadata, not DAG work) and training stays on `launch.py` — one per family, both thin wrappers over
+  `src/launcher.py`.
 - **`src/data_preprocessing/run_procap_pipeline.py`** — single-experiment path, serial, caches on output
   existence. Useful for `-e <one>` debugging and `--fetch-genomes`/`--index-only`.
 
@@ -537,6 +555,47 @@ It is the source of truth for **io, sampling, and training standards**; this rep
 `data/hg38.blacklist.bed.gz`, `data/GRCh38-cCREs.bed.gz`, and a 7-fold `% 7` split. This repo is
 multi-species: per-species FASTA from `experiment_config.yaml`, species-keyed `chrom_splits.yaml`, and
 peak-level random folds for S. pombe. **Never** replace that logic with a wholesale copy of theirs.
+
+**Training hyperparameters were NOT synced until 2026-09-03, and both families diverged.** Asked
+directly ("does early stopping match upstream?") and the answer was no, on more than early stopping.
+Upstream's defaults live in each fit script's `params` dict; ours in `config/{family}_params.json`. What
+differed, now aligned:
+
+| | upstream | was here | note |
+| --- | --- | --- | --- |
+| bpnet `max_epochs` | 50 | 100 | |
+| bpnet `early_stopping` | **None** | 20 | |
+| cherimoya `max_epochs` | 50 | 100 | |
+| cherimoya `early_stopping` | **None** | 15 | |
+| cherimoya `max_jitter` | 500 | **50** | a 10x augmentation difference |
+| cherimoya `muon_wd` | 0.03 | 0.01 | |
+| cherimoya `adam_lr` | 0.001 | 0.004 | |
+| cherimoya `adam_wd` | 0.0 | **0.2** | |
+| cherimoya `negatives_ratio` | 1/7 | 1/4 | upstream defaults both families to `gc:0.1429` |
+| cherimoya `warmup_epochs` | 5, `--warmup-epochs` | hard-coded 5 | now configurable |
+| cherimoya `decay_epochs` | None, `--decay-epochs` | absent | now present |
+
+Everything else already matched: bpnet's `max_jitter` 200, `n_filters` 512, `n_layers` 8,
+`count_loss_weight` 100, `learning_rate` 0.0005, `batch_size` 64, `negatives_ratio` 1/7, `n_shuffles` 20;
+cherimoya's `n_filters` 128, `n_layers` 9, `batch_size` 64, `muon_lr` 0.025 and all three `lw_*`.
+
+**`early_stopping: null` is a decision with evidence behind it, so do not "restore" a value.** Upstream
+swept it — `performance_metrics/cherimoya/{20_5_2,100_None_5,50_None_5,50_None_5_15decay}` — and settled
+on `50_None_5` (50 epochs, no early stopping, 5 warmup). Re-enabling it at 5, against both
+`decay_epochs=None` and `decay_epochs=15`, **underperformed on every benchmark metric, profile and count
+alike** — not a profile/count tradeoff. The proposed mechanism is architecture-independent and applies to
+bpnet-lite identically: `fit()` checkpoints whenever `valid_count_corr > best_corr`, a bare validation
+count-correlation comparison, so more epochs give that rule more chances to overfit the validation set —
+and stopping on the *same* metric compounds it.
+
+**Upstream states the caveat itself and it should travel with the number**: none of those comparisons
+control for random initialization. `--random-state` only makes negative sampling and data-loader order
+reproducible, and no `torch.manual_seed` is set anywhere in either script, so run-to-run noise is not
+separated from the hyperparameter effect. Treat it as upstream's considered default, weakly evidenced —
+not a settled result. A seed-controlled repeat would be needed to do better.
+
+Aligning cost nothing here: no model in this repo has trained yet, so there were no checkpoints to stay
+comparable with. Had there been, this would have been a re-train.
 
 Already synced:
 
@@ -1604,10 +1663,10 @@ reports what the pipeline actually produced, per experiment:
 | `pct_unique` | `unique/input`. Low means wrong assembly, contamination, or unsplit spike-in. |
 | `signal_reads` | reads in the merged BAM, i.e. what `genomecov -5` counts. **The number that matters.** |
 | `peaks_total` | PINTS uni + bi, matching the training locus set (`divergent` excluded). |
-| `reads_per_peak` | crude signal density; very low means peaks called from thin coverage. |
+| `reads_per_peak` | signal density, and **the basis of the `thin_coverage` flag** — the cross-species-comparable depth measure. See the note below on why absolute depth is not. |
 | `pct_rrna` | rRNA + organellar share of the raw reads, from `src/qc/rrna_content.py`. Blank means NOT MEASURED, which is not the same as 0. |
 | `pct_unique_adj` | `unique / non-rRNA input`. **This is the mapping-quality number**; `pct_unique` is not. |
-| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. Advisory — exclusion stays a manual `tier` decision. |
+| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. **Advisory only — nothing is excluded on them; see below.** Note the `low_mapping(N%,adj)` flags contain a comma themselves, so naive splitting on `,` breaks them; new flags should avoid commas. |
 
 **`pct_unique` is not a quality metric, and reading it as one produced three wrong verdicts.** Where the
 rDNA array sits in the assembly in 2+ near-identical copies, every rRNA read is a multimapper, gets
@@ -1797,6 +1856,53 @@ Three reasons to leave them alone:
 This also matches the project's stated design (one experiment == one species x one condition == one
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
+
+## Nothing is excluded: every dataset is analysed and modelled
+
+**Standing decision, 2026-09-03, and it generalises every "should we drop X?" question below.** Model
+every experiment, including the problematic ones, and QC at the end. The reason is structural rather than
+optimistic: **one experiment == one species x one condition == one model**, with no multi-tasking and no
+shared heads, so a weak dataset cannot contaminate a strong one. There is nothing to protect by excluding
+it in advance, and a trained model is *better* evidence about a library than a pre-hoc read count is.
+
+So `tier` gates preprocessing only, `launch.py` deliberately does not filter on it or on `qc_flags`, and
+proposals to add an `exclude` tier have been declined. The flags exist to tell you which numbers to
+distrust when reading results, not to decide what runs.
+
+### Depth requirements scale with the nascent transcriptome, NOT with a constant
+
+**The depth a library needs is proportional to the size of the transcribed space being sampled.** An
+organism with a small genome, few distal elements and little intergenic transcription reaches the same
+coverage per initiation site on far fewer reads than mouse or human. Ranking libraries by raw
+`signal_reads` across species therefore penalises the compact genomes for being compact — it measures the
+organism, not the library.
+
+This was not a hypothetical: `experiment_stats.py` carried `SHALLOW_SIGNAL_READS = 10_000_000`, one
+absolute threshold applied to all twelve species, and it was **measurably wrong in both directions**:
+
+| | signal | reads/peak | old flag |
+| --- | --- | --- | --- |
+| `S.pombe_PROcap` | 23.1 M | **2,513** | none — and it is the best-sampled experiment in the corpus |
+| `M.musculus-GCB_PROcap` | **150.4 M** | 2,325 | none |
+| `S.cerevisiae_PROcap` | 4.9 M | 721 | **SHALLOW** — false positive; matches CHO's 723 on 1/10 the reads |
+| `C.reinhardtii-liquidculture_5GRO` | 6.3 M | 770 | **SHALLOW** — false positive |
+| `M.musculus-BMDM_5GRO-ctl` | 18.2 M | **450** | **none** — false negative |
+| `D.melanogaster-S2_5GROcap` | 22.2 M | **518** | **none** — false negative |
+
+S. pombe on 23 M reads is better sampled than mouse on 150 M. Two libraries above 18 M were covering
+their much larger transcriptomes more thinly than several flagged ones and escaped silently.
+
+Replaced with `THIN_COVERAGE_READS_PER_PEAK = 500` and a `WARN:thin_coverage(N/peak)` flag. `peaks_total`
+is this pipeline's own measure of how much transcribed space exists, so dividing by it asks how deeply
+each initiation site is covered. It is **not fully depth-independent** — peak calling saturates, so a
+shallow library calls fewer peaks and shrinks its own denominator — but it errs conservatively, since
+peaks fall more slowly than reads. The threshold is a heuristic recalibrated from this corpus with no
+clean gap in the distribution, the same provisional status as the FLAT initiator threshold; do not treat
+500 as principled.
+
+Net effect on the real corpus: 10 flagged before, 8 after. `M.musculus-BMDM_5GRO-ctl` gained a flag it
+should always have had; `S.cerevisiae_PROcap`, `C.reinhardtii-liquidculture_5GRO` and
+`C.griseus-BMDM-KLA1h_GROcap` lost ones they never deserved.
 
 ## Should the S. cerevisiae perturbation experiments be dropped?
 
@@ -2201,7 +2307,38 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   would fix the CLI too and is worth a tangermeme PR.
   `sample_negatives` now reads the BED itself with `dtype={0: str}` and passes the **DataFrame**, which
   skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
-  regression test uses all three naming styles on purpose.
+  regression test uses all three naming styles on purpose. (`dtype={0: str}` does work alongside
+  `names=`, checked directly: both `{0: str}` and `{"chrom": str}` give `object`.)
+
+  **The SAME bug has a second instance, in `tangermeme.io._load_exclusion_zones`, and it hit A. thaliana
+  training on 2026-09-03.** `KeyError: 1` out of
+  `exclusion_zones[chrom][start:end] = True` — the zones dict is keyed by the FASTA's string names while
+  the exclusion BED's column came back `int64`. Same missing `dtype`, opposite failure mode: **loud**
+  here, where `extract_matching_loci` was silent. A. thaliana is the only species that is both
+  numerically named *and* has a published exclusion list, which is why it was the one to break; the other
+  two numeric species carry `blacklist: null`, so the call never happens.
+
+  **It could not be fixed at the call site the way the first one was.** `_load_exclusion_zones` calls
+  `pandas.read_csv` on each element of `exclusion_lists` itself, so there is no pre-typed DataFrame to
+  hand it, and no file-level trick makes pandas infer `object` for an all-digit column. Renaming the BED's
+  contigs is worse than the bug: the published list was deliberately stripped to bare `1`-`5` to match the
+  Ensembl FASTA, and a list whose names do not match **excludes nothing, silently**. The remaining choices
+  were to fork `data_loader.py` — forbidden, it is byte-identical to procap-atlas's — or to patch the one
+  function, so `src/tangermeme_compat.py` patches it.
+
+  **`patch_numeric_chroms()` is SELF-RETIRING**, which is the part worth preserving. It functionally
+  probes the installed tangermeme with a numeric BED and returns without patching if the probe passes, so
+  the shim vanishes when tangermeme is fixed instead of shadowing a corrected implementation forever. It
+  also refuses to install a patch that fails its *own* probe, rather than silently breaking exclusion
+  lists for the nine species that were working. Called from all five scripts that pass a blacklist into
+  `extract_loci` (both fit scripts, both benchmarks, `attribute.py`), right after the deferred tangermeme
+  import.
+  Verified against the genuine upstream body lifted from the 1.4.1 wheel: unpatched reproduces
+  `KeyError: 1` on the real `TAIR10.Klasfeld.Excludable.bed.gz`; patched excludes 2.86 Mb across
+  chromosomes `1`-`5`; `chr`-prefixed lists behave identically through the patch; and a simulated
+  fixed-upstream is declined.
+  **So the tangermeme PR is now worth two `dtype={0: str}` edits, not one** — `match.extract_matching_loci`
+  and `io._load_exclusion_zones`.
 - **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
   over the first full run (2026-09-03), negatives per peak. **These are the filter-ON numbers**, kept
   because they are what motivated `NO_SIGNAL_FILTER`; the yeast rows are 3-4x higher at the sparse end
@@ -2379,12 +2516,13 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
   `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
   log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
-- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya, i.e. negatives are 1/8 and 1/5 of a batch.**
-  An earlier version of this line had it backwards, as "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs".
-  It is the other way round: `config/bpnet_params.json` sets `negatives_ratio: 0.142857…` and
-  `config/cherimoya_params.json` sets `0.25`, while **0.1 is only `PeakGenerator`'s default and never
-  applies**, because `fit_bpnet.py` passes `params["negatives_ratio"]`. The ratio is negatives per peak,
-  so 1/7 means one negative for every seven peaks.
+- **Negatives ratio is 1/7 for BOTH families, i.e. negatives are 1/8 of a batch.** Two corrections have
+  landed on this line. It first read "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs", which was
+  backwards — the JSON is where 1/7 lives, and **0.1 is only `PeakGenerator`'s default and never
+  applies**, because both fit scripts pass `params["negatives_ratio"]`. It then read 1/7 for BPNet and
+  **1/4 for Cherimoya**, which was true of this repo and *not* of upstream: procap-atlas defaults both
+  families to `gc:0.1429`. Aligned 2026-09-03, so `config/cherimoya_params.json` is 0.142857… too. The
+  ratio is negatives per peak, so 1/7 means one negative for every seven peaks.
   It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
   the pool available with the signal filter off:
 
@@ -2518,7 +2656,15 @@ every non-yeast experiment alone.
 - `load_bed()` reads only columns 0–2 with `dtype={"chrom": str}` — chromosome names must stay strings
   (S. cerevisiae uses roman numerals, dm has `4`/`X`).
 - Cherimoya optimization splits parameters: **Muon** for 2-D weight matrices except `linear.weight`, **AdamW**
-  for everything else, each with linear warmup (5 epochs) → cosine decay, trained in `bfloat16`.
+  for everything else, each with linear warmup → cosine decay, trained in `bfloat16`. Warmup was
+  hard-coded at 5 epochs and is now `warmup_epochs` in the config with a `--warmup-epochs` flag, plus
+  `decay_epochs` / `--decay-epochs` to decouple the decay's length from `max_epochs` — both ported from
+  upstream, both no-ops at their defaults (5 and None give exactly the previous schedule, verified: 4,500
+  decay iterations either way and no third stage). Setting `decay_epochs` shorter adds a **`ConstantLR`
+  hold at `eta_min`**, which is load-bearing rather than cosmetic: `CosineAnnealingLR` is *periodic*, so
+  without it the LR would start climbing again past `T_max`. Its `total_iters` is deliberately far larger
+  than the hold (`num_hold_iters * 10 + 10**6`) because `ConstantLR` reverts to the optimizer's base LR
+  once reached — sized exactly, it would snap the LR back up on the last step of training.
 
 ## Scope note
 
