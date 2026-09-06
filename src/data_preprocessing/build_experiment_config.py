@@ -395,6 +395,22 @@ def main():
             lines.append(f"      runs: [{', '.join(q(r) for r in run_ids)}]")
         else:
             lines.append("      runs: []  # UNRESOLVED: no run accession found in ENA")
+        # RUN -> SAMPLE GROUPING. `runs` above is a flat list, which loses which runs
+        # belong to which library, and the workflow needs exactly that: several runs of
+        # ONE sample are resequencing and must be concatenated BEFORE dedup, whereas
+        # several samples are biological replicates and must stay separate until after
+        # it. Deduping a replicate pool would treat independent initiation events at one
+        # base as PCR duplicates -- and for a 5' assay that base is the measurement.
+        # The linkage is right here in zip(rows, resolved); it was simply flattened away.
+        sample_runs = [
+            (r["sample_accession"],
+             [x for x in (res.get("run_accession") or "").split(";") if x])
+            for r, res in zip(rows, resolved)
+        ]
+        if any(rs for _, rs in sample_runs):
+            lines.append("      samples:")
+            for gsm, rs in sample_runs:
+                lines.append(f"        {gsm}: [{', '.join(q(x) for x in rs)}]")
         lines.append(f"      library_layout: {q(';'.join(layouts) if layouts else 'unresolved')}")
         lines.append(f"      run_match_basis: {q('; '.join(b for b in bases if b))}")
         if spike:

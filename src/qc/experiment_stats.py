@@ -203,16 +203,47 @@ def load_config() -> dict:
         return yaml.safe_load(f)["experiments"]
 
 
-def star_log(work: Path, exp_id: str, run: str) -> Path | None:
-    """Locate a run's STAR Log.final.out, whichever driver produced it.
+def star_logs(work: Path, exp_id: str, sample: str, runs: list[str]) -> list[Path]:
+    """Every STAR log belonging to one sample, across all pipeline layouts.
 
-    workflow/Snakefile writes {work}/runs/{run}/Log.final.out;
-    run_procap_pipeline.py writes {work}/{exp}/{run}.Log.final.out. Checking
-    both means the table works regardless of which driver did the mapping.
+    Alignment is now per SAMPLE, so the current layout has ONE log per sample. Trees
+    mapped before that change have one per RUN, and a sample's runs are the SRRs it was
+    built from -- so a sample-keyed lookup alone finds nothing on an existing tree, and
+    the row silently reports no STAR metrics. Return whatever exists, and let the caller
+    sum: one log in the new layout, N in the old, and the totals agree either way.
+    """
+    found = [work / "samples" / sample / "Log.final.out"]
+    found = [c for c in found if c.exists()]
+    if found:
+        return found
+    legacy = []
+    for run in runs:
+        for candidate in (work / "runs" / run / "Log.final.out",
+                          work / exp_id / f"{run}.Log.final.out"):
+            if candidate.exists():
+                legacy.append(candidate)
+                break
+    return legacy
+
+
+def star_log(work: Path, exp_id: str, unit: str) -> Path | None:
+    """Locate a STAR Log.final.out for one alignment unit, whichever driver made it.
+
+    `unit` is a SAMPLE for the current Snakefile and a RUN for the older layouts, which
+    is why all three candidates are tried rather than one being chosen by driver:
+
+      {work}/samples/{sample}/Log.final.out   workflow/Snakefile (alignment is per sample
+                                              since resequencing runs merge as FASTQ)
+      {work}/runs/{run}/Log.final.out         workflow/Snakefile before that change
+      {work}/{exp}/{run}.Log.final.out        run_procap_pipeline.py
+
+    Silence is the failure mode here -- a missing log yields None and the row simply
+    reports no STAR metrics, so a path that has moved looks like "not mapped yet".
     """
     for candidate in (
-        work / "runs" / run / "Log.final.out",
-        work / exp_id / f"{run}.Log.final.out",
+        work / "samples" / unit / "Log.final.out",
+        work / "runs" / unit / "Log.final.out",
+        work / exp_id / f"{unit}.Log.final.out",
     ):
         if candidate.exists():
             return candidate
@@ -331,14 +362,23 @@ def collect(exp_id: str, entry: dict, work: Path, peaks: Path,
 
     inputs = uniques = 0
     saw_input = saw_unique = False
-    for run in runs:
-        i, u = star_metrics(star_log(work, exp_id, run))
-        if i is not None:
-            inputs += i
-            saw_input = True
-        if u is not None:
-            uniques += u
-            saw_unique = True
+    # Alignment units, not runs: STAR now runs once per SAMPLE, so a sample whose two
+    # resequencing runs were merged has ONE log. Iterating runs would look for two, find
+    # neither, and silently report no metrics. raw.samples is authoritative; fall back to
+    # runs for configs predating it.
+    # Alignment units, not runs: STAR runs once per SAMPLE now, so a sample whose
+    # resequencing runs were merged has one log where an older tree has several.
+    # star_logs() resolves both, so this works before and after a re-map.
+    grouping = entry.get("raw", {}).get("samples") or {r: [r] for r in runs}
+    for sample, sample_runs in grouping.items():
+        for log in star_logs(work, exp_id, sample, list(sample_runs)):
+            i, u = star_metrics(log)
+            if i is not None:
+                inputs += i
+                saw_input = True
+            if u is not None:
+                uniques += u
+                saw_unique = True
 
     signal = mapped_reads(work / "exp" / exp_id / "merged.bam", keep)
     if signal is None:                      # merged.bam is temp(); fall back

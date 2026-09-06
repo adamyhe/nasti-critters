@@ -138,10 +138,29 @@ TARGETS = selected_experiments()
 # not experiment, so a run shared by two experiments is mapped only once.
 RUN_SPECIES, RUN_LAYOUT, RUN_UMI, RUN_ADAPTER, EXP_RUNS = {}, {}, {}, {}, {}
 RUN_INTERLEAVED = {}
+
+# TWO MERGE LEVELS. Several runs of ONE sample are resequencing of one library and are
+# concatenated as FASTQ, BEFORE alignment and dedup -- otherwise umi_tools only ever sees
+# part of the library and a PCR duplicate whose mates landed in different runs survives.
+# Several SAMPLES of one experiment are biological replicates and are merged as BAM, AFTER
+# dedup -- deduping them together would collapse independent initiation events at the same
+# base into one, and for a 5'-end assay that base IS the measurement.
+#
+# raw.samples carries the grouping (build_experiment_config.py). Older configs have only
+# the flat raw.runs, so fall back to one-sample-per-run: that is exactly the previous
+# behaviour, and it is correct whenever no sample has more than one run.
+SAMPLE_RUNS, EXP_SAMPLES, SAMPLE_EXP = {}, {}, {}
 for name in TARGETS:
     entry = EXPERIMENTS[name]
     raw = entry["raw"]
     EXP_RUNS[name] = list(raw["runs"])
+    grouping = raw.get("samples") or {r: [r] for r in raw["runs"]}
+    EXP_SAMPLES[name] = [s for s, rs in grouping.items() if rs]
+    for sample_id, rs in grouping.items():
+        if not rs:
+            continue
+        SAMPLE_RUNS[sample_id] = list(rs)
+        SAMPLE_EXP[sample_id] = name
     for run_id in raw["runs"]:
         RUN_SPECIES[run_id] = entry["species"]
         RUN_LAYOUT[run_id] = raw["library_layout"]
@@ -344,6 +363,30 @@ def run_fastqs(run_id):
             else [f"{run_id}.fastq.gz"])
 
 
+def _rep(sample_id):
+    """A representative run for a sample. Every run of one sample comes from the same
+    experiment, so species/layout/UMI/adapter are shared -- any of them answers."""
+    return SAMPLE_RUNS[sample_id][0]
+
+
+def sample_species(s):     return RUN_SPECIES[_rep(s)]
+def sample_is_paired(s):   return is_paired(_rep(s))
+def sample_has_umi(s):     return has_umi(_rep(s))
+def sample_adapter_fa(s):  return adapter_fasta(_rep(s))
+def sample_umi_arg(s):     return umi_arg(_rep(s))
+
+
+def sample_input_fastqs(sample_id):
+    """Per-RUN FASTQs feeding a sample's merge, interleaved deposits split first."""
+    out = []
+    for r in SAMPLE_RUNS[sample_id]:
+        if is_interleaved(r):
+            out += [f"{WORK}/runs/{r}/mate_1.fastq.gz", f"{WORK}/runs/{r}/mate_2.fastq.gz"]
+        else:
+            out += [f"{FASTQ_DIR}/{fq}" for fq in run_fastqs(r)]
+    return out
+
+
 GENOME_FILES = {Path(g["fasta"]).name: sp for sp, g in GENOMES.items()}
 
 #: Exclusion lists that have to be FETCHED, basename -> species. Only the three
@@ -378,6 +421,7 @@ def blacklist_targets():
 wildcard_constraints:
     exp="|".join(re.escape(e) for e in EXPERIMENTS) if EXPERIMENTS else "$^",
     run="[A-Z]RR[0-9]+",
+    sample="|".join(re.escape(s) for s in SAMPLE_RUNS) if SAMPLE_RUNS else "$^",
     # INSDC accessions come in several shapes and the narrow 2-letter+6-digit
     # form was not enough: U03843 (the C. reinhardtii mitochondrion) is
     # 1 letter + 5 digits and failed to match, which surfaced as a
@@ -727,6 +771,53 @@ rule adapter_fasta:
         ))
 
 
+rule merge_run_fastqs:
+    """Concatenate a sample's resequencing runs into one FASTQ pair, BEFORE trimming.
+
+    This is the first of the pipeline's two merge levels; see the SAMPLE_RUNS comment at
+    the top. It must happen here and not later: umi_tools dedup can only remove a PCR
+    duplicate if it sees both copies in one BAM, and a library split across two runs and
+    deduped per run keeps every cross-run duplicate. Gzip members concatenate, so a plain
+    cat is a valid gzip stream -- no recompression.
+
+    A single-run sample is the overwhelming majority; it is hard-linked rather than copied
+    so the common case costs nothing.
+    """
+    input:
+        lambda w: sample_input_fastqs(w.sample)
+    output:
+        r1=temp(f"{WORK}/samples/{{sample}}/raw_1.fastq.gz"),
+        r2=temp(f"{WORK}/samples/{{sample}}/raw_2.fastq.gz"),
+    params:
+        paired=lambda w: int(sample_is_paired(w.sample)),
+    log:
+        f"{WORK}/logs/merge_run_fastqs/{{sample}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output.r1}) $(dirname {log})
+        exec > {log} 2>&1
+        set -o pipefail
+        files=({input})
+        if [ {params.paired} -eq 1 ]; then
+            # Mates alternate _1,_2 per run (sample_input_fastqs preserves that order);
+            # concatenate each mate stream separately and IN THE SAME ORDER, or the two
+            # files stop corresponding read-for-read.
+            m1=(); m2=()
+            for ((i=0; i<${{#files[@]}}; i+=2)); do
+                m1+=("${{files[$i]}}"); m2+=("${{files[$((i+1))]}}")
+            done
+            if [ ${{#m1[@]}} -eq 1 ]; then ln -f "${{m1[0]}}" {output.r1}
+            else cat "${{m1[@]}}" > {output.r1}; fi
+            if [ ${{#m2[@]}} -eq 1 ]; then ln -f "${{m2[0]}}" {output.r2}
+            else cat "${{m2[@]}}" > {output.r2}; fi
+        else
+            if [ ${{#files[@]}} -eq 1 ]; then ln -f "${{files[0]}}" {output.r1}
+            else cat "${{files[@]}}" > {output.r1}; fi
+            : > {output.r2}
+        fi
+        """
+
+
 rule trim:
     """fastp: adapter trimming, plus UMI extraction for libraries that have one.
 
@@ -741,21 +832,19 @@ rule trim:
     beginning, so those reads are never trimmed at all.
     """
     input:
-        # An interleaved deposit is split first; everything else is read as
-        # fetched.
-        fastq=lambda w: (
-            [f"{WORK}/runs/{w.run}/mate_1.fastq.gz",
-             f"{WORK}/runs/{w.run}/mate_2.fastq.gz"]
-            if is_interleaved(w.run)
-            else [f"{FASTQ_DIR}/{fq}" for fq in run_fastqs(w.run)]
-        ),
-        # [] for a run with no recorded adapter, which lets fastp auto-detect.
-        adapter=lambda w: (lambda f: [f] if f else [])(adapter_fasta(w.run)),
+        # Per SAMPLE, not per run: merge_run_fastqs has already concatenated any
+        # resequencing runs, and interleaved deposits were split before that.
+        fastq=lambda w: ([f"{WORK}/samples/{w.sample}/raw_1.fastq.gz",
+                          f"{WORK}/samples/{w.sample}/raw_2.fastq.gz"]
+                         if sample_is_paired(w.sample)
+                         else [f"{WORK}/samples/{w.sample}/raw_1.fastq.gz"]),
+        # [] for a sample with no recorded adapter, which lets fastp auto-detect.
+        adapter=lambda w: (lambda f: [f] if f else [])(sample_adapter_fa(w.sample)),
     output:
-        trimmed=temp([f"{WORK}/runs/{{run}}/trim_1.fastq.gz",
-                      f"{WORK}/runs/{{run}}/trim_2.fastq.gz"]),
-        json=f"{WORK}/runs/{{run}}/fastp.json",
-        html=f"{WORK}/runs/{{run}}/fastp.html",
+        trimmed=temp([f"{WORK}/samples/{{sample}}/trim_1.fastq.gz",
+                      f"{WORK}/samples/{{sample}}/trim_2.fastq.gz"]),
+        json=f"{WORK}/samples/{{sample}}/fastp.json",
+        html=f"{WORK}/samples/{{sample}}/fastp.html",
     params:
         encode=STEPS["trim"]["encode_params"],
         # Explicit adapter, from the manifest via raw.adapter. fastp's
@@ -775,25 +864,25 @@ rule trim:
         # 903,891 (fasta + pinned sequence) on a 2 M subsample, against ~27,000
         # for every config lacking that entry.
         adapter=lambda w, input: (
-            f"--adapter_sequence {ADAPTER_SEQS[RUN_ADAPTER[w.run]][0]} "
+            f"--adapter_sequence {ADAPTER_SEQS[RUN_ADAPTER[_rep(w.sample)]][0]} "
             f"--adapter_fasta {input.adapter[0]}" if input.adapter else ""
         ),
         poly=STEPS["trim"].get("poly_params", ""),
         io=lambda w, input, output: (
             f"-i {input.fastq[0]} -I {input.fastq[1]} "
             f"-o {output.trimmed[0]} -O {output.trimmed[1]}"
-            if is_paired(w.run)
+            if sample_is_paired(w.sample)
             else f"-i {input.fastq[0]} -o {output.trimmed[0]}"
         ),
-        umi=lambda w: umi_arg(w.run),
+        umi=lambda w: sample_umi_arg(w.sample),
         # Snakemake requires every declared output to exist; single-end runs
         # never produce a second file, so create an empty placeholder.
         touch_r2=lambda w, output: (
-            "" if is_paired(w.run) else f"touch {output.trimmed[1]}"
+            "" if sample_is_paired(w.sample) else f"touch {output.trimmed[1]}"
         ),
     threads: 8
     log:
-        f"{WORK}/logs/trim/{{run}}.log"
+        f"{WORK}/logs/trim/{{sample}}.log"
     shell:
         r"""
         mkdir -p $(dirname {output.json}) $(dirname {log})
@@ -807,20 +896,20 @@ rule trim:
 rule align:
     input:
         trimmed=lambda w: (
-            [f"{WORK}/runs/{w.run}/trim_1.fastq.gz",
-             f"{WORK}/runs/{w.run}/trim_2.fastq.gz"]
-            if is_paired(w.run) else [f"{WORK}/runs/{w.run}/trim_1.fastq.gz"]
+            [f"{WORK}/samples/{w.sample}/trim_1.fastq.gz",
+             f"{WORK}/samples/{w.sample}/trim_2.fastq.gz"]
+            if sample_is_paired(w.sample) else [f"{WORK}/samples/{w.sample}/trim_1.fastq.gz"]
         ),
-        index=lambda w: f"{REPO_ROOT}/data/star/{RUN_SPECIES[w.run]}",
+        index=lambda w: f"{REPO_ROOT}/data/star/{sample_species(w.sample)}",
     output:
-        bam=temp(f"{WORK}/runs/{{run}}/Aligned.sortedByCoord.out.bam"),
+        bam=temp(f"{WORK}/samples/{{sample}}/Aligned.sortedByCoord.out.bam"),
         # Declared so it is a tracked product rather than a file that merely
         # happens to survive: the bam above is temp(), and experiment_stats
         # reads its mapping rates from here after the bam is gone.
-        log_final=f"{WORK}/runs/{{run}}/Log.final.out",
+        log_final=f"{WORK}/samples/{{sample}}/Log.final.out",
     params:
         encode=STEPS["align"]["encode_params"],
-        prefix=lambda w: f"{WORK}/runs/{w.run}/",
+        prefix=lambda w: f"{WORK}/samples/{w.sample}/",
         reads=lambda w, input: " ".join(input.trimmed),
         # --limitBAMsortRAM defaults to the size of the GENOME INDEX, not to
         # anything about the library. On a small genome that budget is tiny, so
@@ -830,14 +919,14 @@ rule align:
         # the rule's own memory minus a reserve for the loaded index.
         sort_ram=lambda w, resources: int(
             (resources.get("mem_mb", 16000)
-             - (30000 if RUN_SPECIES[w.run] in LARGE_GENOME else 3000)) * 1e6
+             - (30000 if sample_species(w.sample) in LARGE_GENOME else 3000)) * 1e6
         ),
     threads: 12
     resources:
-        mem_mb=lambda w: 40000 if RUN_SPECIES[w.run] in LARGE_GENOME else 16000,
+        mem_mb=lambda w: 40000 if sample_species(w.sample) in LARGE_GENOME else 16000,
         runtime=360,
     log:
-        f"{WORK}/logs/align/{{run}}.log"
+        f"{WORK}/logs/align/{{sample}}.log"
     shell:
         r"""
         mkdir -p $(dirname {log})
@@ -853,15 +942,15 @@ rule align:
 rule filter_unique:
     """STAR gives uniquely mapped reads MAPQ 255, which is the ENCODE filter."""
     input:
-        f"{WORK}/runs/{{run}}/Aligned.sortedByCoord.out.bam"
+        f"{WORK}/samples/{{sample}}/Aligned.sortedByCoord.out.bam"
     output:
-        bam=temp(f"{WORK}/runs/{{run}}/unique.bam"),
-        bai=temp(f"{WORK}/runs/{{run}}/unique.bam.bai"),
+        bam=temp(f"{WORK}/samples/{{sample}}/unique.bam"),
+        bai=temp(f"{WORK}/samples/{{sample}}/unique.bam.bai"),
     params:
         encode=STEPS["filter"]["encode_params"],
     threads: 4
     log:
-        f"{WORK}/logs/filter_unique/{{run}}.log"
+        f"{WORK}/logs/filter_unique/{{sample}}.log"
     shell:
         r"""
         mkdir -p $(dirname {log})
@@ -874,10 +963,10 @@ rule dedup:
     """umi_tools, only for libraries carrying a UMI. PRO-cap legitimately stacks
     many reads on one initiation base, so non-UMI libraries are never deduped."""
     input:
-        bam=f"{WORK}/runs/{{run}}/unique.bam",
-        bai=f"{WORK}/runs/{{run}}/unique.bam.bai",
+        bam=f"{WORK}/samples/{{sample}}/unique.bam",
+        bai=f"{WORK}/samples/{{sample}}/unique.bam.bai",
     output:
-        temp(f"{WORK}/runs/{{run}}/dedup.bam")
+        temp(f"{WORK}/samples/{{sample}}/dedup.bam")
     params:
         # --paired says the BAM is paired-end; --method picks the UMI clustering
         # algorithm. They are orthogonal -- the old code returned one OR the
@@ -886,12 +975,12 @@ rule dedup:
         mode=lambda w: " ".join(filter(None, [
             f"--method={STEPS['dedup']['method']}",
             f"--umi-separator={STEPS['dedup']['umi_separator']}",
-            "--paired" if is_paired(w.run) else "",
+            "--paired" if sample_is_paired(w.sample) else "",
         ])),
     resources:
         mem_mb=16000,
     log:
-        f"{WORK}/logs/dedup/{{run}}.log"
+        f"{WORK}/logs/dedup/{{sample}}.log"
     shell:
         "mkdir -p $(dirname {log}) && "
         "umi_tools dedup -I {input.bam} -S {output} {params.mode} > {log} 2>&1"
@@ -912,20 +1001,20 @@ rule final_bam:
     mates.
     """
     input:
-        lambda w: (f"{WORK}/runs/{w.run}/dedup.bam" if has_umi(w.run)
-                   else f"{WORK}/runs/{w.run}/unique.bam")
+        lambda w: (f"{WORK}/samples/{w.sample}/dedup.bam" if sample_has_umi(w.sample)
+                   else f"{WORK}/samples/{w.sample}/unique.bam")
     output:
-        bam=f"{WORK}/runs/{{run}}/final.bam",
-        bai=f"{WORK}/runs/{{run}}/final.bam.bai",
+        bam=f"{WORK}/samples/{{sample}}/final.bam",
+        bai=f"{WORK}/samples/{{sample}}/final.bam.bai",
     params:
         # -f 64 = first in pair, -f 128 = second. Single-end reads have neither
         # bit set, so this must only be applied to paired runs.
         select=lambda w: (
             f"samtools view -b -f {64 if FIVE_PRIME_MATE == 'R1' else 128}"
-            if is_paired(w.run) else ""
+            if sample_is_paired(w.sample) else ""
         ),
     log:
-        f"{WORK}/logs/final_bam/{{run}}.log"
+        f"{WORK}/logs/final_bam/{{sample}}.log"
     shell:
         r"""
         mkdir -p $(dirname {log})
@@ -939,9 +1028,16 @@ rule final_bam:
 
 
 rule merge_runs:
-    """Pool technical/biological replicate runs for one experiment."""
+    """Pool an experiment's BIOLOGICAL REPLICATES -- the second and last merge level.
+
+    Inputs are per-SAMPLE final BAMs, each already deduplicated in isolation. That
+    ordering is the point: resequencing runs of one library were concatenated as FASTQ
+    before dedup (merge_run_fastqs), while separate libraries are only pooled here, after
+    it. Pooling replicates any earlier would let umi_tools treat two libraries' reads at
+    the same 5' base as duplicates of each other and discard real initiation events.
+    """
     input:
-        lambda w: [f"{WORK}/runs/{r}/final.bam" for r in EXP_RUNS[w.exp]]
+        lambda w: [f"{WORK}/samples/{s}/final.bam" for s in EXP_SAMPLES[w.exp]]
     output:
         bam=temp(f"{WORK}/exp/{{exp}}/merged.bam"),
         bai=temp(f"{WORK}/exp/{{exp}}/merged.bam.bai"),
