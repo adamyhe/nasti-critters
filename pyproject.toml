@@ -54,11 +54,35 @@ dependencies = [
     "igraph<1.0",
     # pillow 12.3.0 dropped manylinux_2_17; same pin as procap-atlas.
     "pillow<12.3.0",
+    # WHEEL-ONLY CAPS. Sherlock's default toolchain is gcc 4.8.5 with binutils
+    # 2.27 -- 2015 vintage, no C++17 and no AVX512-VNNI -- so a source build
+    # there does not merely take a long time, it fails. contourpy 1.3.3 dies on
+    # `C++ Compiler does not support -std=c++17`; pybigtools died on
+    # `no such instruction: vpdpbusd`. The base set therefore has to install
+    # from wheels ALONE, and each cap below is the first version whose linux
+    # x86_64 wheels moved past manylinux_2_17.
+    #
+    # These are upper bounds rather than exact pins, so patch releases on the
+    # wheel-having line are still picked up. Re-derive them with the audit
+    # recorded in CLAUDE.md when a cap starts to bite; do not simply raise one
+    # without checking the wheel tags.
+    #
+    # Loading a newer gcc module on Sherlock would also work and would need no
+    # caps at all -- but then every source-built extension links against that
+    # module's libstdc++ and the module has to be loaded in each job too. Caps
+    # keep the environment self-contained.
+    "contourpy<1.3.3",
+    "h5py<3.15.0",
+    "hdf5plugin<6.0.0",
+    "numpy<2.3.0",
+    "pandas<2.3.3",
+    "scikit-learn<1.8.0",
+    "scipy<1.17.0",
     # --- analysis / plotting ---
-    # Both arrive transitively (matplotlib via logomaker via modisco-lite,
-    # scipy via several), but src/analysis/ imports them directly.
+    # Both arrive transitively (matplotlib via logomaker via modisco, scipy via
+    # several), but src/analysis/ imports them directly. scipy's version cap is
+    # in the wheel-only block above.
     "matplotlib",
-    "scipy",
 
     # NOTE: the ENCODE pipeline's Python-side tools are NOT here. pyPINTS
     # (pints_caller) and umi-tools are both CLI tools that this repo only ever
@@ -70,8 +94,6 @@ dependencies = [
     # --- workflow ---
 
     # --- data handling used across src/ ---
-    "numpy",
-    "pandas",
     "pyyaml",
     "joblib",    # benchmark_predictions.py
     # pybigtools is DIRECT, not merely transitive via tangermeme: since

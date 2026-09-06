@@ -112,11 +112,29 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   This replaced a briefly-lived pair of mutually exclusive `sherlock` (torch==2.6.0) and `cherimoya`
   (torch>=2.10) extras with a `[tool.uv] conflicts` declaration, copied from procap-atlas. That works
   and is more machinery than the actual requirement: **Sherlock is not used for GPU jobs here.**
-- **Sherlock's glibc is BELOW 2.28, and that single boundary explains every version pin here.** Measured
-  at the torch step change: `torch-2.6.0-cp311-cp311-manylinux1_x86_64.whl` against
-  `torch-2.7.0-cp311-cp311-manylinux_2_28_x86_64.whl`. A package whose newest wheel is `manylinux_2_26`
-  or later has none uv can use there, so uv falls back to the sdist — which sometimes builds and
-  sometimes does not, and that distinction is the whole story:
+- **Sherlock cannot build ANYTHING from source with its default toolchain, so the base set must install
+  from wheels alone.** Two facts, both measured rather than inferred. Its glibc is below 2.28 — from the
+  torch step change, `torch-2.6.0-...-manylinux1_x86_64.whl` against
+  `torch-2.7.0-...-manylinux_2_28_x86_64.whl` — so any package whose newest wheel is `manylinux_2_26` or
+  later falls back to an sdist. And its default compiler is **gcc 4.8.5 with binutils 2.27**, 2015
+  vintage, reported by meson as `c++ (GCC) 4.8.5` / `ld.bfd 2.27`. That toolchain has **no C++17** and
+  no AVX512-VNNI, so the fallback does not merely run slowly, it fails:
+
+      contourpy 1.3.3   ERROR: C++ Compiler does not support -std=c++17
+      pybigtools 0.3.0  Error: no such instruction: `vpdpbusd %ymm12,%ymm3,%ymm4`
+
+  **An earlier version of this note said a missing wheel means a source build, "not automatically a
+  failure". On this cluster it is.** That framing survived two rounds of pinning one package at a time,
+  each of which just moved the failure to the next package in the graph. The base set is now capped so
+  that **zero** of its 34 packages need a build — verify with the audit below after any dependency
+  change.
+
+  A newer `gcc` module would also work and would need no caps, but then every source-built extension
+  links against that module's libstdc++ and the module has to be loaded in each job too. Caps keep the
+  environment self-contained.
+
+  | pin | why |
+  | --- | --- |
 
   | pin | why |
   | --- | --- |
@@ -125,8 +143,12 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
   | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
   | `pybigtools` **moved out of base** | not pinned — moved into the `torch` extra, so Sherlock never builds it at all. See below |
+  | `contourpy<1.3.3`, `h5py<3.15.0`, `hdf5plugin<6.0.0`, `numpy<2.3.0`, `pandas<2.3.3`, `scikit-learn<1.8.0`, `scipy<1.17.0` | the first version of each whose linux x86_64 wheels moved past `manylinux_2_17` |
 
-  All four are procap-atlas's, which is the right authority because it runs on the same cluster.
+  The first four are procap-atlas's, which is the right authority because it runs on the same cluster;
+  the caps are derived here. They are upper bounds, not exact pins, so patch releases on the
+  wheel-having line still resolve. **Do not raise one without re-running the audit** — the cap is the
+  wheel boundary, not a guess.
 - **`pybigtools` is in the `torch` extra, NOT in base, and that placement is load-bearing.** It is
   `manylinux_2_28`-only at every version, so it always builds from source on a pre-2.28 glibc, and
   0.3.0's build dies in `libdeflate-sys` with `no such instruction: vpdpbusd` — GCC emitting AVX512-VNNI
@@ -137,9 +159,10 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   reads bigWigs with it from the MAMBA env, where it is a conda package. So Sherlock never builds it.
   Do not move it back to base to "declare what we import" — the declaration lives in the `torch` extra,
   which is where the importer lives.
-- **Nine base entries still have no `manylinux_2_17` wheel and WILL build from source there** —
-  `numpy`, `scipy`, `pandas`, `h5py`, `scikit-learn`, `contourpy`, `hdf5plugin` (numpy and scipy twice,
-  from the universal lock's python-version split). **No 2_17 wheel means a
+- **Zero base packages now need a source build.** Re-audit after ANY dependency change: resolve the base
+  set, then check each wheel's platform tags against `manylinux_2_17`. A single uncapped transitive
+  dependency is enough to break `uv sync` on Sherlock, and it will surface as a compiler error deep in a
+  build log rather than as a resolution failure. **No 2_17 wheel means a
   source build, not automatically a failure** — but do not lean on that the way an earlier version of
   this note did. It cited `pybigtools` as proof, reasoning that upstream installs it on Sherlock despite
   its being 2_28-only at every version. That had the example exactly backwards: upstream pins
