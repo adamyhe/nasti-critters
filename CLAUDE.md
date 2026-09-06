@@ -269,6 +269,10 @@ python src/data_preprocessing/run_procap_pipeline.py --index-only --species S.ce
 python src/data_preprocessing/run_procap_pipeline.py -e S.cerevisiae-Ino80ctl_PROcap --dry-run
 python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
 
+# Just the initiator logos + metaplots, for every experiment. Narrow on
+# purpose: `qc` also builds the three reports that read the RAW FASTQs.
+snakemake orientation -c8 --rerun-triggers mtime        # target BEFORE --config
+
 # Mapped reads + peak counts per experiment, for exclude/merge decisions
 snakemake stats -c8 --config tier=include,conditional   # target BEFORE --config
 python src/qc/experiment_stats.py --all \
@@ -2080,6 +2084,45 @@ Annotation (`annotation_url` in `config/genomes.yaml`, UCSC GTF for the chr-pref
 Ensembl GFF3 for the bare-named ones, so naming always matches the FASTA) is used **for QC only** —
 never for training, peak calling or fold assignment, so no circularity reaches the model.
 
+**C. reinhardtii has NO annotation under ASM4749649v1, and a null `annotation_url` is now a
+SUPPORTED state rather than a DAG failure.** `annotation_path()` interpolated
+`annotation_format` into the filename, so a null pair produced `data/annotation/C.reinhardtii.None.gz`
+— a path no rule can produce. Both consumers declare it as an input (`orientation_qc` and
+`rrna_content`), so `snakemake qc` died at **DAG construction** for that experiment instead of skipping
+a panel, and the exclusion was invisible from the totals: a whole-corpus dry-run simply reported 40
+`orientation_qc` jobs where 42 were expected. It now returns **no dependency**, `orientation_qc` omits
+`--annotation` (an empty value would be read as the next flag), and `load_annotation()` returns no TSSs.
+Degrading is right rather than convenient — annotation is QC-only, never labels/folds/peaks;
+`rrna_content` already reports a missing annotation as NOT MEASURED (blank `pct_rrna`, distinct from 0);
+and the two read-outs that carry the orientation verdict, the initiator logo and the **summit-anchored
+metaplot**, are annotation-free. Only the TSS-anchored panel is lost — which the `notes` field of that
+`genomes.yaml` entry already recorded as a known cost of the move, taken for a near-gapless assembly
+(contig N50 6.29 Mb and 17 gaps against v5.5's 215 kb and 1,512 gaps).
+
+**Do not go looking for that annotation again — checked 2026-09-06 and it does not exist.** Four
+independent confirmations for `GCA_047496495.1` (strain **CC-1690**, University of Georgia, 2025-02-06):
+the NCBI FTP directory carries no `*_genomic.gff.gz` at all; `feature_count.txt` reports
+**0 unique ids and 0 placements** for `gene protein_coding`; the features/locations hashes in
+`annotation_hashes.txt` are `d41d8cd98f00b204e9800998ecf8427e`, the MD5 of the **empty string**; and
+`RefSeq-Accn` is `na` for every chromosome in the assembly report, so there is no paired RefSeq record
+to annotate it. Across all 19 *C. reinhardtii* assemblies at NCBI the only annotated chromosome-level
+one is **v5.5** itself (`GCA_000002595.3` / `GCF_000002595.2`, JGI) — the assembly this entry moved away
+from — plus a contig-level CCAP 11-32A; even `GCA_026108075.1`, the reference-guided assembly this one
+was built against, carries none there.
+
+**And borrowing v5.5's (or v6.1's) annotation is not the fallback it looks like.** Different assembly,
+different strain, and different chromosome naming — v5.5 is `1`-`17` where this FASTA is CM accessions
+(`CM104919.1`…). `extract_loci` and the QC loader match literally, so it would yield **zero TSSs in
+silence**, which is exactly the failure `chrom_style` exists to prevent; making it real would take a
+liftover, not a URL. Leave `annotation_url` null.
+
+**And `experiment_config.yaml` must be REGENERATED after a genome swap — `genomes.yaml` alone is not
+enough.** `processed.sequences` is baked into the config by `build_experiment_config.py`, so updating
+P. patens to V7 and C. reinhardtii to ASM4749649v1 left both experiments naming the *old* FASTA, which
+no `fetch_genome` produces: same silent-exclusion symptom as above, two more missing jobs. Run
+`python src/data_preprocessing/build_experiment_config.py` and commit the result with the
+`genomes.yaml` change.
+
 **GTF exists for all 12 species, but the source split is not free to change.** Ensembl ships a parallel
 `gtf/` tree at the same release for all seven Ensembl species (probed 2026-08-30, all HTTP 200). Switching
 the three UCSC species to Ensembl GTF is nevertheless **wrong**: the annotation source is chosen so
@@ -2139,6 +2182,29 @@ Regenerating would silently revert all of it. Do it the same way next time.
 
 All 14 runs were resolved against ENA and all report `SINGLE`. Findings worth keeping:
 
+- **GSE233927 holds csRNA-seq AND 5'GRO-seq for the same tissues, and this repo pulls the 5'GRO-seq —
+  verified per sample 2026-09-06.** The series is five assays deep (csRNA-seq, 5'GRO-seq, plain GRO-seq,
+  sRNA-seq "input", total RNA-seq), so picking the wrong sample would silently substitute a *steady-state*
+  capped short-RNA library for a nascent run-on one. All four rows are correct: `GSM7439223`/`GSM7439224`,
+  `GSM7439241` and `GSM7439248` carry per-sample descriptions
+  `5'GRO-seq; nascent TSS mapping in {species} cells; Experiment SD102/SD103/SD150/SD180`,
+  `Library strategy: 5'GRO-seq` in `data_processing`, and supplementary files named
+  `*_5GRO-seq_r*.bed.gz`. The csRNA-seq counterparts (`GSM7439225`-`7439227`, `GSM7439243`,
+  `GSM7439249`/`GSM7439250`) are **not** in the manifest.
+  **Two traps in that metadata, both of which mislead if read alone:**
+  GEO's `library_strategy` is **`OTHER` for csRNA-seq and 5'GRO-seq alike**, so it cannot separate them —
+  only the title/description can (same class as cotton's `miRNA-Seq` mislabel). And
+  `!Sample_extract_protocol_ch1` is a **series-wide concatenated blob** describing csRNA-seq, sRNA-seq and
+  total RNA-seq, attached to every sample *including* the 5'GRO ones — read it on its own and these look
+  like csRNA-seq libraries. Use `!Sample_description`.
+  **Only three species in that series have 5'GRO-seq at all**: C. reinhardtii, P. patens,
+  S. moellendorffii. `A.thaliana-seedling_5GRO` is a different project — `Hetzel2016_at_5GRO`,
+  `GSM2193123`, "5'GRO-seq in 6 day seedlings" — because GSE233927's Arabidopsis samples are csRNA-seq
+  only. **So extending this project to its other species (papaya, barley, maize, fly S2) means taking
+  csRNA-seq, which is a DIFFERENT RNA POPULATION** — capped short RNAs from total RNA, no nuclear run-on —
+  and belongs in its own assay family with its own models, not folded into `GRO-cap-equivalent`. The
+  plain GRO-seq samples (`GSM7439228`, `GSM7439251`) are the paper's peak-calling input/control and are
+  correctly excluded as targets by the Field Guide rule.
 - **`Shamie2021_cg_5GRO` really is all Chinese hamster.** `BMDM…KLA`, `Brain`, `Kidney`, `Liver`, `Lung`
   look like Glass-lab *mouse* sample names (and Lam2013/Link2018 in this same manifest *are* Glass-lab
   mouse BMDM), so this was checked rather than assumed: ENA reports **72/72 runs as
@@ -2323,6 +2389,31 @@ Two changes, because either alone would have left the trap:
   column counts. A too-broad glob has to fail, not average out — the whole failure was that a
   plausible-looking table hid it.
 
+**That header check is now scoped by NAME, because on its own it fires on the wrong things — and
+misses one.** `--combine`'s row set is `experiment_config.yaml`, not the directory it globs:
+
+- A TSV **naming no configured experiment is skipped with a warning.** Once an experiment is renamed or
+  split, no rule has its wildcards, so nothing can ever rewrite its file and it is frozen at whatever
+  schema it had. Both failure modes were observed from the *same* pre-sex-split pair:
+  `M.musculus-liver-old_ChROcap.tsv` froze at **18 columns** and hard-failed `stats_table` during a
+  two-experiment `--config experiments=C.reinhardtii…,P.patens…` re-map that had nothing to do with
+  mouse liver, while `liver-young` froze at the current 21, passed the check, and **silently produced a
+  44-row table over 42 experiments** — the worse of the two, since it reads as complete. Delete such
+  files; the warning says so.
+- A **configured** experiment with a wrong header still **exits nonzero**, and now says it is stale
+  output with the command to rebuild it. That is also what still catches `--combine {input}`: the rrna
+  and reads TSVs *are* named by experiment, so they hit this branch rather than the skip.
+- **Zero rows exits nonzero too.** Skipping by name means a `--combine` pointed somewhere entirely wrong
+  no longer fails on a header, and an empty global table reads exactly as complete as a 40-row-short one.
+
+Note this exposure is a consequence of `aac86f6` globbing the whole directory rather than taking
+`TARGETS` — right for the row set, but it puts every stale file in the corpus in scope of every subset
+run. `report_flags`'s survey-schema check is scoped the same way, to the files
+`read_survey_flags` can actually consult (`qc/reads/{exp}.tsv` for a configured experiment, plus the
+corpus-wide `read_structure.tsv` fallback); orphaned survey files were emitting warnings for
+experiments that no longer exist, which is noise in the one place whose value is that a warning means
+something.
+
 Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the only reason the garbage
 rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
 enough to be committed.
@@ -2400,6 +2491,23 @@ which is precisely GCB, whose only project-mate is priB. There it is caught by `
 having two independent tells mattered. Run the standalone sweep for the full screen:
 `python src/qc/read_structure_qc.py --tsv qc/reads/read_structure.tsv`.
 
+**`signal_reads` reports NOT MEASURED (blank) rather than 0 when no contig matches, and its fallback is
+SAMPLE-keyed.** Two defects that combined to print `signal_reads 0` for
+`C.reinhardtii-liquidculture_5GRO` and `P.patens-plateculture_5GRO` beside 9,216 and 9,833 called peaks —
+which cannot both be true, and which reads as a dead library rather than as a measurement failure:
+
+- `mapped_reads()` skipped every contig outside `main_chromosomes` and returned the running total, so a
+  BAM from a *different naming regime* — i.e. an older assembly still on disk — was indistinguishable
+  from a library with no usable reads. It now returns `None` and names the file. Same rule `pct_rrna`
+  already follows: blank is NOT 0. A library genuinely carrying zero reads on its main chromosomes would
+  also have no peaks, so blank is the honest cell either way.
+- The `merged.bam` fallback still probed the **pre-refactor `runs/{run}/final.bam`** after alignment moved
+  to one BAM per sample. That is worse than finding nothing, because those files are **not `temp()`** and
+  survive a re-map, so on a re-mapped tree it read BAMs aligned to the PREVIOUS assembly. It now tries
+  `samples/{sample}/final.bam` first and falls back to the run-keyed path only for a tree that predates
+  the refactor. `star_logs()` was taught both layouts for exactly this reason; this was the counterpart it
+  missed.
+
 `signal_reads` sits below `unique_reads` by dedup (UMI libraries only, 3 of 40) and by the one-mate filter
 (paired libraries only, 5 of 40). For paired libraries it counts one mate per fragment, since that is what
 `final_bam` keeps.
@@ -2444,6 +2552,35 @@ Three reasons to leave them alone:
 This also matches the project's stated design (one experiment == one species x one condition == one
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
+
+## Assay provenance: swept all 64 runs, no non-cap assay is a target
+
+Checked 2026-09-06, after the GSE233927 csRNA-seq/5'GRO-seq question above, because that series proves a
+deposit can hold both and nothing structural stops the wrong sample being picked. Method: every GEO series
+(16 of them) pulled as a `targ=gsm` dump and each manifest row's `sample_accession` matched against its
+own `!Sample_title`/`!Sample_description`, plus ENA `experiment_title` for the 9 non-GEO rows (4
+ArrayExpress, 4 CNCB cotton, 1 run-only).
+
+**Result: every one of the 55 GEO samples and 9 non-GEO samples names a cap-selected initiation assay** --
+PRO-cap, GRO-cap, 5'GRO-seq, ChRO-cap, CoPRO, or Spt5's `CAP_*`. No csRNA-seq, sRNA-seq, total RNA-seq,
+PRO-seq or non-cap GRO-seq sample appears as a target. The 5 TAP-/noTAP rows are all
+`target_use=control`. Two names that look wrong and are not: the fly embryo rows are
+`PROseq_PROcap34h1`-style submitter names, but ENA's `experiment_title` is "PRO-cap in Drosophila
+melanogaster embryo" with **`library_selection: CAGE`**, and PRJEB25091 holds only those 4 runs, so there
+is no PRO-seq there to leak.
+
+**The load-bearing finding is that NO ARCHIVE FIELD can verify cap selection for this corpus, so the
+manifest's `assay_label`/`cap_status` is the only record** -- the same default-deny situation as
+`umi_len`/`umi_loc`. Measured across all 64 runs:
+
+| field | values |
+| --- | --- |
+| `library_strategy` | **`OTHER` for 51/64**; wrongly `RNA-Seq` for Lam2013's 3 (GEO agrees, titles say 5'GRO-seq); `miRNA-Seq` for cotton's 4 |
+| `library_selection` | **`other` for 51/64**; `CAGE` for the 4 fly embryo runs; `cDNA` for Lam2013's 3 |
+
+So `library_strategy` is `OTHER` for csRNA-seq and 5'GRO-seq alike (see the GSE233927 note) *and* for
+almost everything else here. Re-run the sweep by title, never by strategy, and treat a new dataset's
+assay as curated-until-proven rather than archive-verified.
 
 ## Nothing is excluded: every dataset is analysed and modelled
 
