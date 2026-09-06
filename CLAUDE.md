@@ -112,6 +112,29 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   This replaced a briefly-lived pair of mutually exclusive `sherlock` (torch==2.6.0) and `cherimoya`
   (torch>=2.10) extras with a `[tool.uv] conflicts` declaration, copied from procap-atlas. That works
   and is more machinery than the actual requirement: **Sherlock is not used for GPU jobs here.**
+- **Sherlock's glibc is BELOW 2.28, and that single boundary explains every version pin here.** Measured
+  at the torch step change: `torch-2.6.0-cp311-cp311-manylinux1_x86_64.whl` against
+  `torch-2.7.0-cp311-cp311-manylinux_2_28_x86_64.whl`. A package whose newest wheel is `manylinux_2_26`
+  or later has none uv can use there, so uv falls back to the sdist — which sometimes builds and
+  sometimes does not, and that distinction is the whole story:
+
+  | pin | why |
+  | --- | --- |
+  | `leidenalg==0.10.2` | 0.11.0 moved from `manylinux_2_17` to `2_26/2_28`; the sdist build fails. Arrives via **modisco-lite**, so a tfmodisco-only install is affected |
+  | `igraph<1.0` | leidenalg's own dependency, same jump — 1.0.0 is 2_28-only, 0.11.9 is the last 2_17 |
+  | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
+  | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
+
+  All four are procap-atlas's, which is the right authority because it runs on the same cluster.
+- **Ten base packages still have no `manylinux_2_17` wheel and WILL build from source there** —
+  `numpy`, `scipy`, `pandas`, `h5py`, `scikit-learn`, `contourpy`, `hdf5plugin`, `pybigtools`. That is
+  expected, not a bug in waiting: **no 2_17 wheel means a source build, not a failure.** procap-atlas
+  installs `pybigtools` on Sherlock and it is `manylinux_2_28`-only at *every* version including the
+  0.2.5 upstream pins — so it is built there successfully. Pin one of these only when a build actually
+  fails; pinning pre-emptively costs newer versions for nothing. Re-audit with:
+
+      uv export --no-emit-project --no-hashes   # then check each wheel's tags on PyPI
+
 - **Do NOT try to get a newer torch from conda-forge. Tried, rejected.** conda-forge ships pytorch up to
   **2.13.0** for linux-64, and conda packages carry no manylinux tag, so it looks like the obvious way
   round the wheel ceiling — a modern torch there would also let cherimoya run natively instead of

@@ -32,6 +32,19 @@ dependencies = [
     # scikit-learn, leidenalg, igraph, tqdm, pandas, logomaker, h5py,
     # hdf5plugin, memelite.
     "modisco-lite>=2.0.0",
+    # leidenalg 0.11.0 moved its linux wheels from manylinux_2_17 to
+    # manylinux_2_26/2_28, so on Sherlock -- glibc < 2.28, the same boundary
+    # that caps torch at 2.6.0, which is manylinux1 where 2.7.0 is 2_28 -- uv
+    # falls back to an sdist build that fails. 0.10.2 is the last release with a
+    # 2_17 wheel, and procap-atlas pins the identical version for the identical
+    # reason. It arrives via modisco-lite (leidenalg>=0.8.10), which is why a
+    # tfmodisco-only install is affected at all.
+    "leidenalg==0.10.2",
+    # igraph is leidenalg's own dependency and made the same jump: 1.0.0 is
+    # 2_28-only, 0.11.9 is the last with a 2_17 wheel.
+    "igraph<1.0",
+    # pillow 12.3.0 dropped manylinux_2_17; same pin as procap-atlas.
+    "pillow<12.3.0",
     # --- analysis / plotting ---
     # Both arrive transitively (matplotlib via logomaker via modisco-lite,
     # scipy via several), but src/analysis/ imports them directly.
@@ -134,6 +147,15 @@ override-dependencies = [
     "cykhash ; sys_platform == 'nonexistent'",
 ]
 package = false
+
+# hdf5plugin, pulled in by modisco-lite, publishes no manylinux_2_17 wheel and
+# so always builds from source on Sherlock. Its build script probes the host and
+# adds -march=native, which makes GCC auto-vectorise the popcount loops in the
+# bundled SPERR sources into AVX512-VPOPCNTDQ instructions that Sherlock's
+# assembler cannot assemble. Disabling native also keeps the login node's ISA
+# out of filter plugins that jobs load on older compute nodes. Taken from
+# procap-atlas, which hit this on the same cluster.
+extra-build-variables = { hdf5plugin = { HDF5PLUGIN_NATIVE = "False" } }
 
 [tool.uv.sources]
 # Match the authoritative Apptainer image at
