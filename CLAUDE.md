@@ -88,9 +88,103 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   regenerate with
   `uvx --from conda-lock conda-lock lock -f environment.yml -p linux-64 --lockfile conda-lock.yml`
   and install with `conda-lock install --name nasti-critters conda-lock.yml`. `requirements.txt` is gone. Activate the venv last so its interpreter wins:
-  `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync && source .venv/bin/activate`.
+  `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync --extra torch && source .venv/bin/activate` — drop `--extra torch` on a CPU-only machine such as Sherlock.
 - Version pins trace the ENCODE spec: `fastp=0.23.4`, `star=2.7.11a`, `samtools=1.18` (conda);
-  `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv). `torch>=2.10` is required for `torch.optim.Muon`.
+  `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv).
+- **TORCH IS NOT A BASE DEPENDENCY — the base set is torch-free and there is ONE extra.**
+
+      uv sync                 # torch-free: tfmodisco, analysis, every launcher
+      uv sync --extra torch   # adds training, benchmarking, attribution
+
+  Verified after the split: the default resolution contains **0** torch-carrying packages and
+  `--extra torch` adds **21** (torch, triton, the `nvidia-*` set, bpnet-lite, tangermeme, cherimoya).
+  **The split is by DEPENDENCY, not by task**, which is the part that trips people up: `tangermeme`
+  requires `torch>=2.0` and `bpnet-lite` `torch>=1.9.0`, so anything importing either is on the torch
+  side even where the science does not obviously involve a model — `fit_*`, `benchmark_*`,
+  `attribute.py`, `make_negatives.py`, and `filter_nonACGT_regions.py --save-ohe` (the filtering is
+  torch-free; only the one-hot encoding, which goes through `extract_loci`, is not). Before adding a
+  base dependency, run `pip download <pkg> --no-deps` and read its `Requires-Dist`.
+- **Sherlock takes the base set and runs the CPU-demanding jobs; GPU work happens elsewhere.** Its glibc
+  tier has no manylinux wheel for torch above **2.6.0**, newer versions fall back to an sdist build that
+  fails, and 2.6.0 is too old for cherimoya's `torch.optim.Muon` (2.10) — so there is no torch version
+  that both installs there and satisfies this repo. Rather than pin a crippled one, the base set simply
+  has no torch and installs cleanly, which is all tfmodisco needs.
+  This replaced a briefly-lived pair of mutually exclusive `sherlock` (torch==2.6.0) and `cherimoya`
+  (torch>=2.10) extras with a `[tool.uv] conflicts` declaration, copied from procap-atlas. That works
+  and is more machinery than the actual requirement: **Sherlock is not used for GPU jobs here.**
+- **Sherlock cannot build ANYTHING from source with its default toolchain, so the base set must install
+  from wheels alone.** Two facts, both measured rather than inferred. Its glibc is below 2.28 — from the
+  torch step change, `torch-2.6.0-...-manylinux1_x86_64.whl` against
+  `torch-2.7.0-...-manylinux_2_28_x86_64.whl` — so any package whose newest wheel is `manylinux_2_26` or
+  later falls back to an sdist. And its default compiler is **gcc 4.8.5 with binutils 2.27**, 2015
+  vintage, reported by meson as `c++ (GCC) 4.8.5` / `ld.bfd 2.27`. That toolchain has **no C++17** and
+  no AVX512-VNNI, so the fallback does not merely run slowly, it fails:
+
+      contourpy 1.3.3   ERROR: C++ Compiler does not support -std=c++17
+      pybigtools 0.3.0  Error: no such instruction: `vpdpbusd %ymm12,%ymm3,%ymm4`
+
+  **An earlier version of this note said a missing wheel means a source build, "not automatically a
+  failure". On this cluster it is.** That framing survived two rounds of pinning one package at a time,
+  each of which just moved the failure to the next package in the graph. The base set is now capped so
+  that **zero** of its 34 packages need a build — verify with the audit below after any dependency
+  change.
+
+  A newer `gcc` module would also work and would need no caps, but then every source-built extension
+  links against that module's libstdc++ and the module has to be loaded in each job too. Caps keep the
+  environment self-contained.
+
+  | pin | why |
+  | --- | --- |
+
+  | pin | why |
+  | --- | --- |
+  | `leidenalg==0.10.2` | 0.11.0 moved from `manylinux_2_17` to `2_26/2_28`; the sdist build fails. Arrives via **modisco**, so a tfmodisco-only install is affected |
+  | `igraph<1.0` | leidenalg's own dependency, same jump — 1.0.0 is 2_28-only, 0.11.9 is the last 2_17 |
+  | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
+  | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
+  | `pybigtools` **moved out of base** | not pinned — moved into the `torch` extra, so Sherlock never builds it at all. See below |
+  | `contourpy<1.3.3`, `h5py<3.15.0`, `hdf5plugin<6.0.0`, `numpy<2.3.0`, `pandas<2.3.3`, `scikit-learn<1.8.0`, `scipy<1.17.0` | the first version of each whose linux x86_64 wheels moved past `manylinux_2_17` |
+
+  The first four are procap-atlas's, which is the right authority because it runs on the same cluster;
+  the caps are derived here. They are upper bounds, not exact pins, so patch releases on the
+  wheel-having line still resolve. **Do not raise one without re-running the audit** — the cap is the
+  wheel boundary, not a guess.
+- **`pybigtools` is in the `torch` extra, NOT in base, and that placement is load-bearing.** It is
+  `manylinux_2_28`-only at every version, so it always builds from source on a pre-2.28 glibc, and
+  0.3.0's build dies in `libdeflate-sys` with `no such instruction: vpdpbusd` — GCC emitting AVX512-VNNI
+  that Sherlock's assembler cannot assemble, the same class of failure as hdf5plugin's `-march=native`.
+  Pinning to 0.2.5 (procap-atlas's choice) was the first fix and is the weaker one, because 0.2.5 also
+  has to build. **Nothing on the base side needs it**: the only venv-side importer is
+  `src/make_negatives.py`, which is torch-side anyway since it imports tangermeme, and `orientation_qc.py`
+  reads bigWigs with it from the MAMBA env, where it is a conda package. So Sherlock never builds it.
+  Do not move it back to base to "declare what we import" — the declaration lives in the `torch` extra,
+  which is where the importer lives.
+- **Zero base packages now need a source build.** Re-audit after ANY dependency change: resolve the base
+  set, then check each wheel's platform tags against `manylinux_2_17`. A single uncapped transitive
+  dependency is enough to break `uv sync` on Sherlock, and it will surface as a compiler error deep in a
+  build log rather than as a resolution failure. **No 2_17 wheel means a
+  source build, not automatically a failure** — but do not lean on that the way an earlier version of
+  this note did. It cited `pybigtools` as proof, reasoning that upstream installs it on Sherlock despite
+  its being 2_28-only at every version. That had the example exactly backwards: upstream pins
+  **0.2.5** precisely *because* newer releases fail to build there. The general point survives (a
+  missing wheel is not by itself a problem); the evidence for it did not.
+  So the rule is empirical, not deductive: pin when a build actually fails, and take a pin from
+  procap-atlas as evidence that one does. Re-audit with:
+
+      uv export --no-emit-project --no-hashes   # then check each wheel's tags on PyPI
+
+- **Do NOT try to get a newer torch from conda-forge. Tried, rejected.** conda-forge ships pytorch up to
+  **2.13.0** for linux-64, and conda packages carry no manylinux tag, so it looks like the obvious way
+  round the wheel ceiling — a modern torch there would also let cherimoya run natively instead of
+  through Apptainer. It does not work: **conda's torch build does not reliably use CUDA.** The version
+  list is not the problem, so re-checking it proves nothing; this was established by experience on the
+  cluster.
+- **`modisco` cannot move to `environment.yml`, though by this repo's own rule it belongs there.**
+  Nothing imports `modiscolite`; `src/bpnet/modisco/` only ever shells out to the `modisco` CLI, exactly
+  like `umi_tools` and `pints_caller`. But it is PyPI-only — checked 2026-09-05, HTTP 404 for
+  `modisco`, `modisco-lite`, `modiscolite`, `tfmodisco-lite` and `tfmodisco` on **both** bioconda and
+  conda-forge, and its `memelite` dependency is 404 there too. Same situation as `tangermeme`. Do not
+  re-litigate this without re-checking those names.
 - Two package-name traps, both already handled — do not "fix" them back: the peak caller is **`pyPINTS`**
   (PyPI `pints` is unrelated time-series inference), and PyPI **`muon` is a multi-omics framework**, not the
   optimizer. `fit_cherimoya.py` imports `torch.optim.Muon` and raises a pointed error rather than falling
@@ -485,6 +579,25 @@ to see spread, not significance.
 Cherimoya is not deployment-ready, so treat anything this produces as a development comparison rather
 than a result.
 
+## TF-MoDISco: the package is `modisco`, NOT `modisco-lite`
+
+`modisco-lite` is the **deprecated name for the same project**, and both are on PyPI — `modisco` 2.5.2
+against `modisco-lite` 2.4.0. They are not two packages: `modisco` installs the same top-level
+`modiscolite/` package and the same `modisco` script, so anything installing both gets whichever landed
+second, silently.
+
+That is a live risk here rather than a hypothetical, because the two upstreams disagree:
+**cherimoya 0.2.0 requires `modisco>=2.0.0`, bpnet-lite 1.0.0 on PyPI still requires
+`modisco-lite>=2.0.0`** — so `uv sync --extra torch` would pull both. `[tool.uv] override-dependencies`
+drops `modisco-lite` behind the same unsatisfiable marker used for `macs3`; verified with
+`uv export`, where it appears as `modisco-lite==2.4.0 ; sys_platform == 'nonexistent'` and never
+resolves, while `modisco==2.5.2` installs.
+
+**The CLI surface is identical across the rename**, checked rather than assumed: subcommands
+`motifs`/`report`/`convert`/`meme`, and `-n/--max_seqlets`, `-l/--n_leiden` (still defaulting to 2),
+`-w/--window`, `-m/--meme_db`, `-l/--lite` all unchanged. So `src/bpnet/modisco/` needed no edit. The
+only dependency difference is that `modisco` adds `jinja2`.
+
 ## TF-MoDISco
 
 `src/bpnet/modisco/` follows procap-atlas's scripting: `modisco motifs` then `modisco report`, one job
@@ -530,7 +643,7 @@ arguments with no fallback, so the next caller cannot inherit the wrong set by o
 **`NUMBA_NUM_THREADS` is pinned to `--cpus-per-task` on every modisco job.** numba otherwise sets it
 from every core it can SEE, which on a shared node is the whole machine and not the slice SLURM granted
 — a job holding 32 CPUs on a 128-core node spawns 128 threads, oversubscribes its own cgroup and can run
-slower than if it had asked for less, while degrading everything else on the node. tfmodisco-lite is
+slower than if it had asked for less, while degrading everything else on the node. tfmodisco is
 numba-heavy throughout, which is why this is set here and nowhere else.
 
 It rides on the command as a `VAR=value cmd` prefix rather than an `export` line in the sbatch body, so
@@ -556,7 +669,7 @@ it:
 the report is a convenience layer and the database has no effect on which motifs modisco discovers.
 `--motif-db` overrides with a single file for every experiment, which is rarely right here.
 
-`modisco-lite` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
+`modisco` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
 transitively, because these scripts invoke its `modisco` CLI — same reasoning as `pybigtools`. Note it
 ships the entry point as an old-style `data/scripts/modisco`, not a `console_script`.
 
