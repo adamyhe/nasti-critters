@@ -219,8 +219,8 @@ Pass those at submit time (`sbatch --partition=... -C ...`,
 Only the metadata steps (1) run anywhere. Everything from (2) on needs the
 cluster: `fastp`, `STAR`, `samtools`, GNU `sort` (coreutils), `bgzip` (htslib),
 `bedGraphToBigWig` (UCSC), `pints_caller`, and `umi_tools` on `PATH`, plus a GPU
-for training. On Sherlock: `mamba activate torch` and the `ml` module loads from
-`src/bpnet/fit/slurm.sh`.
+for training. On Sherlock: `mamba activate torch`, plus whatever `ml` module loads your site needs —
+put them in a file and pass it as `launch.py --setup-file`, since no tracked script carries them.
 
 ### 1. Metadata (seconds, no cluster)
 

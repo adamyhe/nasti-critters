@@ -27,13 +27,16 @@ Two model families are trained on the same data:
   **It is NOT D. melanogaster-only, and this file said so until 2026-09-03.** `fit_cherimoya.py` takes
   `-e` and resolves paths, species and folds through `src/experiments.py` exactly as `fit_bpnet.py` does,
   and `config/cherimoya_params.json` holds no species-specific value — it has been corpus-capable since
-  `f9f60cf` ported it onto the unified config. What made it *look* single-species was that the surrounding
-  scripts were left at the pre-unification interface: `src/cherimoya/fit/slurm.sh` ran `-f
-  $SLURM_ARRAY_TASK_ID` with **no `-e`**, so every array task exited 2; `benchmark/cmd.sh` hard-coded
-  `D.melanogaster-S2_PROcap.json` as its already-done check while passing `"$@"` through, so once fly was
-  benchmarked every other experiment printed "Skipping" and exited 0; and there was no launcher at all.
-  All fixed, and `src/bpnet/fit/slurm.sh` had the same missing `-e` (plus a relative path and a
-  `--job-name=s2_fit` from the dm3 era).
+  `f9f60cf` ported it onto the unified config. What made it *look* single-species was a set of
+  hand-written `slurm.sh` / `cmd.sh` scripts left at the pre-unification interface — cherimoya's fit
+  script ran `-f $SLURM_ARRAY_TASK_ID` with **no `-e`**, so every array task exited 2; its benchmark
+  `cmd.sh` hard-coded `D.melanogaster-S2_PROcap.json` as its already-done check while passing `"$@"`
+  through, so once fly was benchmarked every other experiment printed "Skipping" and exited 0; and
+  bpnet's fit script had the same missing `-e`, plus a relative path and a `--job-name=s2_fit` from the
+  dm3 era. **All four are deleted.** The eight `launch.py` launchers over `src/launcher.py` replace them
+  and get per-species fold counts right, which a static `--array=0-4` cannot — C. elegans has six folds.
+  Do not add hand-written SLURM scripts back; a launcher generates the same sbatch script with
+  `--dry-run`.
 
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
@@ -210,8 +213,10 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   will simply not schedule there; `modisco motifs` sits exactly on that cap.
   Everything else is unchanged: container use is opt-in via `APPTAINER_IMAGE` / `APPTAINER_BIND`; job
   environment setup defaults to activating this repo's mamba env + uv venv, with `launch.py
-  --setup-file` for site-specific module loads. **Do not reintroduce cluster PATHS into tracked files**,
-  and note the `.sh` launchers still emit no partition or constraint of their own.
+  --setup-file` for site-specific module loads. **Do not reintroduce cluster PATHS into tracked files.**
+  The four hand-written `.sh` launchers, which emitted no partition or constraint of their own, are
+  **deleted**: both `fit/slurm.sh` and cherimoya's `benchmark/slurm.sh` and `benchmark/cmd.sh`. So
+  `src/launcher.py` is now the only thing in the repo that writes an sbatch script — do not add another.
 - **Do not add an Apptainer definition to this repo.** Container images are maintained externally and
   authoritatively at [adamyhe/sherlock](https://github.com/adamyhe/sherlock) (`cherimoya/cherimoya.def`, base
   `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime`). A project-local `src/cherimoya/apptainer/` existed and
@@ -533,9 +538,9 @@ because the script paths and families differ, exactly as for fit; the selection 
 **Their already-done check goes through `experiments.metrics_path()`, which both scripts now write
 through.** `--metrics-dir` was a bare string default in each script (`performance_metrics/bpnet`,
 `performance_metrics/cherimoya`) and a launcher predicting that path would have been a third copy. Same
-rule as `attribution_path()`. `src/cherimoya/benchmark/cmd.sh` is what happens without it: it hard-coded
-`D.melanogaster-S2_PROcap.json` as its already-done check while forwarding `"$@"`, so once fly was
-benchmarked every other experiment printed "Skipping" and exited 0.
+rule as `attribution_path()`. The deleted `src/cherimoya/benchmark/cmd.sh` is what happens without it:
+it hard-coded `D.melanogaster-S2_PROcap.json` as its already-done check while forwarding `"$@"`, so once
+fly was benchmarked every other experiment printed "Skipping" and exited 0.
 
 **Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
 on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one

@@ -11,7 +11,8 @@ takes -e and resolves paths, species and folds through src/experiments.py
 exactly as fit_bpnet.py does, and config/cherimoya_params.json holds no
 species-specific value. This launcher existing is what makes that usable at
 corpus scale -- before it, the only cherimoya entry points were a single-job
-slurm.sh and a bare fit invocation, which made the family look dm-only.
+hand-written slurm.sh (since deleted) and a bare fit invocation, which made the
+family look dm-only.
 
 Per src/cherimoya/README.md the models are not deployment-ready; this is the
 training workflow, not a deployment pipeline.

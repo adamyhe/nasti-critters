@@ -6,8 +6,8 @@ src/bpnet/benchmark/launch.py. The job unit is the EXPERIMENT, for the same
 reason it is there: benchmark_cherimoya.py scores every fold in one run and
 pools their predictions for the genome-wide block.
 
-This replaces src/cherimoya/benchmark/cmd.sh as the way to benchmark more than
-one experiment. cmd.sh hard-coded D.melanogaster-S2_PROcap.json as its
+This replaces the deleted src/cherimoya/benchmark/cmd.sh as the way to benchmark
+more than one experiment. cmd.sh hard-coded D.melanogaster-S2_PROcap.json as its
 already-done check while forwarding "$@" through, so once fly had been
 benchmarked every other experiment printed "Skipping" and exited 0 without
 running. The check here comes from experiments.metrics_path, the same function

@@ -47,25 +47,23 @@ Both are additionally gated on `torch.compile` being usable at all — it raises
 torch 2.10, where the limit is Dynamo rather than Triton — and the benchmark warns rather than silently
 ignoring `--compile` when it cannot be honoured.
 
-Cluster launchers run **natively** by default and take no site-specific values;
-pass partition and GPU constraints at submit time:
+**The hand-written `slurm.sh` and `cmd.sh` scripts are gone.** They were
+single-experiment assumptions left over from before the config unification, and
+each was broken in its own way: `fit/slurm.sh` ran `-f $SLURM_ARRAY_TASK_ID`
+with no `-e`, so every array task exited 2; `benchmark/cmd.sh` hard-coded
+`D.melanogaster-S2_PROcap.json` as its already-done check while forwarding
+`"$@"` verbatim, so once fly had been benchmarked every other experiment
+reported "Skipping" and exited 0 without running; and a static `--array=0-4`
+cannot express C. elegans' six folds. The launchers replace all of it, generate
+the equivalent sbatch script with `--dry-run`, and get the fold count right per
+species. Do not add them back.
+
+Launchers run **natively** by default. Partition and GPU constraint now have
+defaults in `src/launcher.py`, both overridable:
 
 ```bash
-bash src/cherimoya/benchmark/cmd.sh -e D.melanogaster-S2_PROcap
-sbatch --partition=gpu src/cherimoya/benchmark/slurm.sh -e D.melanogaster-S2_PROcap
-sbatch --partition=gpu src/cherimoya/fit/slurm.sh D.melanogaster-S2_PROcap
+python src/cherimoya/fit/launch.py --partition gpu --constraint GPU_SKU:A100_PCIE
 ```
-
-**The experiment is required in all three, and was previously absent from two of
-them.** `fit/slurm.sh` ran `-f $SLURM_ARRAY_TASK_ID` with no `-e`, so every array
-task exited 2; `benchmark/cmd.sh` hard-coded `D.melanogaster-S2_PROcap.json` as
-its already-done check while forwarding `"$@"` verbatim, so once fly had been
-benchmarked every other experiment reported "Skipping" and exited 0 without
-running. Both were single-experiment assumptions left over from before the
-config unification; `fit_cherimoya.py` itself has taken `-e` since `f9f60cf`.
-`fit/slurm.sh` also still carries a static `--array=0-4`, so pass
-`--array=0-5` for C. elegans or use the launcher, which gets it right per
-species.
 
 To run in a container instead, point them at an image; this repo does not define
 one, and should not — the authoritative images are maintained at
@@ -96,8 +94,8 @@ The job unit is the experiment rather than the fold, because the script scores
 every fold in one run and pools their predictions for the genome-wide block. It
 skips an experiment whose metrics JSON exists, whose inputs are missing, or
 whose folds are not all trained — the last two are what the script itself exits
-1 on. This is the replacement for `cmd.sh`, whose already-done check named one
-experiment's JSON while it forwarded any experiment through.
+1 on. This is the replacement for the deleted `cmd.sh`, whose already-done check
+named one experiment's JSON while it forwarded any experiment through.
 
 ## Cherimoya version and API
 
