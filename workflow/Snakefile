@@ -1414,9 +1414,25 @@ rule stats_table:
     The escape hatch survives: `experiment_stats.py --combine` still reads both
     directories opportunistically, so a table can be rebuilt by hand from
     whatever survives without touching the FASTQs.
+
+    SCOPE IS DELIBERATELY DECOUPLED FROM `TARGETS`. The inputs below are scoped to
+    TARGETS, but what gets combined is the whole per_experiment directory. Those
+    are two different questions: the inputs answer "when must this rerun, and
+    after what", the glob answers "what belongs in the table". Tying the second
+    to TARGETS meant `--config experiments=A,B` rebuilt the ONE global table from
+    two rows and silently dropped the other 40 -- a subsetting flag has no
+    business narrowing a global output. Recovery was possible only because
+    per_experiment/ is never pruned.
+
+    The cost is a staleness gap in the other direction: with a subset selected, a
+    per-experiment TSV outside TARGETS that changes on disk will not by itself
+    retrigger this rule. That is the right trade -- a table one row stale is
+    visibly repairable with `--forcerun stats_table`, a table 40 rows short is
+    not visibly anything.
     """
     input:
-        # NAMED, and --combine takes only `stats`. `--combine {input}` swept in
+        # ORDERING AND STALENESS ONLY -- not the row set; see the docstring.
+        # Nothing here is passed to --combine. `--combine {input}` once swept in
         # the rrna and reads TSVs and this rule's own script as well, and
         # DictReader absorbed all three: 685 rows over 42 experiments, every
         # pipeline column blank. rrna and reads are read from their
@@ -1435,12 +1451,17 @@ rule stats_table:
         md=f"{QC}/stats/experiment_stats.md",
     params:
         script=f"{REPO_ROOT}/src/qc/experiment_stats.py",
+        per_experiment=f"{QC}/stats/per_experiment",
         qc_rrna=f"{QC}/rrna",
         qc_reads=f"{QC}/reads",
     log:
         f"{WORK}/logs/experiment_stats/_table.log"
     shell:
         "mkdir -p $(dirname {log}) $(dirname {output.tsv}) && "
-        "python {params.script} --combine {input.stats} "
+        # SINGLE-QUOTED so the glob reaches Python rather than being expanded by
+        # bash: experiment_stats.py globs any --combine arg containing '*', and
+        # letting the shell do it would resolve the pattern against TARGETS-era
+        # state and reintroduce a partial table on an empty directory.
+        "python {params.script} --combine '{params.per_experiment}/*.tsv' "
         "--qc-rrna {params.qc_rrna} --qc-reads {params.qc_reads} "
         "-o {output.tsv} --markdown {output.md} > {log} 2>&1"
