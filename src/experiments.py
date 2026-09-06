@@ -53,6 +53,7 @@ MODELS_DIR = REPO_ROOT / "models"
 ATTR_DIR = REPO_ROOT / "attributions"
 MODISCO_DIR = REPO_ROOT / "modisco"
 MOTIF_DB_DIR = REPO_ROOT / "data" / "motifs"
+METRICS_DIR = REPO_ROOT / "performance_metrics"
 
 # Bases that extract_loci should treat as unknown. Passed on every call in this
 # repo; kept here so the list cannot drift between scripts.
@@ -152,6 +153,25 @@ def modisco_report_dir(family: str, experiment: str, attribute_type: str,
     """`modisco report` output directory, beside the .h5 it summarises."""
     return (MODISCO_DIR / family /
             f"{experiment}_{attribute_type}_{reference_mode}.modisco")
+
+
+def metrics_path(family: str, experiment: str,
+                 metrics_dir: str | None = None) -> Path:
+    """Benchmark metrics JSON, under `performance_metrics/{family}/`.
+
+    Family-keyed like `model_path` and `attribution_path`, because the metrics
+    describe a model. `src/analysis/compare_bpnet_cherimoya.py` inner-joins the
+    two families on this layout, so both benchmark scripts must agree on it --
+    which is the reason it is defined here rather than built inline in each of
+    them. The launcher has to predict the same path to know whether an
+    experiment is already benchmarked; a second copy of the format string is
+    how a launcher starts re-running finished work.
+
+    `metrics_dir` overrides the directory, resolved against REPO_ROOT when
+    relative, matching how both scripts have always treated --metrics-dir.
+    """
+    base = METRICS_DIR / family if metrics_dir is None else REPO_ROOT / metrics_dir
+    return base / f"{experiment}.json"
 
 
 def motif_db_path(species: str) -> Path:

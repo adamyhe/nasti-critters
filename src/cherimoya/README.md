@@ -83,6 +83,22 @@ python src/cherimoya/benchmark/benchmark_cherimoya.py -e D.melanogaster-S2_PROca
 python src/cherimoya/benchmark/benchmark_cherimoya.py -e D.melanogaster-S2_PROcap --save-output
 ```
 
+For every experiment, use the benchmark launcher — again the same one BPNet
+uses, through `src/launcher.py`:
+
+```bash
+python src/cherimoya/benchmark/launch.py --dry-run
+python src/cherimoya/benchmark/launch.py --save-predictions
+python src/cherimoya/benchmark/launch.py --print-commands | bash
+```
+
+The job unit is the experiment rather than the fold, because the script scores
+every fold in one run and pools their predictions for the genome-wide block. It
+skips an experiment whose metrics JSON exists, whose inputs are missing, or
+whose folds are not all trained — the last two are what the script itself exits
+1 on. This is the replacement for `cmd.sh`, whose already-done check named one
+experiment's JSON while it forwarded any experiment through.
+
 ## Cherimoya version and API
 
 `pyproject.toml` pins `cherimoya` to commit `8e4283fe` (version 0.2.1) via

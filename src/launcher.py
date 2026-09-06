@@ -64,6 +64,7 @@ from experiments import (
     experiment_ids,
     filtered_loci_path,
     load_params,
+    metrics_path,
     model_path,
     modisco_h5_path,
     modisco_report_dir,
@@ -579,6 +580,167 @@ def run_attribute(family: str, script: Path) -> None:
     )
 
 
+def build_benchmark_parser(family: str, script: Path) -> argparse.ArgumentParser:
+    launcher = f"src/{family}/benchmark/launch.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate {family} benchmark jobs, one per experiment.
+
+            The job unit is the EXPERIMENT, not (experiment x fold):
+            {script.name} loads every fold's model, scores each on its own
+            held-out loci, and writes one metrics JSON carrying both the
+            per-fold block and the pooled genome-wide one. Splitting it per
+            fold would make the genome-wide block impossible to compute, since
+            pooling needs every fold's predictions in one process.
+
+            Skips an experiment whose inputs are missing or whose folds are not
+            all trained -- {script.name} exits 1 on both -- and skips one whose
+            metrics JSON already exists.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} -e D.melanogaster-S2_PROcap
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # One inference pass per fold, where a fit job is 50 epochs -- so the fit
+    # defaults (6:00:00) are far more wall than this needs, and the modisco
+    # lesson applies: resources are chosen per launcher rather than inherited
+    # by omission.
+    _add_common_args(
+        parser, launcher, gpu=True,
+        default_cpus=4, default_mem="32G", default_time="2:00:00",
+    )
+    parser.add_argument(
+        "-e",
+        "--experiments",
+        nargs="+",
+        default=None,
+        metavar="EXP",
+        help="limit to these experiment IDs (default: every one in the config)",
+    )
+    parser.add_argument("--models-dir", type=str, default=None)
+    parser.add_argument(
+        "--metrics-dir",
+        type=str,
+        default=None,
+        help="override the metrics directory, forwarded to the script AND used "
+             "for the already-done check, so the two cannot disagree "
+             f"(default: performance_metrics/{family})",
+    )
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        help="also dump raw predictions per experiment. The two families spell "
+             "this differently -- cherimoya has --save-output and a "
+             "predictions/cherimoya/ default, bpnet has --output-fname with no "
+             "default -- so this flag resolves to whichever the family wants, "
+             "writing bpnet's to predictions/bpnet/{experiment}.joblib. "
+             "Separate from the metrics JSON, which is always written",
+    )
+    parser.add_argument(
+        "--benchmark-args",
+        type=str,
+        default="",
+        help=f"extra arguments forwarded to {script.name}. Use = to pass a "
+             "value that starts with a dash (--benchmark-args='--compile'); "
+             "argparse otherwise reads it as this launcher's own flag. Note the "
+             "SAME string goes to every job, so anything per-experiment (a "
+             "single --output-fname) belongs in --save-predictions or a "
+             "single-experiment invocation instead",
+    )
+    return parser
+
+
+def run_benchmark(family: str, script: Path) -> None:
+    """Enumerate and emit one benchmark job per experiment."""
+    parser = build_benchmark_parser(family, script)
+    args = parser.parse_args()
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / f"{family}_benchmark"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = skipped_untrained = 0
+    skipped_experiments = 0
+    total = 0
+    for exp_id in experiments:
+        try:
+            exp = Experiment.load(exp_id)
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        try:
+            exp.n_folds()
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        total += 1
+
+        if exp.missing:
+            print(
+                f"SKIP {exp_id}: missing data — {', '.join(exp.missing)}",
+                file=sys.stderr,
+            )
+            skipped_missing += 1
+            continue
+
+        # Same rule as attribution, for a different reason: the benchmark scores
+        # every fold in one run, so a partly trained experiment is not partly
+        # benchmarkable. Report how far along it is rather than just refusing.
+        folds = exp.all_folds(family, models_dir=args.models_dir)
+        absent = [f for f in folds if not f["model"].exists()]
+        if absent:
+            print(
+                f"SKIP {exp_id}: {len(folds) - len(absent)}/{len(folds)} folds "
+                f"trained; benchmarking needs all of them",
+                file=sys.stderr,
+            )
+            skipped_untrained += 1
+            continue
+
+        if metrics_path(family, exp_id, args.metrics_dir).exists():
+            skipped_done += 1
+            continue
+
+        cmd = (
+            f"python {shlex.quote(str(script))} "
+            f"-e {shlex.quote(exp_id)}"
+        )
+        if args.models_dir:
+            cmd += f" --models-dir {shlex.quote(args.models_dir)}"
+        if args.metrics_dir:
+            cmd += f" --metrics-dir {shlex.quote(args.metrics_dir)}"
+        if args.save_predictions:
+            if family == "cherimoya":
+                cmd += " --save-output"
+            else:
+                out = f"predictions/{family}/{exp_id}.joblib"
+                cmd += f" --output-fname {shlex.quote(out)}"
+        if args.benchmark_args:
+            cmd += f" {args.benchmark_args}"
+
+        submitted += _emit(
+            args, log_dir, setup, f"{family}_benchmark_{exp_id}", cmd
+        )
+
+    print(
+        f"\n{_action(args)} {submitted} {family} benchmark jobs of {total} "
+        f"experiments; skipped {skipped_done} already done, "
+        f"{skipped_missing} missing data, {skipped_untrained} not fully trained"
+        + (
+            f", {skipped_experiments} experiments unusable"
+            if skipped_experiments
+            else ""
+        ),
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
+
 def build_filter_parser(family: str, script: Path) -> argparse.ArgumentParser:
     launcher = f"src/{family}/attribute/launch_filter.py"
     parser = argparse.ArgumentParser(
@@ -586,12 +748,15 @@ def build_filter_parser(family: str, script: Path) -> argparse.ArgumentParser:
             Enumerate non-ACGT locus-filtering jobs, one per experiment.
 
             Runs {script.name} over each experiment's peaks, writing a filtered
-            BED and its one-hot encoding. This step is OPTIONAL and nothing
-            downstream requires it: attribute.py reads the experiment's peaks
-            unless pointed at the filtered BED with --loci. It matters where a
-            blanked position is unacceptable -- `extract_loci(ignore=...)` keeps
-            a locus containing an N and zeroes that column, where this drops the
-            locus outright.
+            BED and its one-hot encoding. This step is REQUIRED, not optional:
+            deep_lift_shap refuses a sequence containing an unknown base, in
+            both reference modes, and `extract_loci(ignore=...)` -- which every
+            call in this repo passes -- KEEPS a locus containing an N and zeroes
+            that column rather than dropping it. So the setting attribution runs
+            under is what creates the input attribution cannot accept, and this
+            is the remedy. attribute.py defaults --loci to the filtered BED and
+            exits 1 without it; attribute/launch.py skips an unfiltered
+            experiment. The one-hot it also writes is modisco's second input.
 
             CPU-only, so these jobs request NO GPU. That is the reason this is a
             separate launcher rather than another --attribute-type: sending

@@ -297,9 +297,15 @@ python src/cherimoya/fit/launch.py --print-commands | bash
 python src/analysis/compare_bpnet_cherimoya.py
 
 # Evaluate / attribute
-python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
-python src/bpnet/benchmark/benchmark_predictions.py
+python src/cherimoya/benchmark/benchmark_cherimoya.py -e D.melanogaster-S2_PROcap --save-output
+python src/bpnet/benchmark/benchmark_predictions.py -e D.melanogaster-S2_PROcap
 python src/bpnet/attribute/attribute.py -e D.melanogaster-S2_PROcap --attribute-type profile
+
+# Submit all benchmark jobs; job unit is the EXPERIMENT (all folds in one run,
+# because the genome-wide block is pooled across them)
+python src/bpnet/benchmark/launch.py --dry-run
+python src/cherimoya/benchmark/launch.py --save-predictions
+python src/bpnet/benchmark/launch.py --print-commands | bash
 
 # Submit all attribution jobs; job unit is (experiment x type), NOT x fold
 python src/bpnet/attribute/launch.py --dry-run
@@ -496,24 +502,40 @@ the same reason the reference mode is in there: different loci give different nu
 on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
 check follows.
 
-## Launchers: six of them, one emission path
+## Launchers: eight of them, one emission path
 
-`src/launcher.py` holds the selection rule and the emission machinery; the three
-`launch.py` files are thin wrappers. All three take the same emission modes —
+`src/launcher.py` holds the selection rule and the emission machinery; the eight
+`launch.py` files are thin wrappers. All of them take the same emission modes —
 `--print-commands` (bare commands on stdout, skips and summary on stderr), `--dry-run` (full sbatch
 scripts) and the default (submit) — and the same SLURM flags, because `_add_common_args` and `_emit` are
-shared. Do not add a fourth copy of that block.
+shared. Do not add another copy of that block.
 
 | launcher | job unit | jobs | GPU | skips |
 | --- | --- | --- | --- | --- |
 | `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | yes | `.final.torch` exists, missing inputs, no fold assignment |
 | `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
+| `src/bpnet/benchmark/launch.py` | **experiment** | 42 | yes | metrics JSON exists, missing inputs, **folds not all trained** |
+| `src/cherimoya/benchmark/launch.py` | **experiment** | 42 | yes | same |
 | `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
 | `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 42 x types | **no** | .h5 exists, attribution or OHE npz missing |
 | `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 42 x types | **no** | report dir exists, .h5 or MEME db missing |
 
 Run order is filter -> attribute: `launch_filter.py`, then `launch.py`. The second **skips any experiment the first has not covered**, because attribution of unfiltered peaks cannot work.
+
+**The benchmark launchers' job unit is the EXPERIMENT, not the fold, and unlike attribution that is
+forced rather than merely convenient.** Both benchmark scripts score every fold and then report a
+`genome_wide` block pooled over all of them — one correlation across every fold's predictions
+concatenated — which cannot be computed if the folds are split across jobs. So one job per experiment is
+the only shape that produces the output the scripts already define. Two launchers rather than one
+because the script paths and families differ, exactly as for fit; the selection rule is one function.
+
+**Their already-done check goes through `experiments.metrics_path()`, which both scripts now write
+through.** `--metrics-dir` was a bare string default in each script (`performance_metrics/bpnet`,
+`performance_metrics/cherimoya`) and a launcher predicting that path would have been a third copy. Same
+rule as `attribution_path()`. `src/cherimoya/benchmark/cmd.sh` is what happens without it: it hard-coded
+`D.melanogaster-S2_PROcap.json` as its already-done check while forwarding `"$@"`, so once fly was
+benchmarked every other experiment printed "Skipping" and exited 0.
 
 **Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
 on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one
@@ -689,6 +711,7 @@ Both benchmark scripts now write the same three things; `performance_metrics/`, 
 | --- | --- | --- |
 | metrics JSON | `performance_metrics/bpnet/{experiment}.json` | `performance_metrics/cherimoya/{experiment}.json` |
 | override | `--metrics-dir` | `--metrics-dir` |
+| launcher | `src/bpnet/benchmark/launch.py` | `src/cherimoya/benchmark/launch.py` |
 | raw predictions | `--output-fname` (joblib, opt-in) | `--save-output` -> `predictions/cherimoya/` (npz) |
 | printed | per-fold **and** genome-wide | per-fold **and** genome-wide |
 
@@ -697,6 +720,10 @@ benchmark run before then left no artifact, while `benchmark_cherimoya.py` had a
 The JSON now carries the same shape as cherimoya's (`run_name`, `model_paths`, `per_fold`,
 `genome_wide`) so the two families are directly comparable, plus `counts_pearson`, which this script
 already computed and cherimoya's does not. It also gained the genome-wide block it was missing.
+
+Both paths are now defined by `experiments.metrics_path(family, experiment, metrics_dir=None)` rather
+than by a string default in each script, so the launchers' already-done check cannot drift from where
+the scripts write.
 
 **Genome-wide is POOLED across folds, not averaged over them** — `pearson_corr` over the
 concatenation, so each locus counts once regardless of how large its fold was. Averaging per-fold

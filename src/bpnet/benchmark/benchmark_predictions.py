@@ -23,6 +23,7 @@ from experiments import (  # noqa: E402
     IGNORE,
     load_model,
     load_params,
+    metrics_path,
 )
 
 
@@ -46,8 +47,11 @@ def main():
     )
     parser.add_argument("--models-dir", type=str, default=None)
     parser.add_argument(
-        "--metrics-dir", type=str, default="performance_metrics/bpnet",
-        help="directory for the metrics JSON (default: %(default)s). Matches "
+        "--metrics-dir", type=str, default=None,
+        help="directory for the metrics JSON (default: performance_metrics/"
+             "bpnet, from experiments.metrics_path -- shared with launch.py so "
+             "its already-done check cannot drift from where this writes). "
+             "Matches "
              "benchmark_cherimoya.py, which has always written one; this script "
              "only PRINTED its metrics until 2026-09-04",
     )
@@ -261,12 +265,11 @@ def main():
             "counts_spearman": counts_spearman_all,
         },
     }
-    metrics_dir = REPO_ROOT / args.metrics_dir
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = metrics_dir / f"{exp.id}.json"
-    with open(metrics_path, "w") as f:
+    out_path = metrics_path("bpnet", exp.id, args.metrics_dir)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
         json.dump(metrics, f, indent=4)
-    print(f"\nMetrics saved to {metrics_path}")
+    print(f"\nMetrics saved to {out_path}")
 
     if params["output_fname"] is not None:
         import joblib

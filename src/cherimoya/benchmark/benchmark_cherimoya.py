@@ -22,6 +22,7 @@ from experiments import (  # noqa: E402
     IGNORE,
     Experiment,
     load_params,
+    metrics_path,
 )
 
 
@@ -46,7 +47,12 @@ def main():
         help="experiment ID as it appears in config/experiment_config.yaml",
     )
     parser.add_argument("--models-dir", type=str, default=None)
-    parser.add_argument("--metrics-dir", type=str, default="performance_metrics/cherimoya")
+    parser.add_argument(
+        "--metrics-dir", type=str, default=None,
+        help="directory for the metrics JSON (default: performance_metrics/"
+             "cherimoya, from experiments.metrics_path -- shared with launch.py "
+             "so its already-done check cannot drift from where this writes)",
+    )
     parser.add_argument("--predictions-dir", type=str, default="predictions/cherimoya")
     parser.add_argument("--save-output", action="store_true")
     parser.add_argument("-b", "--batch-size", type=int, default=None)
@@ -257,12 +263,11 @@ def main():
             "counts_spearman": counts_spearman_all,
         },
     }
-    metrics_dir = REPO_ROOT / args.metrics_dir
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-    metrics_path = metrics_dir / f"{exp.id}.json"
-    with open(metrics_path, "w") as f:
+    out_path = metrics_path("cherimoya", exp.id, args.metrics_dir)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
         json.dump(metrics, f, indent=4)
-    print(f"\nMetrics saved to {metrics_path}")
+    print(f"\nMetrics saved to {out_path}")
 
     if args.save_output:
         output_dir = REPO_ROOT / args.predictions_dir
