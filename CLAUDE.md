@@ -2316,8 +2316,8 @@ by species, and a row with no species sorts first, so the file opened on ~500 em
 
 Two changes, because either alone would have left the trap:
 
-- The rule's inputs are **named** (`stats`/`rrna`/`reads`/`script`) and the shell passes
-  `--combine {input.stats}`, with the two directories passed as `params` instead. **Never `--combine
+- The rule's inputs are **named** (`stats`/`rrna`/`reads`/`script`) and the shell passes an explicit
+  per-experiment glob, with the two directories passed as `params` instead. **Never `--combine
   {input}`.**
 - `--combine` now **rejects any file whose header is not exactly `COLUMNS`**, naming the file and both
   column counts. A too-broad glob has to fail, not average out — the whole failure was that a
@@ -2326,6 +2326,20 @@ Two changes, because either alone would have left the trap:
 Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the only reason the garbage
 rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
 enough to be committed.
+
+**`stats_table` combines the DIRECTORY, not `TARGETS` — its scope is deliberately decoupled from its
+inputs.** The rule's inputs are scoped to `TARGETS`, but its output path,
+`qc/stats/experiment_stats.tsv`, is global and unscoped. While it also passed `--combine {input.stats}`,
+those were the same set, so `--config experiments=A,B` rebuilt the one global table from two rows and
+dropped the other 40 — found while re-running just the two updated genomes (P. patens V7,
+C. reinhardtii ASM4749649v1), where a 50-job DAG quietly included `stats_table`. **A subsetting flag must
+not narrow a global output.** The inputs still answer "when must this rerun, and after what" (the
+`rrna_content` race above); the glob `'{params.per_experiment}/*.tsv'` answers "what belongs in the
+table". It is **single-quoted so Python globs it, not bash** — `experiment_stats.py` globs any `--combine`
+argument containing `*`, and letting the shell expand it would resolve against whatever the subset left on
+disk. The residual cost is the reverse staleness gap: under a subset, a per-experiment TSV *outside*
+`TARGETS` that changes will not retrigger the rule. That trade is deliberate — a table one row stale is
+repairable with `--forcerun stats_table`, whereas a table 40 rows short reads as complete.
 
 **`umi_report.py` was checking the WRONG MATE, and it was the last place the old 3'-adaptor assumption
 survived.** It hardcoded `expect = declared if (not paired or mate_i == 2) else 0`, with a comment
