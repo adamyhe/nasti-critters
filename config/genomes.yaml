@@ -511,7 +511,7 @@ species:
     jaspar_collection: plants
     annotation_url: https://download.cncb.ac.cn/gwh/Plants/Physcomitrium_patens_Physcomitrium_patens_V7_GWHFIHF00000000.1/GWHFIHF00000000.1.gff.gz
     annotation_format: gff3
-    annotation_tss_anchored: true
+    annotation_tss_anchored: false
     notes: >-
       Moved from Phypa_V3 to V7 (Bi et al.
       2024, Nature Plants 10:327-343, doi:10.1038/s41477-023-01614-7; plus the 2024 Author Correction).
@@ -521,6 +521,15 @@ species:
       Annotation is full (33,075 genes, 757,912 exons, 5' and 3' UTRs), so junctions are derivable and gene starts are true transcript starts.
       Ecotype Gransden.
       REQUIRES REMAPPING P.patens-plateculture_5GRO.
+      Annotation provenance matters here and is not what "updated gene models" implies:
+      31,682 of 33,075 genes (95.8%) are LIFTOFF from the Phytozome/JGI V3.3 annotation via
+      V6 (see copy_num_ID=...V3.3_lifted_to_V6 and the pacid= attributes on 80,005 mRNAs);
+      the remaining 1,369 are transdecoder ORF calls on StringTie transcripts.
+      annotation_tss_anchored is therefore FALSE. 5-prime UTR boundaries are transdecoder-
+      derived rather than measured, and StringTie transcript starts are 5-prime truncated,
+      so a gene start in this file is not a validated TSS. Splice junctions are still
+      usable -- exon structure lifted at coverage=1.0 -- which is what the csRNA
+      splice-masking arm actually needs.
   S.moellendorffii:
     #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
     #: vertebrates; this repo spans four taxa, and scoring a yeast or
