@@ -34,6 +34,29 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: SLURM partitions, and the GPU constraint, are SITE-SPECIFIC and were
+#: deliberately absent from this repo until 2026-09-05 -- launchers emitted no
+#: `#SBATCH --partition`/`-C` unless asked. That rule was relaxed on request,
+#: because typing them on every submission is its own error source. Everything
+#: here stays overridable with --partition / --constraint, so a different site
+#: needs a flag rather than a patch.
+GPU_PARTITION = "akundaje,owners"
+CPU_PARTITION = "normal,akundaje,owners"
+
+#: GPU SKUs this code is known to run on, copied from procap-atlas's cherimoya
+#: launchers. `|` is SLURM's OR for a constraint list: any ONE of these will do.
+#: Without it a job can land on a card too old for the pinned torch, or too
+#: small for a 2114 bp window on a multi-gigabase genome.
+GPU_CONSTRAINT = "|".join([
+    "GPU_SKU:A100_PCIE",
+    "GPU_SKU:A100_SXM4",
+    "GPU_SKU:A40",
+    "GPU_SKU:H100_SXM5",
+    "GPU_SKU:H200_SXM5",
+    "GPU_SKU:L40S",
+    "GPU_SKU:RTX_3090",
+])
+
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (
     Experiment,
@@ -83,7 +106,7 @@ def build_parser(
             """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _add_common_args(parser, launcher)
+    _add_common_args(parser, launcher, gpu=True)
     parser.add_argument(
         "-e",
         "--experiments",
@@ -121,6 +144,7 @@ def _add_common_args(
     parser: argparse.ArgumentParser,
     launcher: str,
     *,
+    gpu: bool,
     default_cpus: int = 4,
     default_mem: str = "32G",
     default_time: str = "6:00:00",
@@ -148,10 +172,17 @@ def _add_common_args(
         "--gpus",
         dest="constraint",
         type=str,
-        default=None,
-        help="value for #SBATCH -C (e.g. a GPU SKU/generation selector)",
+        default=GPU_CONSTRAINT if gpu else None,
+        help="value for #SBATCH -C. Defaults to the GPU SKUs this code is known "
+             "to run on, `|`-joined so any one of them satisfies it; CPU-only "
+             "launchers default to none, since a GPU SKU constraint there would "
+             "restrict scheduling for nothing. Pass an empty string to drop it",
     )
-    parser.add_argument("--partition", type=str, default=None)
+    parser.add_argument(
+        "--partition", type=str,
+        default=GPU_PARTITION if gpu else CPU_PARTITION,
+        help="#SBATCH --partition (default: %(default)s)",
+    )
     parser.add_argument(
         "--setup-file",
         type=str,
@@ -165,7 +196,13 @@ def _add_common_args(
     # job gets killed at 6.
     parser.add_argument("--cpus-per-task", type=int, default=default_cpus)
     parser.add_argument("--mem", type=str, default=default_mem)
-    parser.add_argument("--time", type=str, default=default_time)
+    parser.add_argument(
+        "--time", type=str, default=default_time,
+        help="#SBATCH --time (default: %(default)s). Note the `owners` "
+             "partition, which every default here includes, caps jobs at "
+             "48:00:00 -- ask for more and the job simply will not schedule "
+             "there. modisco motifs sits exactly on that cap",
+    )
 
 
 def _setup_block(args) -> str:
@@ -245,7 +282,11 @@ def _emit(
         directives.insert(4, f"#SBATCH --gpus={gpus}")
     if getattr(args, "requeue", False):
         directives.append("#SBATCH --requeue")
-    if args.constraint:
+    # -C only on GPU jobs: the constraint is a GPU SKU list, so on a CPU job it
+    # would narrow scheduling to GPU nodes for no reason. Gated on `gpus` rather
+    # than on the value being unset, so a global --constraint cannot leak onto
+    # the CPU launchers.
+    if gpus and args.constraint:
         directives.insert(4, f"#SBATCH -C {args.constraint}")
     if args.partition:
         directives.insert(4, f"#SBATCH --partition={args.partition}")
@@ -403,7 +444,7 @@ def build_attribute_parser(family: str, script: Path) -> argparse.ArgumentParser
 
 
 def _finish_attribute_parser(parser, launcher: str, script: Path):
-    _add_common_args(parser, launcher)
+    _add_common_args(parser, launcher, gpu=True)
     parser.add_argument(
         "-e",
         "--experiments",
@@ -563,7 +604,7 @@ def build_filter_parser(family: str, script: Path) -> argparse.ArgumentParser:
             """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _add_common_args(parser, launcher)
+    _add_common_args(parser, launcher, gpu=False)
     parser.add_argument(
         "-e",
         "--experiments",
@@ -688,7 +729,7 @@ def _add_modisco_args(
     wastes allocation. Making these required keyword arguments is what stops the
     next caller inheriting the wrong set by omission.
     """
-    _add_common_args(parser, launcher, default_cpus=default_cpus,
+    _add_common_args(parser, launcher, gpu=False, default_cpus=default_cpus,
                      default_mem=default_mem, default_time=default_time)
     parser.add_argument(
         "-e",
