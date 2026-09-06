@@ -1036,7 +1036,7 @@ experiments:
       pl_bigwig: data/procap/C.reinhardtii-liquidculture_5GRO_pl.bw
       mn_bigwig: data/procap/C.reinhardtii-liquidculture_5GRO_mn.bw
       gc_negatives: data/procap/C.reinhardtii-liquidculture_5GRO_negatives.bed.gz
-      sequences: data/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.dna.toplevel.fa
+      sequences: data/GCA_047496495.1_ASM4749649v1_genomic.fna
       # blacklist: none published for this assembly (see config/genomes.yaml)
 
   P.patens-plateculture_5GRO:
@@ -1063,7 +1063,7 @@ experiments:
       pl_bigwig: data/procap/P.patens-plateculture_5GRO_pl.bw
       mn_bigwig: data/procap/P.patens-plateculture_5GRO_mn.bw
       gc_negatives: data/procap/P.patens-plateculture_5GRO_negatives.bed.gz
-      sequences: data/Physcomitrium_patens.Phypa_V3.dna.toplevel.fa
+      sequences: data/Physcomitrium_patens_V7.fa
       # blacklist: none published for this assembly (see config/genomes.yaml)
 
   S.moellendorffii-stemleaf_5GRO:
