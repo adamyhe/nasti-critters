@@ -29,6 +29,8 @@ experiments:
     raw:
       sample_accessions: ["GSM2170014"]
       runs: ["SRR3555068"]
+      samples:
+        GSM2170014: ["SRR3555068"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       adapter: "smallRNA_RA3"
@@ -54,6 +56,8 @@ experiments:
     raw:
       sample_accessions: ["GSM2170016"]
       runs: ["SRR3555069"]
+      samples:
+        GSM2170016: ["SRR3555069"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       adapter: "smallRNA_RA3"
@@ -79,6 +83,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4745119", "GSM4745120"]
       runs: ["SRR12513902", "SRR12513903"]
+      samples:
+        GSM4745119: ["SRR12513902"]
+        GSM4745120: ["SRR12513903"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias; sra_experiment"
       adapter: "smallRNA_RA3"
@@ -104,6 +111,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4745121", "GSM4745122"]
       runs: ["SRR12513904", "SRR12513905"]
+      samples:
+        GSM4745121: ["SRR12513904"]
+        GSM4745122: ["SRR12513905"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias; sra_experiment"
       adapter: "smallRNA_RA3"
@@ -129,6 +139,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4745123", "GSM4745124"]
       runs: ["SRR12513906", "SRR12513907"]
+      samples:
+        GSM4745123: ["SRR12513906"]
+        GSM4745124: ["SRR12513907"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias; sra_experiment"
       adapter: "smallRNA_RA3"
@@ -154,6 +167,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4745125", "GSM4745126"]
       runs: ["SRR12513908", "SRR12513909"]
+      samples:
+        GSM4745125: ["SRR12513908"]
+        GSM4745126: ["SRR12513909"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       adapter: "smallRNA_RA3"
@@ -179,6 +195,9 @@ experiments:
     raw:
       sample_accessions: ["GSM6090081", "GSM6090082"]
       runs: ["SRR19034546", "SRR19034545"]
+      samples:
+        GSM6090081: ["SRR19034546"]
+        GSM6090082: ["SRR19034545"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       spike_in: "Drosophila material reported as spike-in"
@@ -205,6 +224,8 @@ experiments:
     raw:
       sample_accessions: ["GSM6090083"]
       runs: ["SRR19034544"]
+      samples:
+        GSM6090083: ["SRR19034544"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       spike_in: "Drosophila material reported as spike-in"
@@ -232,6 +253,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1032759"]
       runs: ["SRR611829", "SRR611830"]
+      samples:
+        GSM1032759: ["SRR611829", "SRR611830"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       # adapter: none detected; fastp auto-detects
@@ -263,6 +286,9 @@ experiments:
     raw:
       sample_accessions: ["SAMEA104604686", "SAMEA104604687"]
       runs: ["ERR2319945", "ERR2319946"]
+      samples:
+        SAMEA104604686: ["ERR2319945"]
+        SAMEA104604687: ["ERR2319946"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "smallRNA_RA3"
@@ -288,6 +314,9 @@ experiments:
     raw:
       sample_accessions: ["SAMEA104604688", "SAMEA104604689"]
       runs: ["ERR2319947", "ERR2319948"]
+      samples:
+        SAMEA104604688: ["ERR2319947"]
+        SAMEA104604689: ["ERR2319948"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "smallRNA_RA3"
@@ -313,6 +342,8 @@ experiments:
     raw:
       sample_accessions: ["GSM6469486"]
       runs: ["SRR21091506"]
+      samples:
+        GSM6469486: ["SRR21091506"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       spike_in: "mouse MEFs"
@@ -340,6 +371,9 @@ experiments:
     raw:
       sample_accessions: ["GSM1678908", "GSM1678910"]
       runs: ["SRR2033378", "SRR2033379"]
+      samples:
+        GSM1678908: ["SRR2033378"]
+        GSM1678910: ["SRR2033379"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias; manifest (already resolved)"
       adapter: "truseq_universal"
@@ -365,6 +399,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1056284"]
       runs: ["SRR639142"]
+      samples:
+        GSM1056284: ["SRR639142"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       adapter: "smallRNA_RA3"
@@ -391,6 +427,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1056286"]
       runs: ["SRR639144"]
+      samples:
+        GSM1056286: ["SRR639144"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       adapter: "smallRNA_RA3"
@@ -417,6 +455,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1056288"]
       runs: ["SRR639146"]
+      samples:
+        GSM1056288: ["SRR639146"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       adapter: "smallRNA_RA3"
@@ -443,6 +483,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1056290"]
       runs: ["SRR639148"]
+      samples:
+        GSM1056290: ["SRR639148"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       adapter: "smallRNA_RA3"
@@ -469,6 +511,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1974987"]
       runs: ["SRR3031844", "SRR3031845"]
+      samples:
+        GSM1974987: ["SRR3031844", "SRR3031845"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       spike_in: "Schizosaccharomyces pombe"
@@ -502,6 +546,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1974988"]
       runs: ["SRR3031846", "SRR3031847"]
+      samples:
+        GSM1974988: ["SRR3031846", "SRR3031847"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       spike_in: "Saccharomyces cerevisiae (reciprocal normalization design reported)"
@@ -535,6 +581,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4804521", "GSM4804522"]
       runs: ["SRR12720981", "SRR12720982"]
+      samples:
+        GSM4804521: ["SRR12720981"]
+        GSM4804522: ["SRR12720982"]
       library_layout: "PAIRED"
       run_match_basis: "geo sample_alias"
       spike_in: "Schizosaccharomyces pombe"
@@ -561,6 +610,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4804523", "GSM4804524"]
       runs: ["SRR12720983", "SRR12720984"]
+      samples:
+        GSM4804523: ["SRR12720983"]
+        GSM4804524: ["SRR12720984"]
       library_layout: "PAIRED"
       run_match_basis: "geo sample_alias"
       spike_in: "Schizosaccharomyces pombe"
@@ -587,6 +639,9 @@ experiments:
     raw:
       sample_accessions: ["GSM8274823", "GSM8274826"]
       runs: ["SRR29037356", "SRR29037352"]
+      samples:
+        GSM8274823: ["SRR29037356"]
+        GSM8274826: ["SRR29037352"]
       library_layout: "PAIRED"
       run_match_basis: "sample_name ~ sample_alias (unique)"
       spike_in: "Schizosaccharomyces pombe"
@@ -613,6 +668,9 @@ experiments:
     raw:
       sample_accessions: ["GSM8274824", "GSM8274827"]
       runs: ["SRR29037355", "SRR29037351"]
+      samples:
+        GSM8274824: ["SRR29037355"]
+        GSM8274827: ["SRR29037351"]
       library_layout: "PAIRED"
       run_match_basis: "sample_name ~ sample_alias (unique)"
       spike_in: "Schizosaccharomyces pombe"
@@ -639,6 +697,9 @@ experiments:
     raw:
       sample_accessions: ["GSM8274825", "GSM8274828"]
       runs: ["SRR29037354", "SRR29037350"]
+      samples:
+        GSM8274825: ["SRR29037354"]
+        GSM8274828: ["SRR29037350"]
       library_layout: "PAIRED"
       run_match_basis: "sample_name ~ sample_alias (unique); sra_experiment"
       spike_in: "Schizosaccharomyces pombe"
@@ -665,6 +726,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1119599"]
       runs: ["SRR826225", "SRR826226"]
+      samples:
+        GSM1119599: ["SRR826225", "SRR826226"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       adapter: "truseq_universal"
@@ -690,6 +753,8 @@ experiments:
     raw:
       sample_accessions: ["GSM1119600"]
       runs: ["SRR826227"]
+      samples:
+        GSM1119600: ["SRR826227"]
       library_layout: "SINGLE"
       run_match_basis: "geo sample_alias"
       adapter: "truseq_universal"
@@ -715,6 +780,8 @@ experiments:
     raw:
       sample_accessions: ["GSM2193123"]
       runs: ["SRR3647033"]
+      samples:
+        GSM2193123: ["SRR3647033"]
       library_layout: "SINGLE"
       run_match_basis: "sra_experiment"
       adapter: "truseq_universal"
@@ -740,6 +807,8 @@ experiments:
     raw:
       sample_accessions: ["SRR6660402"]
       runs: ["SRR6660402"]
+      samples:
+        SRR6660402: ["SRR6660402"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -765,6 +834,8 @@ experiments:
     raw:
       sample_accessions: ["GSM4818113"]
       runs: ["SRR12774945"]
+      samples:
+        GSM4818113: ["SRR12774945"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -790,6 +861,8 @@ experiments:
     raw:
       sample_accessions: ["GSM4818114"]
       runs: ["SRR12774946"]
+      samples:
+        GSM4818114: ["SRR12774946"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -815,6 +888,8 @@ experiments:
     raw:
       sample_accessions: ["GSM4818115"]
       runs: ["SRR12774947"]
+      samples:
+        GSM4818115: ["SRR12774947"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -840,6 +915,9 @@ experiments:
     raw:
       sample_accessions: ["GSM4818116", "GSM4818117"]
       runs: ["SRR12774948", "SRR12774949"]
+      samples:
+        GSM4818116: ["SRR12774948"]
+        GSM4818117: ["SRR12774949"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -865,6 +943,8 @@ experiments:
     raw:
       sample_accessions: ["GSM4818118"]
       runs: ["SRR12774950"]
+      samples:
+        GSM4818118: ["SRR12774950"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -890,6 +970,8 @@ experiments:
     raw:
       sample_accessions: ["GSM4818119"]
       runs: ["SRR12774951"]
+      samples:
+        GSM4818119: ["SRR12774951"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -915,6 +997,8 @@ experiments:
     raw:
       sample_accessions: ["GSM4818120"]
       runs: ["SRR12774952"]
+      samples:
+        GSM4818120: ["SRR12774952"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -940,6 +1024,9 @@ experiments:
     raw:
       sample_accessions: ["GSM7439223", "GSM7439224"]
       runs: ["SRR24798072", "SRR24798065"]
+      samples:
+        GSM7439223: ["SRR24798072"]
+        GSM7439224: ["SRR24798065"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -965,6 +1052,8 @@ experiments:
     raw:
       sample_accessions: ["GSM7439241"]
       runs: ["SRR24798050"]
+      samples:
+        GSM7439241: ["SRR24798050"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -990,6 +1079,8 @@ experiments:
     raw:
       sample_accessions: ["GSM7439248"]
       runs: ["SRR24798043"]
+      samples:
+        GSM7439248: ["SRR24798043"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       adapter: "truseq_universal"
@@ -1015,6 +1106,8 @@ experiments:
     raw:
       sample_accessions: ["GSM3239707"]
       runs: ["SRR7458428"]
+      samples:
+        GSM3239707: ["SRR7458428"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       spike_in: "Drosophila S2 cells, 1:1000"
@@ -1041,6 +1134,8 @@ experiments:
     raw:
       sample_accessions: ["GSM3239708"]
       runs: ["SRR7458429"]
+      samples:
+        GSM3239708: ["SRR7458429"]
       library_layout: "SINGLE"
       run_match_basis: "manifest (already resolved)"
       spike_in: "Drosophila S2 cells, 1:1000"
@@ -1067,6 +1162,9 @@ experiments:
     raw:
       sample_accessions: ["SAMC4531003", "SAMC4531004"]
       runs: ["DRR991139", "DRR991140"]
+      samples:
+        SAMC4531003: ["DRR991139"]
+        SAMC4531004: ["DRR991140"]
       library_layout: "PAIRED"
       run_match_basis: "sample_name ~ sample_alias (unique)"
       adapter: "truseq_universal"
@@ -1092,6 +1190,9 @@ experiments:
     raw:
       sample_accessions: ["SAMC4531001", "SAMC4531002"]
       runs: ["DRR991137", "DRR991138"]
+      samples:
+        SAMC4531001: ["DRR991137"]
+        SAMC4531002: ["DRR991138"]
       library_layout: "PAIRED"
       run_match_basis: "sample_name ~ sample_alias (unique)"
       adapter: "truseq_universal"
