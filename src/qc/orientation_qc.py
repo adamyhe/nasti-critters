@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate 5'-end orientation: initiator PWM/logo, and stranded TSS metaplots.
+"""Validate 5'-end orientation: initiator PWM/logo, and stranded metaplots.
 
 Two assumptions in this pipeline are conventions rather than documented facts,
 and both are silent when wrong:
@@ -20,7 +20,20 @@ read-outs that catch it.
    are centred on 3' ends instead and the logo is flat or shows an unrelated
    bias. A flat logo is the alarm.
 
-2. STRANDED METAPLOT around annotated gene TSSs.
+2. SUMMIT-ANCHORED METAPLOT, centred on each peak's own signal maximum.
+   Annotation-free, like the PWM, and therefore the metaplot that works where the
+   gene models do not -- which is most non-model species here. It costs nothing:
+   peak_maxima() is already computed for the PWM.
+
+   READ THE ANTISENSE CHANNEL, NOT THE SENSE ONE. Centring on the maximum makes
+   a sense peak at 0 tautological; it is guaranteed by construction and is
+   evidence of nothing. The informative signal is where the ANTISENSE peak
+   falls: divergent initiation puts it UPSTREAM (negative offset, order -50 to
+   -250 bp depending on species). If the two strand tracks are swapped, that
+   peak moves DOWNSTREAM, and the sign flip is unambiguous in a way the
+   annotation-anchored version never was.
+
+3. STRANDED METAPLOT around annotated gene TSSs.
    Plus-strand genes should show plus-track signal peaking just downstream of
    the annotated TSS, and minus-strand genes the mirror image on the minus
    track. If the two tracks are swapped, reverse_strand is wrong for that
@@ -300,14 +313,52 @@ def information_content(pwm, flank):
     return bits, bg
 
 
-def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir):
+def summit_metaplot(sites, pl_bw, mn_bw, flank):
+    """Metaplot anchored on peak maxima rather than annotated TSSs.
+
+    `sites` is peak_maxima() output, already strand-resolved, so this is just
+    metaplot() over a different anchor set -- no extra bigWig pass beyond the
+    windows themselves.
+    """
+    return metaplot(sites, pl_bw, mn_bw, flank)
+
+
+def summit_notes(sense, anti, flank):
+    """Read of the summit-anchored panel. NEVER gated on annotation quality --
+    it uses none.
+
+    Only the antisense channel is interpreted. See the module docstring: the
+    sense peak at offset 0 is an artefact of the anchor and says nothing.
+    """
+    import numpy as np
+    if sense is None or anti is None or anti.sum() <= 0:
+        return ["summit metaplot: no antisense signal (unidirectional promoters "
+                "are normal in some species; not a flag)"]
+    x = np.arange(-flank, flank)
+    at = int(x[int(np.argmax(anti))])
+    frac = anti.sum() / max(sense.sum() + anti.sum(), 1e-9)
+    note = f"summit metaplot: antisense peak at {at:+d} bp, {frac:.1%} of windowed signal"
+    # Downstream antisense is the strand-swap signature. A weak/plateaued
+    # antisense channel can put argmax anywhere, so require it to be a real
+    # fraction of signal before calling it.
+    if at > 0 and frac > 0.05:
+        note += "  <-- antisense is DOWNSTREAM; expected upstream. Suspect the "
+        note += "two strand tracks are swapped (reverse_strand)"
+    elif abs(at) < 5 and frac > 0.05:
+        note += "  <-- antisense peaks ON the summit rather than upstream; "
+        note += "suspect an unextracted UMI or a 5' offset collapsing the two strands"
+    return [note]
+
+
+def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir,
+           s_sense=None, s_anti=None, n_summit=0):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(19, 4))
     if pwm is not None:
         import logomaker
         bits, _ = information_content(pwm, flank_pwm)
@@ -336,6 +387,21 @@ def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir
         axes[1].legend(frameon=False)
     else:
         axes[1].text(.5, .5, "no metaplot", ha="center"); axes[1].axis("off")
+
+    if s_sense is not None:
+        x = np.arange(-flank_meta, flank_meta)
+        axes[2].plot(x, s_sense, label="sense", lw=1)
+        axes[2].plot(x, -s_anti, label="antisense", lw=1)
+        axes[2].axhline(0, color="k", lw=0.6)
+        axes[2].axvline(0, color="k", lw=0.8, ls="--")
+        axes[2].set_xlabel("offset from peak summit (bp)")
+        axes[2].legend(fontsize=8)
+        # The title says what to look at, because the obvious feature is the
+        # uninformative one: sense peaks at 0 by construction.
+        axes[2].set_title(f"summit-anchored, {n_summit:,} peaks (annotation-free)\n"
+                          "read the ANTISENSE peak: upstream = OK, downstream = strands swapped")
+    else:
+        axes[2].text(.5, .5, "no summit metaplot", ha="center"); axes[2].axis("off")
 
     fig.suptitle(exp_id)
     fig.tight_layout()
@@ -484,13 +550,17 @@ def main():
         sense, anti, n_tss = metaplot(tss, exp.signals[0], exp.signals[1],
                                       args.flank_meta, args.max_tss)
         print(f"  annotated TSSs used: {n_tss:,}")
-        lines = verdict(pwm, sense, anti, args.flank_pwm, args.flank_meta,
+        s_sense, s_anti, n_summit = summit_metaplot(
+            sites, exp.signals[0], exp.signals[1], args.flank_meta)
+        lines = summit_notes(s_sense, s_anti, args.flank_meta)
+        lines += verdict(pwm, sense, anti, args.flank_pwm, args.flank_meta,
                         tss_anchored=genomes[exp.species].get(
                             "annotation_tss_anchored", True))
         for line in lines:
             print(f"  {line}")
         out = render(exp_id, pwm, n_pwm, sense, anti,
-                     n_tss, args.flank_pwm, args.flank_meta, args.outdir)
+                     n_tss, args.flank_pwm, args.flank_meta, args.outdir,
+                     s_sense=s_sense, s_anti=s_anti, n_summit=n_summit)
         print(f"  wrote {out}")
         if args.tsv:
             args.tsv.parent.mkdir(parents=True, exist_ok=True)

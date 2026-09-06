@@ -426,124 +426,101 @@ species:
   # ---------------------------------------------------------------------------
 
   C.reinhardtii:
-    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
-    #: vertebrates; this repo spans four taxa, and scoring a yeast or
-    #: plant motif against a vertebrate database is meaningless.
-    jaspar_collection: plants
-    # Fold assignment is REUSED UNCHANGED from earlier lab work, after checking
-    # the two copies we hold against each other. Do not retune -- diverging
-    # folds make models incomparable with our other work.
-    assembly: Chlamydomonas_reinhardtii_v5.5
-    n_chromosomes: 17   # 1-17; caps PINTS --thread
-    main_chromosomes: [1, 10, 11, 12, 13, 14, 15, 16, 17, 2, 3, 4, 5, 6, 7, 8, 9]
-    # NOTE the division: Chlamydomonas moved from Ensembl **protists** to
-    # **plants** as of release-63. Older download scripts point at
-    # protists/release-55, which now 404s. The assembly (v5.5) is unchanged, so
-    # chromosome names and the fold assignment are unaffected.
-    annotation_url: http://ftp.ensemblgenomes.org/pub/plants/release-63/gff3/chlamydomonas_reinhardtii/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.63.gff3.gz
-    annotation_format: gff3
-    assembly_accession: GCA_000002595.3
-    fasta_url: http://ftp.ensemblgenomes.org/pub/plants/release-63/fasta/chlamydomonas_reinhardtii/dna/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.dna.toplevel.fa.gz
-    fasta: data/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.dna.toplevel.fa
-    # Does this annotation's gene/transcript START mark the TSS?
-    # Used ONLY to decide whether the QC metaplot may raise a flag: where this is
-    # false the metaplot is advisory, because it measures the annotation's reference
-    # point rather than the pipeline. Set from annotation PROVENANCE, not by fitting
-    # to the observed ratio. Ensembl v5.5 models carry UTRs. Observed dn/up 1.29 -- weakest of the anchored
-    #   set, so treat its metaplot with more caution than the others.
-    annotation_tss_anchored: true
-    chrom_style: ensembl       # bare 1-17, plus MT/cpDNA and scaffolds
-    star_sa_index_nbases: 12   # 111.1 Mb over 53 top-level regions
-    blacklist: null
-    blacklist_source: >-
-      None published. Not in Boyle-Lab/Blacklist (ce10, ce11, dm3, dm6, hg19,
-      hg38, mm10 only) and no excluderanges entry.
-    # Organelle decoys. The Ensembl dna.toplevel FASTA for this assembly holds
-    # ONLY numbered chromosomes and unplaced scaffolds -- no chloroplast, no
-    # mitochondrion -- verified by searching 15 random 30-mers from each
-    # organelle genome against the assembly on both strands (0/15 chloroplast,
-    # 1/15 mitochondrion, the single hit being NUMT-level). Do NOT check this by
-    # contig length: KZ454947 is within 5% of the chloroplast's length and holds
-    # none of its sequence.
-    # 12.2% of C.reinhardtii-liquidculture_5GRO is organellar (12.1% plastid,
-    # 0.1% mito) and had nowhere to map.
-    # Organelle contigs ALREADY IN this assembly. Needed so
-    # src/qc/rrna_content.py can measure organellar content -- it would
-    # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 9 of 12.
-    # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
-    # Only needed where the annotation carries no `rRNA` feature: the three
-    # UCSC species use refGene GTF, which types everything exon/CDS/
-    # transcript. Without this, src/qc/rrna_content.py measured 0.9% for
-    # D. melanogaster and 0.5% for C. elegans -- organellar only, with
-    # nuclear rRNA silently unmeasured but looking like a real number.
-    rdna_regions: []   # GFF3 rRNA features cover it
-    organelle_contigs: []  # absent; supplied via organelle_accessions
-    organelle_accessions: [BK000554, U03843]   # cpDNA 203,828 bp; mtDNA 15,758 bp
+    assembly: ASM4749649v1
+    assembly_accession: GCA_047496495.1
+    fasta: data/GCA_047496495.1_ASM4749649v1_genomic.fna
+    fasta_url: https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/047/496/495/GCA_047496495.1_ASM4749649v1/GCA_047496495.1_ASM4749649v1_genomic.fna.gz
+    chrom_style: ncbi
+    star_sa_index_nbases: 12
+    n_chromosomes: 17
+    main_chromosomes:
+      - CM104919.1
+      - CM104920.1
+      - CM104921.1
+      - CM104922.1
+      - CM104923.1
+      - CM104924.1
+      - CM104925.1
+      - CM104926.1
+      - CM104927.1
+      - CM104928.1
+      - CM104929.1
+      - CM104930.1
+      - CM104931.1
+      - CM104932.1
+      - CM104933.1
+      - CM104934.1
+      - CM104935.1
+    organelle_contigs: []
+    organelle_accessions: []
     rdna_accession: null
-    #   not needed: the array IS in the assembly. Checked via annotation biotype, not
-    #   contig names: release-63 GFF3 has 34 rRNA genes, including a full-length
-    #   SSU_rRNA_eukarya (1,790 bp) plus LSU copies at the subtelomeric start of
-    #   chromosome 1 (~1.1-19.1 kb) and a second SSU/5.8S cluster on chromosome 14
-    #   (~4,145,334-4,154,986). Chlamydomonas rDNA is known to be subtelomeric.
-    rdna_note: >-
-      Organelles (MT, cpDNA) soak up run-on reads and stay in the index as
-      decoys; they are outside main_chromosomes so they cannot enter a fold.
-
+    rdna_regions: []
+    blacklist: null
+    blacklist_source: 'None published for this species.'
+    jaspar_collection: plants
+    annotation_url: null   # none published for this assembly
+    annotation_format: null
+    annotation_tss_anchored: false
+    notes: >-
+      Moved from Ensembl v5.5 to the newest chromosome-level assembly (2025-02-07): contig N50 6.29 Mb and 17 gaps against v5.5's 215 kb and 1,512 gaps -- essentially gapless.
+      Gaps near TSSs corrupt training data directly.
+      COSTS THE ANNOTATION: Ensembl Plants still serves v5.5, there is no paired RefSeq record and no GFF on the NCBI FTP, so no known splice junctions and no TSS metaplot.
+      The Inr PWM and the new summit-anchored metaplot both still work, since neither uses annotation.
+      REQUIRES REMAPPING C.reinhardtii-liquidculture_5GRO.
   P.patens:
-    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
-    #: vertebrates; this repo spans four taxa, and scoring a yeast or
-    #: plant motif against a vertebrate database is meaningless.
-    jaspar_collection: plants
-    # Fold assignment is REUSED UNCHANGED from earlier lab work, after checking
-    # the two copies we hold against each other.
-    assembly: Phypa_V3
-    n_chromosomes: 27   # 1-27; caps PINTS --thread
-    main_chromosomes: [1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 22, 23, 24, 25, 26, 27, 3, 4, 5, 6, 7, 8, 9]
-    annotation_url: http://ftp.ensemblgenomes.org/pub/plants/release-63/gff3/physcomitrium_patens/Physcomitrium_patens.Phypa_V3.63.gff3.gz
-    annotation_format: gff3
-    assembly_accession: GCA_000002425.2
-    fasta_url: http://ftp.ensemblgenomes.org/pub/plants/release-63/fasta/physcomitrium_patens/dna/Physcomitrium_patens.Phypa_V3.dna.toplevel.fa.gz
-    fasta: data/Physcomitrium_patens.Phypa_V3.dna.toplevel.fa
-    # Does this annotation's gene/transcript START mark the TSS?
-    # Used ONLY to decide whether the QC metaplot may raise a flag: where this is
-    # false the metaplot is advisory, because it measures the annotation's reference
-    # point rather than the pipeline. Set from annotation PROVENANCE, not by fitting
-    # to the observed ratio. Phypa V3 models appear transcript-anchored: signal begins abruptly AT 0.
-    #   Observed dn/up 30.2.
-    annotation_tss_anchored: true
-    chrom_style: ensembl       # bare 1-27 (genus renamed Physcomitrella -> Physcomitrium)
-    star_sa_index_nbases: 13   # 471.9 Mb over 357 top-level regions
-    blacklist: null
-    blacklist_source: "None published; not in Boyle-Lab/Blacklist or excluderanges."
-    # Organelle decoys; same verification as C.reinhardtii (0/15 chloroplast,
-    # 1/15 mitochondrion). scaffold_38/50 and scaffold_51 are within 5% of the
-    # organelle lengths and contain none of their sequence.
-    # 8.6% of P.patens-plateculture_5GRO is organellar (8.1% plastid, 0.5% mito).
-    # Organelle contigs ALREADY IN this assembly. Needed so
-    # src/qc/rrna_content.py can measure organellar content -- it would
-    # otherwise score only against data/decoy/ and report 0% for every
-    # species whose organelles are in the reference, which is 9 of 12.
-    # In-assembly rDNA, as contig or contig:start-end (1-based inclusive).
-    # Only needed where the annotation carries no `rRNA` feature: the three
-    # UCSC species use refGene GTF, which types everything exon/CDS/
-    # transcript. Without this, src/qc/rrna_content.py measured 0.9% for
-    # D. melanogaster and 0.5% for C. elegans -- organellar only, with
-    # nuclear rRNA silently unmeasured but looking like a real number.
-    rdna_regions: []   # GFF3 rRNA features cover it
-    organelle_contigs: []  # absent; supplied via organelle_accessions
-    organelle_accessions: [AP005672, AB251495]  # cpDNA 122,890 bp; mtDNA 105,340 bp
+    assembly: Physcomitrium_patens_V7
+    assembly_accession: GWHFIHF00000000.1
+    fasta: data/Physcomitrium_patens_V7.fa
+    fasta_url: https://download.cncb.ac.cn/gwh/Plants/Physcomitrium_patens_Physcomitrium_patens_V7_GWHFIHF00000000.1/GWHFIHF00000000.1.genome.fasta.gz
+    chrom_style: gwh
+    star_sa_index_nbases: 13
+    n_chromosomes: 26
+    main_chromosomes:
+      - GWHFIHF00000001.1
+      - GWHFIHF00000002.1
+      - GWHFIHF00000003.1
+      - GWHFIHF00000004.1
+      - GWHFIHF00000005.1
+      - GWHFIHF00000006.1
+      - GWHFIHF00000007.1
+      - GWHFIHF00000008.1
+      - GWHFIHF00000009.1
+      - GWHFIHF00000010.1
+      - GWHFIHF00000011.1
+      - GWHFIHF00000012.1
+      - GWHFIHF00000013.1
+      - GWHFIHF00000014.1
+      - GWHFIHF00000015.1
+      - GWHFIHF00000016.1
+      - GWHFIHF00000017.1
+      - GWHFIHF00000018.1
+      - GWHFIHF00000019.1
+      - GWHFIHF00000020.1
+      - GWHFIHF00000021.1
+      - GWHFIHF00000022.1
+      - GWHFIHF00000023.1
+      - GWHFIHF00000024.1
+      - GWHFIHF00000025.1
+      - GWHFIHF00000026.1
+    organelle_contigs: []
+    organelle_accessions: []
     rdna_accession: null
-    #   UNVERIFIED, left null per the default-deny rule for rdna_accession. Release-63
-    #   annotates 80 rRNA genes, but every SSU_rRNA_eukarya call is PARTIAL (longest
-    #   1,115 bp against ~1,800 bp full length), so annotation alone does not establish
-    #   that a full 45S array is present. Chromosome 20 carries an rRNA-dense stretch
-    #   (~2.7-28.8 kb) that looks array-like. No P. patens rDNA reference sequence
-    #   analogous to BK000964.3 was found, so there is nothing to use as a sink even if
-    #   one were wanted. Revisit only if PRO-cap signal piles onto rRNA-like loci.
-    rdna_note: >-
-      Organelles stay in the index as decoys and are outside main_chromosomes.
-
+    rdna_regions: []
+    blacklist: null
+    blacklist_source: 'None published for this species.'
+    jaspar_collection: plants
+    annotation_url: https://download.cncb.ac.cn/gwh/Plants/Physcomitrium_patens_Physcomitrium_patens_V7_GWHFIHF00000000.1/GWHFIHF00000000.1.gff.gz
+    annotation_format: gff3
+    annotation_tss_anchored: true
+    notes: >-
+      Moved from Phypa_V3 to V7 (Bi et al.
+      2024, Nature Plants 10:327-343, doi:10.1038/s41477-023-01614-7; plus the 2024 Author Correction).
+      Near telomere-to-telomere, gap-free, contig N50 17.7 Mb against V3's ~590 kb, and it RESOLVES THE CHROMOSOME NUMBER AT 26 -- V3/V5's 27th chromosome was spurious, so anything called there sat on a mis-assembled fragment.
+      Phypa_V3's NCBI record is suppressed; only Ensembl still served it.
+      FASTA AND GFF BOTH FROM CNCB GWH: NCBI's GCA_059467195.1 is the same assembly but names sequences CM..., and mixing an NCBI FASTA with a GWH GFF would mismatch every seqid silently.
+      Annotation is full (33,075 genes, 757,912 exons, 5' and 3' UTRs), so junctions are derivable and gene starts are true transcript starts.
+      Ecotype Gransden.
+      REQUIRES REMAPPING P.patens-plateculture_5GRO.
   S.moellendorffii:
     #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
     #: vertebrates; this repo spans four taxa, and scoring a yeast or

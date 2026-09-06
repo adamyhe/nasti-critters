@@ -244,7 +244,13 @@ def umi_arg(run_id):
 #: main_chromosomes by `bedgraph`. It is NOT safe to default to "chr", which is
 #: PINTS' own default and matches nothing for these -- the silent-zero-peaks bug
 #: this map exists to prevent.
-PINTS_CHROM_PREFIX = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": ""}
+PINTS_CHROM_PREFIX = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": "",
+                      # "ncbi" is GenBank-accession naming (CM..., AP..., NC_...), which is
+                      # NOT the same thing as ncbi_refseq and should not be conflated with
+                      # it for GCA-only assemblies. "gwh" is CNCB's Genome Warehouse
+                      # (GWHFIHF00000001.1), which P. patens V7 uses. Both take the empty
+                      # prefix, as ensembl does.
+                      "ncbi": "", "gwh": ""}
 
 
 def pints_chrom_prefix(species):
