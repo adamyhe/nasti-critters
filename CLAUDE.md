@@ -124,14 +124,18 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   | `igraph<1.0` | leidenalg's own dependency, same jump — 1.0.0 is 2_28-only, 0.11.9 is the last 2_17 |
   | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
   | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
+  | `pybigtools==0.2.5` | `manylinux_2_28`-only at **every** version, so it always builds from source there; newer releases need a toolchain Sherlock's assembler cannot provide, where 0.2.5's sdist still builds |
 
   All four are procap-atlas's, which is the right authority because it runs on the same cluster.
-- **Ten base packages still have no `manylinux_2_17` wheel and WILL build from source there** —
-  `numpy`, `scipy`, `pandas`, `h5py`, `scikit-learn`, `contourpy`, `hdf5plugin`, `pybigtools`. That is
-  expected, not a bug in waiting: **no 2_17 wheel means a source build, not a failure.** procap-atlas
-  installs `pybigtools` on Sherlock and it is `manylinux_2_28`-only at *every* version including the
-  0.2.5 upstream pins — so it is built there successfully. Pin one of these only when a build actually
-  fails; pinning pre-emptively costs newer versions for nothing. Re-audit with:
+- **Seven base packages still have no `manylinux_2_17` wheel and WILL build from source there** —
+  `numpy`, `scipy`, `pandas`, `h5py`, `scikit-learn`, `contourpy`, `hdf5plugin`. **No 2_17 wheel means a
+  source build, not automatically a failure** — but do not lean on that the way an earlier version of
+  this note did. It cited `pybigtools` as proof, reasoning that upstream installs it on Sherlock despite
+  its being 2_28-only at every version. That had the example exactly backwards: upstream pins
+  **0.2.5** precisely *because* newer releases fail to build there. The general point survives (a
+  missing wheel is not by itself a problem); the evidence for it did not.
+  So the rule is empirical, not deductive: pin when a build actually fails, and take a pin from
+  procap-atlas as evidence that one does. Re-audit with:
 
       uv export --no-emit-project --no-hashes   # then check each wheel's tags on PyPI
 
