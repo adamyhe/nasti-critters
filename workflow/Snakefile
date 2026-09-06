@@ -786,7 +786,7 @@ rule merge_run_fastqs:
     deduped per run keeps every cross-run duplicate. Gzip members concatenate, so a plain
     cat is a valid gzip stream -- no recompression.
 
-    A single-run sample is the overwhelming majority; it is hard-linked rather than copied
+    A single-run sample is the overwhelming majority; it is symlinked rather than copied
     so the common case costs nothing. That link is an OPTIMISATION AND MUST NEVER BE THE
     THING THAT FAILS THE JOB -- see link_or_copy below.
     """
@@ -805,25 +805,32 @@ rule merge_run_fastqs:
         exec > {log} 2>&1
         set -o pipefail
 
-        # Hard-linking is a size optimisation, not a requirement, and a refused link
-        # says nothing about the data. Two ways it gets refused here, neither of which
-        # should cost a remap:
-        #   EXDEV  -- data/fastq and data/procap_work on different filesystems, which is
-        #             routine as soon as either is a symlink (FASTQs parked on $SCRATCH,
-        #             work on $OAK). Hard links cannot cross that boundary; copies can.
-        #   EPERM  -- fs.protected_hardlinks (on by default on RHEL/Rocky, so on Sherlock)
-        #             refuses a link to a source that is not writable by the caller unless
-        #             the caller owns it. fetch_fastq writes protected(), i.e. mode 0444,
-        #             so every source here is unwritable and only ownership is carrying it.
-        # Note ln -f is NOT one of the failure modes: GNU ln exits 0 when the destination
-        # is already a hard link to the source, so a re-run over its own output is fine.
+        # SYMLINK, deliberately -- not a hard link, and not a plain cp.
+        #
+        # fetch_fastq writes protected(), i.e. mode 0444. A HARD LINK carries that mode
+        # because it IS the same inode; a plain CP carries it too, because cp propagates
+        # the source mode (0444 & ~umask is still 0444). Either way the output is
+        # read-only, and Snakemake touches every output of a finished job --
+        # dag.check_and_touch_output -> IOFile.touch -> lutime(self.file, None) -- so the
+        # job dies in post-processing with PermissionError even though the merge itself
+        # worked. The tempting repair, chmod u+w on the output, is actively WRONG for the
+        # hard-link case: same inode, so it strips protection from the ARCHIVED FASTQ.
+        #
+        # A symlink has its own inode, so there is nothing to un-protect, and Snakemake
+        # handles the case on purpose: touch() notes "For symlink file or symlink
+        # directory, only the link itself is updated, not the target", and
+        # mtime_uncached() stats with follow_symlinks=False before anything else. It also
+        # keeps the optimisation intact -- still no second copy of the reads on disk.
+        #
+        # The copy fallback stays for the case where the symlink itself cannot be made,
+        # and chmods only its own fresh inode.
         link_or_copy() {{
             src=$1; dst=$2
-            if [ -e "$dst" ] && [ "$src" -ef "$dst" ]; then return 0; fi
             rm -f "$dst"
-            if ln "$src" "$dst"; then return 0; fi
-            echo "NOTE: hard link refused above -- copying $src -> $dst instead."
+            if ln -s "$src" "$dst"; then return 0; fi
+            echo "NOTE: symlink refused above -- copying $src -> $dst instead."
             cp "$src" "$dst"
+            chmod u+w "$dst"
         }}
 
         files=({input})
