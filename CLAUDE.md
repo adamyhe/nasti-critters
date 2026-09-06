@@ -124,11 +124,22 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   | `igraph<1.0` | leidenalg's own dependency, same jump — 1.0.0 is 2_28-only, 0.11.9 is the last 2_17 |
   | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
   | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
-  | `pybigtools==0.2.5` | `manylinux_2_28`-only at **every** version, so it always builds from source there; newer releases need a toolchain Sherlock's assembler cannot provide, where 0.2.5's sdist still builds |
+  | `pybigtools` **moved out of base** | not pinned — moved into the `torch` extra, so Sherlock never builds it at all. See below |
 
   All four are procap-atlas's, which is the right authority because it runs on the same cluster.
-- **Seven base packages still have no `manylinux_2_17` wheel and WILL build from source there** —
-  `numpy`, `scipy`, `pandas`, `h5py`, `scikit-learn`, `contourpy`, `hdf5plugin`. **No 2_17 wheel means a
+- **`pybigtools` is in the `torch` extra, NOT in base, and that placement is load-bearing.** It is
+  `manylinux_2_28`-only at every version, so it always builds from source on a pre-2.28 glibc, and
+  0.3.0's build dies in `libdeflate-sys` with `no such instruction: vpdpbusd` — GCC emitting AVX512-VNNI
+  that Sherlock's assembler cannot assemble, the same class of failure as hdf5plugin's `-march=native`.
+  Pinning to 0.2.5 (procap-atlas's choice) was the first fix and is the weaker one, because 0.2.5 also
+  has to build. **Nothing on the base side needs it**: the only venv-side importer is
+  `src/make_negatives.py`, which is torch-side anyway since it imports tangermeme, and `orientation_qc.py`
+  reads bigWigs with it from the MAMBA env, where it is a conda package. So Sherlock never builds it.
+  Do not move it back to base to "declare what we import" — the declaration lives in the `torch` extra,
+  which is where the importer lives.
+- **Nine base entries still have no `manylinux_2_17` wheel and WILL build from source there** —
+  `numpy`, `scipy`, `pandas`, `h5py`, `scikit-learn`, `contourpy`, `hdf5plugin` (numpy and scipy twice,
+  from the universal lock's python-version split). **No 2_17 wheel means a
   source build, not automatically a failure** — but do not lean on that the way an earlier version of
   this note did. It cited `pybigtools` as proof, reasoning that upstream installs it on Sherlock despite
   its being 2_28-only at every version. That had the example exactly backwards: upstream pins

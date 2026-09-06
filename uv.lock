@@ -962,7 +962,6 @@ dependencies = [
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "pandas" },
     { name = "pillow" },
-    { name = "pybigtools" },
     { name = "pyyaml" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-14-nasti-critters-cherimoya' and extra == 'extra-14-nasti-critters-sherlock')" },
@@ -973,6 +972,7 @@ dependencies = [
 torch = [
     { name = "bpnet-lite" },
     { name = "cherimoya" },
+    { name = "pybigtools" },
     { name = "tangermeme" },
     { name = "torch" },
 ]
@@ -989,7 +989,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pillow", specifier = "<12.3.0" },
-    { name = "pybigtools", specifier = "==0.2.5" },
+    { name = "pybigtools", marker = "extra == 'torch'" },
     { name = "pyyaml" },
     { name = "scipy" },
     { name = "tangermeme", marker = "extra == 'torch'", specifier = ">=1.0.0" },

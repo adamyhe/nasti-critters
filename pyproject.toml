@@ -80,13 +80,6 @@ dependencies = [
     # happens to pull it in. pyfaidx is still transitive (tangermeme's
     # extract_loci uses both). Do not add pyfastx or pyBigWig back -- those are
     # the readers this repo deliberately does not use.
-    # Pinned for Sherlock. pybigtools is manylinux_2_28-only at EVERY version,
-    # including this one, so it always builds from source there -- and newer
-    # releases need a toolchain Sherlock's assembler cannot provide, where
-    # 0.2.5's sdist still builds. Same pin as procap-atlas, same cluster.
-    # It keeps macOS arm64/x86_64 and win_amd64 wheels, so pinning costs local
-    # development nothing.
-    "pybigtools==0.2.5",
     "tqdm",
 ]
 
@@ -132,6 +125,20 @@ torch = [
     "bpnet-lite>=1.0.0",
     "tangermeme>=1.0.0",
     "cherimoya",
+    # Declared because src/make_negatives.py imports it directly, though
+    # tangermeme requires it too. It belongs HERE rather than in the base set,
+    # and that placement is load-bearing for Sherlock: pybigtools is
+    # manylinux_2_28-only at every version, so it always builds from source on a
+    # pre-2.28 glibc, and 0.3.0's build dies in libdeflate-sys with
+    # `no such instruction: vpdpbusd` -- GCC emitting AVX512-VNNI that Sherlock's
+    # assembler cannot assemble, the same class of failure as hdf5plugin's
+    # -march=native. Keeping it out of base means Sherlock never builds it at
+    # all, which beats pinning a version that still has to.
+    #
+    # The QC scripts also read bigWigs with pybigtools, but they run from the
+    # mamba env, where it is a conda package (environment.yml) -- so they are
+    # unaffected either way.
+    "pybigtools",
 ]
 
 [tool.uv]
