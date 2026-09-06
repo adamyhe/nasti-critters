@@ -27,7 +27,13 @@ Column notes, because several are easy to misread:
                        is below archive_reads by whatever fastp dropped.
 * `unique_reads`    -- STAR "Uniquely mapped reads number", summed. The ENCODE
                        MAPQ 255 filter keeps exactly these.
-* `signal_reads`    -- reads in the merged BAM ON main_chromosomes, i.e. what
+* `signal_reads`    -- BLANK means NOT MEASURED, never 0: a BAM holding none of
+                       the configured main_chromosomes is a BAM from another
+                       assembly, not an empty library, and reporting its 0 hid
+                       exactly that after two assembly swaps. Counted from the
+                       SAMPLE-keyed BAMs, falling back to run-keyed ones only
+                       for a tree predating the per-sample alignment refactor.
+                       Reads in the merged BAM ON main_chromosomes, i.e. what
                        actually reaches a bigWig. Below unique_reads by dedup
                        (UMI libraries only), by the one-mate filter (paired
                        libraries only), and by the main_chromosomes restriction.

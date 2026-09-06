@@ -1274,8 +1274,14 @@ rule fetch_annotation:
 
 
 rule orientation_qc:
-    """Initiator logo + stranded TSS metaplot: the read-out that catches a wrong
-    five_prime_mate or reverse_strand. Both are silent failures otherwise."""
+    """Initiator logo, summit-anchored metaplot and stranded TSS metaplot: the
+    read-out that catches a wrong five_prime_mate or reverse_strand. Both are
+    silent failures otherwise.
+
+    The first two panels are ANNOTATION-FREE, which is what lets this run for a
+    species with no annotation at all -- `annotation` resolves to no dependency
+    then and the flag is omitted from the command. See annotation_path().
+    """
     input:
         peaks=f"{OUT}/{{exp}}_peaks.bed.gz",
         pl=f"{OUT}/{{exp}}_pl.bw",

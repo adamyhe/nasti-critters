@@ -1508,8 +1508,8 @@ Two consequences already applied:
 | A. thaliana | TAIR10 | Klasfeld 20-inputs, **Boyle-Lab software**, versioned in-repo | 83 |
 | S. cerevisiae | R64-1-1 | none published | — |
 | S. pombe | ASM294v2 | none published | — |
-| C. reinhardtii | Chlamydomonas_reinhardtii_v5.5 | none published | — |
-| P. patens | Phypa_V3 | none published | — |
+| C. reinhardtii | ASM4749649v1 (was Chlamydomonas_reinhardtii_v5.5) | none published | — |
+| P. patens | Physcomitrium_patens_V7 (was Phypa_V3) | none published | — |
 | S. moellendorffii | v1.0 | none published | — |
 | C. griseus | CriGri-PICRH-1.0 | none published | — |
 
@@ -1579,10 +1579,18 @@ twelve are already alt-free.** Do not add a contig-filtering step; there is noth
 | R64-1-1 | 17 = 16 chromosomes + Mito | 0 |
 | TAIR10 | 7 = 5 chromosomes + Mt + Pt | 0 |
 | ASM294v2 | 6 = I, II, III, MT, MTR, AB325691 | 0 |
-| Chlamydomonas_reinhardtii_v5.5 | 53 = 17 chromosomes + 36 scaffolds, **NO organelles** | 0 |
-| Phypa_V3 | 357 = 27 chromosomes + 330 scaffolds, **NO organelles** | 0 |
+| ASM4749649v1 (C. reinhardtii) | **17 = 17 chromosomes, nothing else** — no scaffolds, **NO organelles** | 0 |
+| Physcomitrium_patens_V7 | **26 = 26 chromosomes, nothing else** — no scaffolds, **NO organelles** | 0 |
 | v1.0 (S. moellendorffii) | 759 = 0 chromosomes + Pt + 757 scaffolds | 0 |
 | CriGri-PICRH-1.0 | 647 = 10 chromosomes + 637 unplaced | 0 |
+
+**The two swapped plant references were re-audited 2026-09-06** and are trivially alt-free, from their
+assembly reports rather than by contig-list diff: ASM4749649v1 is 17 assembled molecules and *nothing
+else*, and V7 is 26 chromosomes / 26 component sequences (via its NCBI mirror `GCA_059467195.1`). Both
+therefore also lost the unplaced scaffolds their predecessors carried — 36 and 330 — which is a real
+change to the alignment space, not just naming, and it is why `main_chromosomes` for both is now exactly
+the whole assembly. The rows they replace were v5.5 (53 contigs) and Phypa_V3 (357, including a
+**spurious 27th chromosome** V7 resolves away).
 
 **mm10 already *is* ENCODE's analysis set** — contig names and lengths diff clean against ENCODE's own
 `mm10_no_alt.chrom.sizes` (file `mm10_no_alt_analysis_set_ENCODE`).
@@ -1605,7 +1613,11 @@ gene families — and is never fixed by deleting a copy from the reference.
 **Ensembl `dna.toplevel` is correct, not an oversight.** Ensembl only emits `dna.primary_assembly` when
 toplevel contains haplotypes or patches; no such file exists for any of the three Ensembl species here.
 
-**The two plant references have NO organelle contigs, and that costs ~10% of those libraries.** An earlier
+**The two plant references have NO organelle contigs, and that costs ~10% of those libraries.** The
+k-mer test below was run on v5.5 and Phypa_V3; **the conclusion carries to their 2026-09 replacements and
+was re-verified for them the cheap way**, from assembly reports showing 17 and 26 sequences with no
+organelle among them. The decoys are therefore still required — see the note on both being dropped and
+restored. An earlier
 version of this table claimed Chlamydomonas carried `MT/cpDNA` and Phypa_V3 carried "organelles"; both were
 wrong. Checked from the FASTAs themselves: 15 random 30-mers from each organelle genome fetched from ENA,
 searched against the assembly on both strands —
@@ -1660,7 +1672,7 @@ Checked per species — is the 45S/35S array actually in the assembly?
 | S. cerevisiae | yes — `XII:451786-489469` (RDN37-1/2 plus RDN5-1..6) | none |
 | S. pombe | yes — `III:1-23130` and `III:2440994-2452883`, both ends | none |
 | A. thaliana | yes — `2:3706-5945` and `3:14197677-14199916` | none |
-| C. reinhardtii | yes — subtelomeric `1:~1100-19100` and `14:~4145334-4154986` | none |
+| C. reinhardtii | yes — subtelomeric, **but those coordinates are v5.5's** (`1:~1100-19100`, `14:~4145334-4154986`) and have not been re-derived on ASM4749649v1 | none |
 | P. patens | **unclear** — 80 rRNA genes but every SSU call is partial | none available |
 | S. moellendorffii | yes — 426 rRNA genes incl. a 4,408 bp LSU on `GL377567` | none |
 | C. griseus | **unchecked** — but no reference sequence exists to use | none available |
@@ -2375,6 +2387,22 @@ and their coordinates are already in the rDNA table above, so they are now confi
 `chrUn_CP007120v1` for dm6 and `chrI:15062083-15071033` for ce11. M. musculus needs none — its sink
 already serves — and the seven Ensembl species are covered by their GFF3.
 
+**C. reinhardtii now has NO nuclear rRNA source, as a side effect of the assembly swap — and it will
+report a populated `pct_rrna` anyway.** Its rRNA came from the v5.5 **GFF3 `rRNA` features**;
+ASM4749649v1 has no annotation at all (see above), and its `rdna_regions` is `[]` and `rdna_accession`
+`null`. So the only thing left to score against is `data/decoy/`, i.e. the two restored organelles —
+which means `pct_rrna` comes back as an **organellar-only ~12%** where the previous measurement was
+**39.1% rRNA + organellar**. That is precisely the false negative `rdna_regions` was added to fix for dm6
+and ce11: a number that looks measured while nuclear rRNA is silently absent from it, and `rrna_indexed`
+cannot catch it because the entry *is* indexed.
+
+It matters because this experiment's QC verdict rests on it: `pct_unique_adj` was **20.7%** — the
+corpus's one `FAIL:very_low_mapping` — computed from that 39.1%. Adjusted against ~12% instead, the same
+library reads far worse, and the change is an artifact of the annotation loss rather than of the data.
+**Remedy is to re-derive `rdna_regions` on the new assembly** (locate the 18S/26S by mapping v5.5's array
+onto ASM4749649v1's CM accessions), which needs the FASTA on the cluster. Until then, read C. reinhardtii's
+`pct_rrna` and `pct_unique_adj` as NOT comparable with their pre-swap values or with the other plants.
+
 **Note `chrI`, not `I`.** The rDNA table above writes C. elegans' array as `I:15062083-15071033`, which is
 the WormBase name; ce11 is chr-prefixed, so the bare form would have indexed **nothing** and reported 0%
 rRNA as though measured. `rrna_content.py` therefore **raises** on a configured region whose contig is
@@ -2771,10 +2799,36 @@ already assigned in earlier lab work and two were not:
 
 | species | assigned before? | outcome |
 | --- | --- | --- |
-| C. reinhardtii | yes | **reused unchanged** |
-| P. patens | yes | **reused unchanged** |
+| C. reinhardtii | yes | reused unchanged **until the 2026-09 assembly swap REPLACED it — see below** |
+| P. patens | yes | reused unchanged **until the 2026-09 assembly swap REPLACED it — see below** |
 | S. moellendorffii | no | peak-level folds, permanently (no chromosomes exist); **built 2026-09-02** |
 | C. griseus | no | chromosome-level; **assigned here 2026-09-01** from CHO peak counts |
+
+**THE TWO PLANT ENTRIES ARE NO LONGER THE REUSED LAB ASSIGNMENT, and nothing said so — OPEN DECISION.**
+The 2026-09 assembly swap rewrote both `chrom_splits.yaml` blocks onto the new chromosome names, and in
+doing so replaced the peak-matched groupings with a mechanical **round-robin over chromosome index**
+(`i % 5`), while the comment above them still claimed "Reused UNCHANGED from earlier lab work … same
+peak-matched assignment". Measured against the previous entries:
+
+| species | chromosomes whose fold changed | old fold sizes | new fold sizes |
+| --- | --- | --- | --- |
+| C. reinhardtii | **13 of 17** | 2, 3, 3, 3, 6 | 4, 4, 3, 3, 3 |
+| P. patens | **24 of 26** | 4, 5, 5, 6, 7 | 6, 5, 5, 5, 5 |
+
+Two things are wrong with that, in the terms this file already sets out. It **breaks the one thing reuse
+buys** — "a locus in test here is in test everywhere else we train, and a divergence destroys that
+silently" — so a locus held out in the earlier lab work is now training data here for most chromosomes.
+And a round-robin is **not this project's method**: folds are matched on PEAK COUNTS, never on index or
+length.
+
+**Restoring the reused assignment is mechanical for C. reinhardtii**, because the assembly report gives
+the mapping directly: `chr_01`-`chr_17` are `CM104919.1`-`CM104935.1`, i.e. chromosome *N* is
+`CM(104918+N).1`, and Chlamydomonas chromosome numbering is standard across strains. For P. patens the
+same carry-over needs the V3-number -> GWH-ID correspondence confirmed from the FASTA's `OriSeqID`
+headers, and old fold 0's member `27` simply disappears (V7 resolves it as spurious). The alternative is
+to re-derive both from peak counts on the new assemblies, per the project's actual method, and accept the
+break with earlier work deliberately. **Either way it is a decision to record, not a rename to leave
+implicit.**
 
 The two cottons were added later and are the same story: no prior assignment, both
 chromosome-level, and both were **assigned here 2026-09-02** from their own peak counts. All four

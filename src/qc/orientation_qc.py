@@ -39,6 +39,13 @@ read-outs that catch it.
    track. If the two tracks are swapped, reverse_strand is wrong for that
    experiment. If signal centres on gene 3' ends, the mate choice is wrong.
 
+   SKIPPED ENTIRELY where the species has no annotation (`annotation_url: null`
+   in config/genomes.yaml -- currently only C. reinhardtii, whose ASM4749649v1
+   assembly has none and never will). load_annotation() returns no TSSs, this
+   panel draws "no metaplot", and no flag is raised. Panels 1 and 2 are
+   annotation-free and still carry the orientation verdict, which is the reason
+   the summit-anchored panel exists.
+
    DIVERGENT upstream antisense signal is expected in some species and NOT in
    others -- C. elegans promoters are predominantly unidirectional, so absent
    upstream antisense there is biology, not a pipeline fault. Do not read it as

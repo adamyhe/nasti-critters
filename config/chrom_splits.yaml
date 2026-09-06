@@ -160,14 +160,33 @@ A.thaliana:
   4: ["5"]
 
 # ---------------------------------------------------------------------------
-# Species added with the McDonald2024 manifest update. Both entries below are
-# Reused UNCHANGED from earlier lab work, after cross-checking the two copies of
-# it we hold against each other -- same peak-matched assignment. Names are quoted strings, like A.thaliana above:
-# bare-numeric YAML keys would parse as ints and extract_loci compares
-# chromosome names literally against the FASTA.
+# Species added with the McDonald2024 manifest update.
 #
-# NOTE Chlamydomonas is in Ensembl **plants**, not protists, as of release-63;
-# the assembly (v5.5) is unchanged, so this assignment still applies.
+# WARNING: THESE ARE NO LONGER THE REUSED LAB ASSIGNMENT. Both were reused
+# unchanged from earlier lab work -- cross-checked against the two copies we
+# hold, same peak-matched assignment -- until the 2026-09 assembly swap
+# (C. reinhardtii v5.5 -> ASM4749649v1, P. patens Phypa_V3 -> V7) rewrote them
+# onto the new chromosome names as a mechanical ROUND-ROBIN over chromosome
+# index (i % 5). That moved 13 of 17 C. reinhardtii chromosomes and 24 of 26
+# P. patens chromosomes into a different fold, which breaks the only thing
+# reuse buys: that a locus held out here is held out everywhere else the lab
+# trains. It is also not this project's method, which matches PEAK COUNTS and
+# never index or length.
+#
+# Two ways to resolve it, both deliberate; see CLAUDE.md. Carry the old
+# assignment over by chromosome number -- the assembly report gives
+# chr_01..chr_17 = CM104919.1..CM104935.1, so chromosome N is CM(104918+N).1,
+# and Chlamydomonas numbering is standard across strains -- or re-derive from
+# peak counts on the new assemblies and record the break. P. patens needs the
+# V3-number -> GWH-ID correspondence confirmed from the FASTA's OriSeqID
+# headers, and old fold 0's member `27` is gone (V7 resolves it as spurious).
+#
+# Names are unquoted accessions here; the numeric-name warning above still
+# applies to any species whose chromosomes are bare numbers, since those parse
+# as ints and extract_loci compares names literally against the FASTA.
+#
+# NOTE Chlamydomonas is in Ensembl **plants**, not protists, as of release-63 --
+# though Ensembl is no longer the source for it: ASM4749649v1 comes from NCBI.
 # ---------------------------------------------------------------------------
 C.reinhardtii:
   0: [CM104919.1, CM104924.1, CM104929.1, CM104934.1]
