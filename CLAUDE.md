@@ -850,9 +850,27 @@ Two consequences already applied:
 | S. moellendorffii | v1.0 | none published | — |
 | C. griseus | CriGri-PICRH-1.0 | none published | — |
 
-Boyle-Lab lists download as plain BEDs and are fetched by
-`run_procap_pipeline.py --fetch-genomes`; naming verified chr-prefixed for all three (`chr2L`, `chrI`,
-`chr1`).
+Boyle-Lab lists arrive **gzipped**, matching their `.bed.gz` names — `file` reports
+`gzip compressed data, was "ce11-blacklist.v2.bed"` despite the URL being raw.githubusercontent, so
+nothing gunzips them. An earlier version of this line called them plain BEDs; it was wrong. Naming
+verified chr-prefixed for all three (`chr2L`, `chrI`, `chr1`).
+
+**They were in NEITHER driver's DAG until 2026-09-03, and that silently cost 114 of 214 training jobs.**
+Only `run_procap_pipeline.py --fetch-genomes` fetched them, so a run driven by `workflow/Snakefile` — the
+preferred path — left all three absent, and `launch.py` then skipped every mouse, fly and worm experiment
+with `missing data — blacklist[0]: ...`. Three files under 60 KB gating 65 + 25 + 24 jobs. Same class of
+asymmetry as `rdna_accession`, which this driver used to ignore while the serial one read it.
+`rule fetch_blacklist` now covers it, and it is in `all`, in `fetch_only` and in a standalone
+`blacklists` target (`snakemake blacklists -c1`, the cheapest way to unblock an existing tree).
+
+**An exclusion list is a TRAINING input and is in the DAG anyway** — worth being precise about, because
+GC-matched negatives are also a training input and are deliberately *out*. The boundary that keeps the
+Snakefile runnable from the mamba env with no venv and no GPU stack is a **dependency** one, not a
+labels-versus-training one: fetching a list needs wget, where negatives need PyPI-only `tangermeme`. So
+this costs the boundary nothing. `BLACKLIST_FILES` is built only from species with a `blacklist_url`,
+which excludes A. thaliana's in-repo list and the eight species with none, and a `blacklist_url` pointing
+anywhere but `data/` **raises at DAG construction** rather than downloading into a path nothing reads
+(verified by pointing C. elegans at `elsewhere/`).
 
 Arabidopsis is the exception: excluderanges ships **only as R `.rds`**, so it is converted to BED and
 versioned at `config/blacklists/TAIR10.Klasfeld.Excludable.bed.gz` rather than fetched — no R dependency at
@@ -1676,6 +1694,53 @@ Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the
 rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
 enough to be committed.
 
+**`umi_report.py` was checking the WRONG MATE, and it was the last place the old 3'-adaptor assumption
+survived.** It hardcoded `expect = declared if (not paired or mate_i == 2) else 0`, with a comment
+asserting "for a 3' adaptor UMI that is R2, which is what fastp is told (--umi_loc read2)" — the exact
+claim the Spt5 investigation overturned. The pipeline was corrected to `5' adaptor -> read1`; this report
+was not, so for all six Spt5 runs it expected 10 nt on R2, found none, and printed
+`MISMATCH (manifest says 10)` on R2 while R1 read `no UMI signature`. **Both lines were artifacts of the
+report, not findings about the data.** It now resolves the mate through the same
+`steps.dedup.umi_locations` table both drivers hand to fastp, and raises on an unmapped prose value rather
+than defaulting. Verified: `5' adaptor -> mate 1`, `3' adaptor -> mate 2`, and `declared` now sits on R1
+for Spt5.
+
+**But the `detected` column is BLIND for most of this corpus, so do not re-fetch FASTQs to populate it.**
+`candidate_len` counts the leading run of positions whose per-base entropy is at or above
+`UNIFORM_BITS = 1.95` and needs `MIN_RUN = 4`. A uniform random UMI is 2.000 bits, and random genomic
+sequence at *f* GC is `H(f)` — so the signal to resolve is `2.000 - H(f)`, which is tiny wherever base
+composition is near-even:
+
+| species | %GC | genomic H | vs 1.95 | can the screen see a UMI? |
+| --- | --- | --- | --- | --- |
+| P. patens | 33.4 | 1.9190 | −0.031 | yes |
+| G. arboreum / G. hirsutum | 33.5 / 34.5 | 1.920 / 1.930 | −0.030 / −0.021 | yes |
+| C. elegans, S. pombe, A. thaliana, C. reinhardtii | 35-36 / 64 | 1.938-1.943 | −0.012 to −0.007 | marginal |
+| S. moellendorffii | 37.5 | 1.9544 | **+0.004** | **no** |
+| **S. cerevisiae** | 38.2 | 1.9594 | **+0.009** | **no** |
+| C. griseus, M. musculus, D. melanogaster | 41.5-41.8 | 1.979-1.981 | **+0.029 to +0.031** | **no** |
+
+For S. cerevisiae the target signal is **0.041 bits** against observed position-to-position scatter of
+**~0.13 bits**, and genomic entropy (1.959) is *above* the 1.95 threshold — so genomic sequence itself
+counts as "random" and whether a position passes is sampling noise. That is exactly what happened: the
+Spt5 R1 profile reads `1.98 1.93 1.90 1.95 …`, the run breaks at position 1, and the verdict is
+`no UMI signature` for a library that demonstrably has a 10-nt UMI.
+**So a `-` or a `0` in `detected` is not evidence against a declared UMI here.** The real evidence for the
+Spt5 UMI is the genomic k-mer offset test recorded above, not this screen. And the screen's *primary*
+purpose — catching an UNDECLARED UMI — is unavailable for 6 of 12 species including all three of mouse,
+fly and hamster, which leaves the default-deny policy resting entirely on manifest curation with no
+working automated backstop. Fixing it properly needs a different statistic (the k-mer offset test, or
+per-position base *composition* against the genome's own rather than against uniform), not a threshold
+tweak.
+
+**Fixing the mate requires no re-mapping, but it does re-run against the raw FASTQs.** `umi_report.py` is pure
+reporting — its only output is `qc/umi/{exp}.tsv`, consumed by nothing but the `all` and `qc` targets, and
+the pipeline's UMI handling never came from it. No BAM, bigWig, peak or negative changes. But the script
+is a declared `input:` of the `umi_report` rule, so editing it re-runs that rule for all 42 experiments,
+and the rule's other inputs are the **raw FASTQs**. Where those have been deleted, `snakemake qc` will
+try to re-fetch them. Run `python src/data_preprocessing/umi_report.py -e <exp>` standalone instead if
+the FASTQs are gone and only the table is wanted.
+
 **A handled interleaved deposit is not a defect, and `declared_interleaved` in the survey TSV is what says
 so.** `M.musculus-GCB_PROcap` was reported `FAIL:interleave_suspect` after the re-map even though its
 interleaving is declared and deinterleaved — the per-file printout said "(already declared)" but the
@@ -2138,7 +2203,9 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
   regression test uses all three naming styles on purpose.
 - **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
-  over the first full run (2026-09-03), negatives per peak:
+  over the first full run (2026-09-03), negatives per peak. **These are the filter-ON numbers**, kept
+  because they are what motivated `NO_SIGNAL_FILTER`; the yeast rows are 3-4x higher at the sparse end
+  now that the filter is off for them, and the shape of the finding is unchanged:
 
   | species | negatives/peak | negatives as % of all candidate windows |
   | --- | --- | --- |
@@ -2262,11 +2329,20 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   defensible and they are different things, so this is not a free switch to flip corpus-wide — it would
   change the negatives of every experiment, including the 33 that have no problem. bpnet-lite and
   procap-atlas choose the silent tail, and this repo tracks their standards.
-  So the realistic options are: keep it on everywhere and accept that the dense yeast experiments train on
-  a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
+  So the realistic options were: keep it on everywhere and accept that the dense yeast experiments train
+  on a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
   departure**, accepting that their negatives then mean something slightly different from every other
-  species'. The second is what `NO_SIGNAL_FILTER` is for. It is not a comparability-free option — it just
-  makes the cost explicit and per-species rather than silent.
+  species'.
+
+  **The second was chosen, 2026-09-03: `NO_SIGNAL_FILTER = {"S.cerevisiae", "S.pombe"}`.** It is not a
+  comparability-free option — it makes the cost explicit and per-species rather than silent, and anything
+  derived from yeast negatives is no longer strictly comparable with the other ten species. The switch is
+  three-state now, because populating the set has to leave a way back to upstream behaviour: `auto`
+  (respect the set, the default), `--no-signal-filter` (off for every species), and
+  **`--force-signal-filter`** (on for every species, overriding the set — which is how the `filter on`
+  column below was measured and how it can be re-measured). `resolve_signal_filter()` returns the reason
+  alongside the decision, so every run prints which of the four states it is in rather than leaving the
+  reader to infer it from a species name.
 
   **All seven yeast experiments measured (2026-09-03), and the gain decays monotonically with density:**
 
@@ -2294,15 +2370,15 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   **This corrects an earlier note here that `NEGATIVE_WINDOW` was probably unnecessary.** That was true
   for `S.cerevisiae_PROcap`, where the filter bound; it is false for the four densest, where only finer
   tiling could help and finer tiling costs the peak contamination measured above. For those four there is
-  no good option — with `negatives ratio 0.1` and 23,642 peaks, `Spt5IAA4h` draws ~2,364 negatives an
-  epoch from a pool of 327.
-  **This is not a bug and `--force` will not change it** — but with `negatives ratio 0.1` a 23,642-peak
-  yeast experiment draws ~2,364 negatives an epoch from a pool of 301, so the same regions recur about
-  eight times over and the GC match is thin. Two honest readings, and the choice has not been made:
-  non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so 300 windows may
-  be a fair sample of what exists; or the pool is too small to teach anything and yeast needs a different
-  background scheme (a strided rather than tiled candidate set would give many more, and would need an
-  upstream change). **Read yeast negatives-derived metrics with this in mind.**
+  no good option — at the configured 1/7 and 23,642 peaks, `Spt5IAA4h` would draw 3,377 negatives an
+  epoch from a pool of 327, recycling each one 10.3x.
+  **This is not a bug and `--force` will not change it.** Two honest readings, and this one is genuinely
+  undecided: non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so ~330
+  windows may be a fair sample of what exists; or the pool is too small to teach anything and yeast needs
+  a different background scheme (a strided rather than tiled candidate set would give many more, and would
+  need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
+  `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
+  log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
 - **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya, i.e. negatives are 1/8 and 1/5 of a batch.**
   An earlier version of this line had it backwards, as "1/7 in `fit_bpnet.py`, 0.1 in the JSON configs".
   It is the other way round: `config/bpnet_params.json` sets `negatives_ratio: 0.142857…` and
@@ -2326,9 +2402,12 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   and the two Spt5 depletions recycle roughly ten and seven times over.
 - **`negative_ratio` is therefore CAPPED at the available pool**, in both `fit_bpnet.py` and
   `fit_cherimoya.py`: `min(configured, len(negatives) / len(peaks))`, so no negative is drawn more than
-  once per epoch and the cap is printed when it engages. Chosen over loosening the signal filter because
-  it leaves the negatives themselves identical in kind to every other species — same silent-tail
-  definition — and changes only how often they are drawn.
+  once per epoch and the cap is printed when it engages. **It is on by default and complements
+  `NO_SIGNAL_FILTER` rather than substituting for it** — an earlier version of this line said the cap was
+  chosen *over* loosening the filter, which is no longer the arrangement. The filter is what decides how
+  many distinct negatives exist; the cap is what stops whatever number that is from being recycled. Both
+  are needed for the dense experiments, where the filter buys only 10-20% and the pool stays a few
+  hundred.
   Computed from **whole-genome** counts rather than the fold's: `PeakGenerator` filters peaks and
   negatives by the same `chroms`, so `pool/peaks` is near-constant across folds, and the exact per-fold
   numbers are not knowable at the call site without duplicating `extract_loci`. An approximate cap that
@@ -2337,43 +2416,76 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   **The cap addresses RECYCLING, not DIVERSITY, and they are orthogonal.** The pool is the same N distinct
   windows at any ratio; capping only lowers how often each is seen, and with it the negative share of a
   batch — 12.5% to ~1.3% for `Spt5IAA4h`. If the negative class's batch weight matters more than avoiding
-  repeats, `fit_bpnet.py --no-ratio-cap` keeps the configured composition. Neither setting adds a single
-  new background sequence.
+  repeats, `--no-ratio-cap` keeps the configured composition — present on **both** fit scripts, since
+  cherimoya had the cap but no way off it. Neither setting adds a single new background sequence; only
+  `NO_SIGNAL_FILTER` does that.
 
-- **Negative DIVERSITY in the yeasts is capped by the genome, and no pipeline setting can raise it.**
-  S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and at 1.2-4.1 peaks per window
-  only 4.5-7.7% of them are peak-free. The measured pools of 257-440 are essentially all the peak-free
-  windows that exist. Poisson on the observed density predicts 91 free windows for `Spt5IAA4h` and 1,755
-  for `S.cerevisiae_PROcap`, bracketing what is found.
+- **Negative DIVERSITY in the yeasts has a GENOMIC ceiling, and dropping the signal filter is what
+  reaches it.** S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and the peak-free
+  share of them runs from 33% at 1.18 peaks per window down to 5.7% at 4.14. **The filter-off pools are
+  essentially those peak-free windows; the filter-on pools were a subset of them**, which is why removing
+  it gains 3-4x at the sparse end and 10-20% at the dense end. Poisson on the observed density predicts
+  1,753 free windows for `S.cerevisiae_PROcap` and 91 for `Spt5IAA4h`: the first matches the measured
+  1,905 almost exactly, and the second is exceeded (327 found) because real peaks cluster, which leaves
+  more empty tiles than a uniform model allows.
+  An earlier version of this bullet read "no pipeline setting can raise it" and quoted the 257-440
+  filter-on pools as the peak-free total. The **ceiling** is genomic, which is the part that holds; the
+  pools were not at it.
 
   **In RELATIVE terms the pool is not impoverished at all**, which is worth knowing before treating it as
-  a defect:
+  a defect. Yeast rows are the filter-off pools now in use; mouse keeps the filter:
 
   | | pool | unique background sequence | share of genome |
   | --- | --- | --- | --- |
-  | `Spt5IAA4h` | 301 | 636 kb | **5.27%** |
-  | `S.cerevisiae_PROcap` | 440 | 930 kb | **7.71%** |
-  | `S.pombe_PROcap` | 311 | 657 kb | **5.26%** |
-  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | **5.15%** |
+  | `Spt5IAA4h` | 327 | 691 kb | **5.7%** |
+  | `S.pombe_PROcap` | 947 | 2,002 kb | **16.0%** |
+  | `S.cerevisiae_PROcap` | 1,905 | 4,027 kb | **33.4%** |
+  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | 5.15% |
 
-  Yeast negatives sample the same fraction of their genome as mouse negatives sample of theirs. What is
-  small is the genome, not the sampling.
+  So the densest yeast experiment samples about the same fraction of its genome as mouse does of its
+  (5.7% vs 5.15%), and the sparse ones sample far more. What is small is the genome, not the sampling.
 
-  **The asymmetry that IS real is negative vs positive unique sequence.** Yeast peak windows overlap
-  heavily, so their union is roughly the whole genome minus the peak-free part: ~11.4 Mb of positive
-  against 0.64 Mb of negative, about **1:18**. Mouse peak windows barely overlap, giving ~137 Mb against
-  ~137 Mb, about **1:1**. So a yeast model sees eighteen times more distinct positive than negative
-  sequence, where a mouse model sees parity — and that is structural, not a setting.
+  **The asymmetry that IS real is negative vs positive unique sequence, and it now spans an order of
+  magnitude within one species.** Yeast peak windows overlap heavily, so their union is roughly the whole
+  genome minus the peak-free part:
+
+  | | positive union | negative union | ratio |
+  | --- | --- | --- | --- |
+  | `Spt5IAA4h` | ~11.4 Mb | 0.69 Mb | **1:17** |
+  | `S.cerevisiae_PROcap` | ~8.0 Mb | 4.03 Mb | **1:2** |
+  | `M.musculus-GCB_PROcap` | ~137 Mb | ~137 Mb | 1:1 |
+
+  Mouse peak windows barely overlap, hence parity. So the model trained on `Spt5IAA4h` sees seventeen
+  times more distinct positive than negative sequence while the one trained on the WT library sees
+  roughly a 2:1 split — and that spread is set by peak density, not by any setting. It is also the
+  strongest argument for reading the two groups' negatives-derived numbers separately rather than as
+  "the yeasts".
 
   Levers, with what each actually buys:
   - **Jitter on negatives.** `data_loader.py` passes `max_jitter=0` for the background while peaks get
     the configured 200. Enabling it would add **+19%** unique sequence (2114 -> 2514 bp per locus), which
     is augmentation rather than diversity, and it means forking a file that is byte-identical to
     procap-atlas's. Not worth it for 19%.
-  - **Stricter peak calling.** The only lever that moves the number materially, because peak-free space
-    and peak count are the same quantity: fewer calls means more free windows. It also bears directly on
-    whether the yeast peak sets are over-called at 1.7-3.6 calls per annotated TSS against Booth's 1.04.
-    **The diversity problem and the possible over-calling are one problem seen twice.**
+  - **Stricter peak calling — NOT available through `--min-mu-percent`, checked 2026-09-03.** The
+    `Spt5IAA4h` PINTS log ends with *"To reduce false positives, PINTS overrided your current
+    --min-mu-percent value… consider increasing (current: 0.10) to 0.15"*, which reads like an untaken
+    opportunity and is not one. In `calling_engine.py` the override is **applied in place** before the
+    calls are made — `if bkg_mu_threshold < 0.5 and len(all_peak_mus) > 1000: bkg_mu_threshold =
+    np.quantile(all_peak_mus, suggest_val)` — and the `.mmp` file it writes exists only so
+    `on_the_fly_qc` can print that message afterwards. The log shows it firing: chromosome IV reports
+    `Minimum mu in local environment 0.500000`, exactly the floor. So passing `0.15` would silence the
+    message and reproduce roughly the thresholds already used. (Verified against the 1.2.1 source while
+    the run used the pinned 1.1.10; the message text is identical, so the logic almost certainly is, but
+    that is inference.)
+    **What the log does show is that saturation is a depth-versus-genome-size effect, not loose
+    settings.** The per-chromosome candidate thresholds are densities of **1.92-2.82**, while the library
+    averages **1.53 reads/bp** across the genome (18.5 M over 12.07 Mb) — so the bar for a candidate peak
+    sits at 1.3-1.8x the genome-wide mean. Nearly everything clears it because nearly everything is
+    covered.
+    Also worth recording as a **negative** result: PINTS' own cap-selection check, which warns that "the
+    proportion of significant short peaks is relatively high, which usually indicates the cap-selection
+    process didn't work well" and suggests `--disable-small`, **did not fire**. So the library is not
+    failing cap selection, despite `keep_sticks: True` and `disable_small: False`.
   - **Accept it**, and treat yeast negatives-derived numbers as weakly supported.
 
 **Should the signal filter be loosened for the other experiments where negatives < peaks? No.** That is

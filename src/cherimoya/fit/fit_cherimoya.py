@@ -69,6 +69,12 @@ def main():
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
     parser.add_argument("--negative-ratio", type=float, default=None)
+    parser.add_argument(
+        "--no-ratio-cap", action="store_true",
+        help="do not cap negatives_ratio at the available pool. Same flag and "
+             "same meaning as fit_bpnet.py's; inert here while this script runs "
+             "D. melanogaster only, but the two paths must not diverge",
+    )
     parser.add_argument("--muon-lr", type=float, default=None)
     parser.add_argument("--muon-wd", type=float, default=None)
     parser.add_argument("--adam-lr", type=float, default=None)
@@ -156,6 +162,8 @@ def main():
     # must not silently differ from the BPNet path.
     configured_ratio = params["negatives_ratio"]
     available_ratio = len(negatives) / max(len(peaks), 1)
+    if args.no_ratio_cap:
+        available_ratio = configured_ratio
     if available_ratio < configured_ratio:
         params["negatives_ratio"] = available_ratio
         print(

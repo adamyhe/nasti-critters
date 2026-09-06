@@ -82,12 +82,12 @@ awk 'FNR>1 && $NF!="no UMI signature"' qc/umi/*.tsv
 Run just the QC against existing signal with `snakemake qc -c8`.
 
 The DAG stops at peak calls. **GC-matched negatives are not part of it** — they
-are a model-training input rather than a label, and are the only step that needs
-`bpnet-lite` (PyPI-only, so it can never live in `environment.yml`). Build them
-from the venv before training:
+are a model-training input rather than a label. What keeps them out of the DAG is
+`tangermeme`, which is PyPI-only and so can never live in `environment.yml`.
+Build them from the venv before training:
 
 ```bash
-uv run python src/make_negatives.py --tier include conditional
+uv run python src/make_negatives.py
 ```
 
 For model work, add the uv venv on top. Activate it **last** so its interpreter
@@ -524,6 +524,35 @@ To process only one dataset:
 ```bash
 uv run python src/make_negatives.py -e S.cerevisiae_PROcap
 ```
+
+**The two yeasts are sampled without the signal restriction, and that is a
+deliberate departure from bpnet-lite and procap-atlas.** S. cerevisiae and
+S. pombe are transcribed densely enough that the default threshold — window
+signal at or below `signal_beta x` the 1st percentile of peak signal — leaves
+only a few hundred candidate windows in the whole genome. Dropping it recovers
+3-4x more at the sparse end, with 0.0% peak overlap and median signal well
+under a random window, so there is no contamination traded for the gain. GC
+matching, the N-content filter and peak-tile masking all still apply.
+
+The species are recorded in `NO_SIGNAL_FILTER` in `src/make_negatives.py`, so
+the choice lives in the repo rather than in shell history, and every run prints
+which state it is in. Two flags override it for one run:
+
+```bash
+uv run python src/make_negatives.py --no-signal-filter     # off for every species
+uv run python src/make_negatives.py --force-signal-filter  # on for every species
+```
+
+It changes what a negative *means* for those two species — representative
+peak-free background rather than the silent tail of the genome — so treat yeast
+negatives-derived metrics as not strictly comparable with the other ten.
+
+**Training caps `negatives_ratio` at the pool that actually exists.** The
+configured ratio is 1/7 for BPNet and 1/4 for Cherimoya (negatives per peak), and
+the dense yeast experiments have far fewer negatives than that implies, so both
+fit scripts lower it to `len(negatives) / len(peaks)` and say so. No negative is
+then drawn more than once per epoch. Pass `--no-ratio-cap` to keep the configured
+batch composition and accept the repeats instead.
 
 ### Cross-validation splits
 
