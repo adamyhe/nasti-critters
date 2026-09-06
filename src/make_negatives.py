@@ -2,8 +2,8 @@
 """Generate negative control regions for BPNet training.
 
 Reads experiment paths from config/experiment_config.yaml, builds an unstranded
-csRNA BigWig per experiment, and calls `bpnet negatives` to sample genomic windows
-with low transcription signal.
+initiation-signal BigWig per experiment, and GC-matches genomic windows with low
+transcription signal against the peak set.
 
 Minus-strand BigWigs are always abs-valued before merging, which correctly
 handles both UCSC-format tracks (stored as negative values) and direct-format
@@ -27,23 +27,21 @@ Usage:
 
 import argparse
 import gzip
-import subprocess
 import sys
 import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pybigtools
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent   # src/ -> repo root
 CONFIG_PATH = REPO_ROOT / "config" / "experiment_config.yaml"
 GENOMES_PATH = REPO_ROOT / "config" / "genomes.yaml"
 
-_fai_locks: dict[Path, threading.Lock] = {}
-_fai_locks_mutex = threading.Lock()
 
 # Which chromosomes negatives may be drawn from: `main_chromosomes` for the
 # experiment's species, from config/genomes.yaml -- the same allow-list the
@@ -70,12 +68,6 @@ ALPHA: dict[str, float] = {
 }
 
 
-def run(cmd: list, dry_run: bool, check: bool = True) -> None:
-    print(" ".join(str(c) for c in cmd))
-    if not dry_run:
-        subprocess.run([str(c) for c in cmd], check=check)
-
-
 def main_chromosomes(species: str) -> list[str]:
     """The species' main_chromosomes from config/genomes.yaml, as strings.
 
@@ -95,17 +87,22 @@ def make_chrom_sizes(
 ) -> Path:
     """chrom.sizes from the FASTA .fai, restricted to `keep`.
 
-    Restricting here is what keeps the two bedGraphToBigWig calls below and
-    `bpnet negatives` inside the same chromosome space as the peaks.
+    Restricting here is what keeps the merged bigWig below and the negative
+    sampling space inside the same chromosome space as the peaks.
     """
     fai = Path(str(sequences) + ".fai")
-    if not fai.exists():
-        with _fai_locks_mutex:
-            if fai not in _fai_locks:
-                _fai_locks[fai] = threading.Lock()
-        with _fai_locks[fai]:
-            if not fai.exists():
-                run(["samtools", "faidx", sequences], dry_run)
+    if not fai.exists() and not dry_run:
+        # pyfaidx, not `samtools faidx`: samtools is an environment.yml binary
+        # and this script runs from the uv venv, so shelling out here is the
+        # same cross-environment bug as the old bigWigToBedGraph call. pyfaidx
+        # writes a byte-identical .fai.
+        #
+        # A last-resort fallback only. main() builds every index serially before
+        # the pool starts, because workers are PROCESSES and a lock here would
+        # not be shared between them. Reaching this line means an index went
+        # missing mid-run.
+        import pyfaidx
+        pyfaidx.Faidx(str(sequences))
     chrom_sizes = tmp / "chrom.sizes"
     if not dry_run:
         fai_df = pd.read_csv(
@@ -129,62 +126,125 @@ def make_chrom_sizes(
     return chrom_sizes
 
 
-def bw_to_abs_bg(bw: Path, out_bg: Path, keep: list[str], dry_run: bool) -> None:
-    """BigWig -> BedGraph, values abs-valued, rows restricted to `keep`.
+#: Window sizes, matching the rest of the repo (and, as it happens, the
+#: `bpnet negatives` CLI defaults). Passed explicitly rather than relied on:
+#: these are a project convention, not tangermeme's to change.
+IN_WINDOW = 2114
+OUT_WINDOW = 1000
 
-    abs() is the load-bearing part and must stay: it makes UCSC-convention
-    minus-strand tracks (negative values) and direct tracks (already positive)
-    behave identically, and it is what lets bigWigMerge below work at all --
-    bigWigMerge defaults -threshold to 0 and DROPS values at or below it, so a
-    negative minus track would merge to nothing.
+#: Interval values below this are treated as absent when summing the two
+#: strands. Counts are integers stored exactly in float32 and accumulated in
+#: float64, so the sweep is exact for real data; the epsilon only guards
+#: against float residue if a track ever holds non-integer values.
+_ZERO = 1e-9
 
-    Filtering to `keep` is what stops bedGraphToBigWig aborting on a contig the
-    restricted chrom.sizes no longer lists.
+#: One bigWig interval, as a numpy record. Used with np.fromiter so a whole
+#: chromosome never becomes a Python list of tuples -- a deep mouse or hamster
+#: chromosome runs to millions of intervals, and the tuples cost far more than
+#: the numbers do.
+_IVAL = np.dtype([("start", np.int64), ("end", np.int64), ("value", np.float64)])
+
+
+def _records(reader, chrom: str) -> np.ndarray:
+    """Every interval on one chromosome, or empty if the track lacks it.
+
+    A chromosome present in chrom.sizes can be absent from a strand's bigWig --
+    `bedGraphToBigWig` records only contigs that appear in its input, which is
+    the same asymmetry that makes PINTS reject mismatched pl/mn contig sets.
+    pybigtools raises KeyError there rather than returning nothing.
     """
-    if dry_run:
-        print(f"  # bigWigToBedGraph {bw} | abs | keep main chroms → {out_bg}")
-        return
-    raw_bg = out_bg.with_suffix(".raw.bg")
-    subprocess.run(["bigWigToBedGraph", str(bw), str(raw_bg)], check=True)
-    df = pd.read_csv(
-        raw_bg, sep="\t", header=None, names=["chrom", "start", "end", "value"],
-        dtype={"chrom": str},
-    )
-    df["value"] = df["value"].abs()
-    df[df["chrom"].isin(keep)].to_csv(out_bg, sep="\t", header=False, index=False)
-    raw_bg.unlink()
+    try:
+        return np.fromiter(reader.records(chrom), dtype=_IVAL)
+    except KeyError:
+        return np.empty(0, dtype=_IVAL)
+
+
+def _sum_strands(pl: np.ndarray, mn: np.ndarray) -> np.ndarray:
+    """Sum two piecewise-constant interval sets into non-overlapping intervals.
+
+    A coordinate sweep: each interval contributes +v at its start and -v at its
+    end, events are sorted, and the running level gives the value on each gap
+    between consecutive event positions. This is what `bigWigMerge` did, minus
+    its trap -- see make_unstranded_bw.
+
+    Values are abs()-ed by the caller, so the level is non-negative and a level
+    at or below _ZERO means "no coverage here", which is exactly the bedGraph
+    convention of omitting zeros.
+    """
+    if not len(pl) and not len(mn):
+        return np.empty(0, dtype=_IVAL)
+    pos = np.concatenate([pl["start"], pl["end"], mn["start"], mn["end"]])
+    delta = np.concatenate([pl["value"], -pl["value"], mn["value"], -mn["value"]])
+    order = np.argsort(pos, kind="mergesort")
+    pos, delta = pos[order], delta[order]
+    # Collapse events that share a coordinate before accumulating, so a level
+    # is only ever read between distinct positions.
+    edges, first = np.unique(pos, return_index=True)
+    level = np.cumsum(np.add.reduceat(delta, first))
+    out = np.empty(len(edges) - 1, dtype=_IVAL)
+    out["start"], out["end"], out["value"] = edges[:-1], edges[1:], level[:-1]
+    return out[out["value"] > _ZERO]
 
 
 def make_unstranded_bw(
     pl_bw: Path, mn_bw: Path, out_bw: Path, chrom_sizes: Path,
-    keep: list[str], tmp: Path, dry_run: bool,
+    keep: list[str], dry_run: bool,
 ) -> None:
-    """Merge plus/minus BigWigs into a sorted unstranded BigWig over `keep`."""
-    mn_abs_bg = tmp / "mn_abs.bg"
-    mn_abs_bw = tmp / "mn_abs.bw"
-    us_bg = tmp / "us.bg"
-    us_sorted_bg = tmp / "us.sorted.bg"
+    """Merge plus/minus BigWigs into an unstranded BigWig over `keep`.
 
-    bw_to_abs_bg(mn_bw, mn_abs_bg, keep, dry_run)
-    run(["bedGraphToBigWig", mn_abs_bg, chrom_sizes, mn_abs_bw], dry_run)
-    run(["bigWigMerge", pl_bw, mn_abs_bw, us_bg], dry_run)
+    Done in-process with pybigtools rather than by shelling out. The old route
+    was `bigWigToBedGraph | abs | bedGraphToBigWig | bigWigMerge | sort |
+    bedGraphToBigWig` -- four UCSC binaries and four temporary files -- and it
+    is the reason this script failed with `No such file or directory:
+    'bigWigToBedGraph'`. Those binaries live in `environment.yml`, but
+    make_negatives.py is the one thing here that needs bpnet-lite, so it runs
+    from the uv venv where they are not on PATH. pybigtools is already a venv
+    dependency via tangermeme, so reading and writing directly removes the
+    cross-environment dependency instead of papering over it.
 
+    abs() on the minus strand is still the load-bearing part and must stay: it
+    makes UCSC-convention tracks (negative values) and direct tracks (already
+    positive) behave identically. It used to ALSO be what made `bigWigMerge`
+    work at all, since that tool defaults `-threshold` to 0 and drops values at
+    or below it, so a negative minus track merged to nothing. That trap is gone
+    with the tool, but the abs() is not optional -- without it the two strands
+    would cancel rather than sum.
+
+    Output intervals are written in chrom.sizes order with ascending starts,
+    which is what the bigWig format requires.
+    """
     if dry_run:
-        print(f"  # sort {us_bg}, keep main chroms → {us_sorted_bg}")
-    else:
-        df = pd.read_csv(
-            us_bg, sep="\t", header=None, names=["chrom", "start", "end", "value"],
-            dtype={"chrom": str},
-        )
-        # pl_bw is filtered here rather than up front: bigWigMerge takes it
-        # directly, so anything outside `keep` that it carries would otherwise
-        # reach the restricted chrom.sizes below and abort the conversion.
-        df = df[df["chrom"].isin(keep)]
-        df.sort_values(["chrom", "start"]).to_csv(
-            us_sorted_bg, sep="\t", header=False, index=False
-        )
+        print(f"  # merge {pl_bw.name} + |{mn_bw.name}| -> {out_bw.name} "
+              f"(pybigtools, {len(keep)} chromosomes)")
+        return
 
-    run(["bedGraphToBigWig", us_sorted_bg, chrom_sizes, out_bw], dry_run)
+    sizes = pd.read_csv(
+        chrom_sizes, sep="\t", header=None, names=["chrom", "size"],
+        dtype={"chrom": str},
+    )
+    keep_set = set(keep)
+
+    pl_reader = pybigtools.open(str(pl_bw))
+    mn_reader = pybigtools.open(str(mn_bw))
+    try:
+        def intervals():
+            for chrom, _size in sizes.itertuples(index=False):
+                if chrom not in keep_set:
+                    continue
+                mn = _records(mn_reader, chrom)
+                mn["value"] = np.abs(mn["value"])
+                merged = _sum_strands(_records(pl_reader, chrom), mn)
+                for start, end, value in merged:
+                    yield chrom, int(start), int(end), float(value)
+
+        writer = pybigtools.open(str(out_bw), "w")
+        try:
+            writer.write(dict(zip(sizes["chrom"], sizes["size"])), intervals())
+        finally:
+            writer.close()
+    finally:
+        pl_reader.close()
+        mn_reader.close()
 
 
 def filter_peaks(
@@ -201,12 +261,18 @@ def filter_peaks(
     or near-empty BED to `bpnet negatives`.
     """
     if dry_run:
-        print(f"  # {peaks} | keep {len(keep)} main chroms | bgzip > {out_path}")
+        print(f"  # {peaks} | keep {len(keep)} main chroms | gzip > {out_path}")
         return -1
-    # gzip.open, not `zcat`: bgzip output is valid gzip, and macOS `zcat` only
-    # handles .Z, so shelling out made this function untestable off-cluster for
-    # no benefit. Writing still goes through bgzip, since the output must be
-    # BGZF rather than plain gzip.
+    # gzip.open for BOTH directions, no shelling out. Reading: bgzip output is
+    # valid gzip and macOS `zcat` only handles .Z. Writing: this used to call
+    # `bgzip` on the claim that the output "must be BGZF rather than plain
+    # gzip", which is wrong -- nothing tabix-indexes this temp file. Traced the
+    # consumer to be sure: `bpnet negatives` hands the path to
+    # tangermeme.match.extract_matching_loci, which does
+    # `pandas.read_csv(loci, sep='\t', ...)`, and pandas reads plain gzip and
+    # BGZF identically. bgzip is also an environment.yml binary, so calling it
+    # from the uv venv was the same bug as the old bigWigToBedGraph call --
+    # and it ran unconditionally, so it was the very next failure.
     allowed = set(keep)
     with gzip.open(peaks, "rt") as fh:
         lines = [
@@ -214,12 +280,70 @@ def filter_peaks(
             if line and not line.startswith("#")
             and line.split("\t", 1)[0] in allowed
         ]
-    with open(str(out_path), "wb") as f_out:
-        subprocess.run(
-            ["bgzip", "-c"], input=("\n".join(lines) + "\n").encode(),
-            stdout=f_out, check=True,
-        )
+    with gzip.open(out_path, "wt") as f_out:
+        f_out.write("\n".join(lines) + "\n")
     return len(lines)
+
+
+def sample_negatives(
+    peaks: Path, sequences: Path, bigwig: Path, out_path: Path,
+    keep: list[str], alpha: float | None, dry_run: bool,
+) -> None:
+    """GC-matched negatives, restricted to `keep`.
+
+    Calls `tangermeme.match.extract_matching_loci` directly instead of shelling
+    out to `bpnet negatives`, and the reason is a correctness bug rather than a
+    dependency one.
+
+    That CLI is three lines, and the first is
+    `chroms = list(pyfaidx.Fasta(args.fasta).keys())` -- **the whole assembly**.
+    `chroms` is not just a filter on the input loci; `extract_matching_loci`
+    builds its candidate space from it (`chrom_sizes = {key: len(fa[key]) for
+    key in chroms}`), so negatives were being sampled from organelles, unplaced
+    scaffolds and decoy-adjacent contigs. Peaks and signal were both restricted
+    to `main_chromosomes` and the sampling space silently was not, which is
+    exactly the invariant this script exists to enforce.
+
+    It surfaced as a crash rather than as bad data only because the merged
+    bigWig *is* restricted: `_counts_from_coords` then asked it for a contig it
+    does not contain and pybigtools raised
+    `KeyError: 'No chromomsome with name `scaffold_37` found.'` (also seen as
+    `Mito` on S. cerevisiae). A less restricted bigWig would have returned
+    counts and the negatives would have been quietly wrong.
+
+    Everything else mirrors the CLI exactly -- same defaults, same `n_jobs=1`,
+    same `to_csv` -- so this is a one-argument divergence, not a fork. Keep it
+    that way; if bpnet-lite ever grows a `--chroms` flag, go back to the CLI.
+    """
+    if dry_run:
+        print(f"  # extract_matching_loci({peaks.name}, chroms={len(keep)} main) "
+              f"-> {out_path.name}")
+        return
+
+    from tangermeme.match import extract_matching_loci
+
+    matched = extract_matching_loci(
+        loci=str(peaks),
+        fasta=str(sequences),
+        bigwig=str(bigwig),
+        chroms=list(keep),
+        in_window=IN_WINDOW,
+        out_window=OUT_WINDOW,
+        verbose=True,
+        n_jobs=1,
+        **({"signal_beta": alpha} if alpha is not None else {}),
+    )
+    if len(matched) == 0:
+        # tangermeme's own verbose path calls .max() on the matched counts and
+        # dies with "zero-size array to reduction operation maximum" here, which
+        # says nothing about the cause. Fail with something actionable instead.
+        raise SystemExit(
+            f"no GC-matched negatives found for {peaks.name} over "
+            f"{len(keep)} chromosomes. Usually too few input peaks, or a "
+            f"chromosome-naming mismatch between the peaks and the FASTA."
+        )
+    matched.to_csv(out_path, header=False, sep="\t", index=False)
+    print(f"  wrote {len(matched):,} negatives")
 
 
 def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bool:
@@ -255,9 +379,9 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bo
         keep = main_chromosomes(exp["species"])
         chrom_sizes = make_chrom_sizes(sequences, keep, tmp, dry_run)
 
-        us_bw = tmp / "csrna.us.bw"
-        print("Building unstranded csRNA BigWig...")
-        make_unstranded_bw(pl_bw, mn_bw, us_bw, chrom_sizes, keep, tmp, dry_run)
+        us_bw = tmp / "unstranded.bw"
+        print("Building unstranded signal BigWig (plus + |minus|)...")
+        make_unstranded_bw(pl_bw, mn_bw, us_bw, chrom_sizes, keep, dry_run)
 
         # Always filter, for every species. Peaks from the pipeline are already
         # restricted to main_chromosomes, so this is normally a no-op -- but it
@@ -274,24 +398,9 @@ def process_experiment(exp_id: str, exp: dict, force: bool, dry_run: bool) -> bo
             )
             return False
 
-        print("Running bpnet negatives...")
-        neg_cmd: list = [
-            "bpnet",
-            "negatives",
-            "-v",
-            "-i",
-            peaks_input,
-            "-f",
-            sequences,
-            "-o",
-            out_path,
-            "-b",
-            us_bw,
-        ]
-        alpha = ALPHA.get(exp_id)
-        if alpha is not None:
-            neg_cmd += ["-a", alpha]
-        run(neg_cmd, dry_run)
+        print(f"Matching GC-content negatives over {len(keep)} chromosomes...")
+        sample_negatives(peaks_input, sequences, us_bw, out_path, keep,
+                         ALPHA.get(exp_id), dry_run)
 
     return True
 
@@ -346,8 +455,33 @@ def main():
         process_experiment, force=args.force, dry_run=args.dry_run
     )
 
+    # Build every .fai serially first. It used to be created inside the worker
+    # under a threading.Lock; processes do not share that lock, so two workers
+    # on the same species could race writing one index. Doing it here is also
+    # cheap and idempotent.
+    if not args.dry_run:
+        for exp_id in exp_ids:
+            ref = (experiments[exp_id].get("processed") or {}).get("sequences")
+            if not ref:
+                continue
+            seq = REPO_ROOT / ref
+            if seq.exists() and not Path(str(seq) + ".fai").exists():
+                import pyfaidx
+                print(f"Indexing {seq.name}...")
+                pyfaidx.Faidx(str(seq))
+
     n_processed = n_skipped = 0
-    with ThreadPoolExecutor(max_workers=args.threads) as pool:
+    # PROCESSES, not threads. -j was a ThreadPoolExecutor, which was fine while
+    # the work happened in `bigWigToBedGraph`/`bpnet` subprocesses that release
+    # the GIL. Now that the strand merge and the GC matching both run
+    # in-process, threads serialise on the GIL and `-j 42` used about two cores.
+    # Each experiment is independent, so one process each restores the old
+    # concurrency without the old cross-environment subprocess calls.
+    #
+    # Note this is a genome per worker in memory, so a large -j on the
+    # multi-gigabase species is memory-hungry -- the same exposure the previous
+    # N-concurrent-`bpnet` model had.
+    with ProcessPoolExecutor(max_workers=args.threads) as pool:
         futures = {
             pool.submit(run_one, exp_id=exp_id, exp=experiments[exp_id]): exp_id
             for exp_id in exp_ids

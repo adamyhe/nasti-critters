@@ -48,8 +48,13 @@ dependencies = [
     "pandas",
     "pyyaml",
     "joblib",    # benchmark_predictions.py
-    # pyfaidx and pybigtools come via tangermeme, which is what its
-    # extract_loci uses; do not add pyfastx or pyBigWig back.
+    # pybigtools is DIRECT, not merely transitive via tangermeme: since
+    # make_negatives.py merges the two strand bigWigs in-process, src/ imports
+    # it, and a package you import belongs in the dependency list whatever else
+    # happens to pull it in. pyfaidx is still transitive (tangermeme's
+    # extract_loci uses both). Do not add pyfastx or pyBigWig back -- those are
+    # the readers this repo deliberately does not use.
+    "pybigtools",
     "tqdm",
 ]
 
