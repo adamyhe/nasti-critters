@@ -88,39 +88,36 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   regenerate with
   `uvx --from conda-lock conda-lock lock -f environment.yml -p linux-64 --lockfile conda-lock.yml`
   and install with `conda-lock install --name nasti-critters conda-lock.yml`. `requirements.txt` is gone. Activate the venv last so its interpreter wins:
-  `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync && source .venv/bin/activate`.
+  `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync --extra torch && source .venv/bin/activate` — drop `--extra torch` on a CPU-only machine such as Sherlock.
 - Version pins trace the ENCODE spec: `fastp=0.23.4`, `star=2.7.11a`, `samtools=1.18` (conda);
   `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv).
-- **TORCH IS NOT A BASE DEPENDENCY — it is two mutually exclusive extras, and Sherlock needs the pinned
-  one.** Sherlock's glibc tier has no manylinux wheel above **torch 2.6.0**, so anything newer falls back
-  to an sdist build that fails there; cherimoya needs `torch.optim.Muon`, which landed in **2.10**. One
-  universal resolution cannot serve both, so:
+- **TORCH IS NOT A BASE DEPENDENCY — the base set is torch-free and there is ONE extra.**
 
-      uv sync --extra sherlock     # torch==2.6.0 on linux
-      uv sync --extra cherimoya    # torch>=2.10 + cherimoya, modern-glibc only
+      uv sync                 # torch-free: tfmodisco, analysis, every launcher
+      uv sync --extra torch   # adds training, benchmarking, attribution
 
-  `[tool.uv] conflicts` declares the pair exclusive so uv resolves them independently; the lock carries
-  both (2.6.0 and 2.13.0). Copied from procap-atlas, which is a reasonable authority here because **it
-  runs entirely on Sherlock** — the 2.6.0 pin is validated on the same cluster rather than inferred.
+  Verified after the split: the default resolution contains **0** torch-carrying packages and
+  `--extra torch` adds **21** (torch, triton, the `nvidia-*` set, bpnet-lite, tangermeme, cherimoya).
+  **The split is by DEPENDENCY, not by task**, which is the part that trips people up: `tangermeme`
+  requires `torch>=2.0` and `bpnet-lite` `torch>=1.9.0`, so anything importing either is on the torch
+  side even where the science does not obviously involve a model — `fit_*`, `benchmark_*`,
+  `attribute.py`, `make_negatives.py`, and `filter_nonACGT_regions.py --save-ohe` (the filtering is
+  torch-free; only the one-hot encoding, which goes through `extract_loci`, is not). Before adding a
+  base dependency, run `pip download <pkg> --no-deps` and read its `Requires-Dist`.
+- **Sherlock takes the base set and runs the CPU-demanding jobs; GPU work happens elsewhere.** Its glibc
+  tier has no manylinux wheel for torch above **2.6.0**, newer versions fall back to an sdist build that
+  fails, and 2.6.0 is too old for cherimoya's `torch.optim.Muon` (2.10) — so there is no torch version
+  that both installs there and satisfies this repo. Rather than pin a crippled one, the base set simply
+  has no torch and installs cleanly, which is all tfmodisco needs.
+  This replaced a briefly-lived pair of mutually exclusive `sherlock` (torch==2.6.0) and `cherimoya`
+  (torch>=2.10) extras with a `[tool.uv] conflicts` declaration, copied from procap-atlas. That works
+  and is more machinery than the actual requirement: **Sherlock is not used for GPU jobs here.**
 - **Do NOT try to get a newer torch from conda-forge. Tried, rejected.** conda-forge ships pytorch up to
   **2.13.0** for linux-64, and conda packages carry no manylinux tag, so it looks like the obvious way
-  round Sherlock's 2.6.0 wheel ceiling — a modern torch there would also let cherimoya run natively
-  instead of through Apptainer. It does not work: **conda's torch build does not reliably use CUDA.**
-  The version list is not the problem, so re-checking it proves nothing; this was established by
-  experience on the cluster. torch comes from PyPI wheels, and 2.6.0 is the ceiling.
-- **`--extra sherlock` is also what modisco jobs need — but a torch-free extra IS possible, contrary to
-  what this file said briefly.**
-  The claim was that `bpnet-lite` is a base dependency requiring `torch>=1.9.0`, so torch arrives
-  whatever extras are passed. True as the base set currently stands, but that set is a CHOICE:
-  `src/bpnet/modisco/` imports nothing from bpnet-lite — only `sys`, `pathlib`, `argparse`, `shlex`,
-  `subprocess`, `textwrap`, `pandas`, `yaml` through `launcher.py` and `experiments.py` — and the job
-  itself runs the `modisco` CLI, which needs only `modisco-lite` (no torch: numpy, scipy, numba,
-  scikit-learn, leidenalg, igraph, tqdm, pandas, logomaker, h5py, hdf5plugin, memelite).
-  **A torch-free modisco install therefore needs `modisco-lite` + `pandas` + `pyyaml` and nothing else.**
-  Getting there means moving BOTH torch carriers out of base — `bpnet-lite` and `tangermeme`
-  (`torch>=2.0`) — leaving the torch-free packages in base and putting the pair into the `sherlock` and
-  `cherimoya` extras. Not done, because it changes every documented `uv sync` line; worth doing if
-  modisco-only environments become common.
+  round the wheel ceiling — a modern torch there would also let cherimoya run natively instead of
+  through Apptainer. It does not work: **conda's torch build does not reliably use CUDA.** The version
+  list is not the problem, so re-checking it proves nothing; this was established by experience on the
+  cluster.
 - **`modisco-lite` cannot move to `environment.yml`, though by this repo's own rule it belongs there.**
   Nothing imports `modiscolite`; `src/bpnet/modisco/` only ever shells out to the `modisco` CLI, exactly
   like `umi_tools` and `pints_caller`. But it is PyPI-only — checked 2026-09-05, HTTP 404 for

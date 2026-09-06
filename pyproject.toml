@@ -15,25 +15,28 @@ version = "0.0.0"
 description = "Sequence-to-function models of PRO-cap initiation profiles in non-human species"
 requires-python = ">=3.11"
 
+# THE BASE SET IS TORCH-FREE, deliberately. Everything here installs from wheels
+# on any glibc, so `uv sync` with no extras works on Sherlock, whose tier has no
+# manylinux wheel for torch above 2.6.0. Sherlock runs the CPU-demanding jobs --
+# tfmodisco above all -- and needs nothing more than this.
+#
+# Everything that pulls torch lives in the `torch` extra below. Before adding a
+# dependency here, check `pip download <pkg> --no-deps` and read its
+# Requires-Dist: tangermeme (torch>=2.0) and bpnet-lite (torch>=1.9.0) both look
+# innocuous and are not.
 dependencies = [
-    # --- modelling ---
-    "bpnet-lite>=1.0.0",
-    # tfmodisco-lite. Already a transitive dep of bpnet-lite, but declared
-    # directly because src/bpnet/modisco/ invokes its `modisco` CLI --
-    # same reasoning as pybigtools. It ships the entry point as an
-    # old-style data/scripts/modisco rather than a console_script.
+    # tfmodisco-lite. A transitive dep of bpnet-lite too, but declared directly
+    # because src/bpnet/modisco/ invokes its `modisco` CLI -- same reasoning as
+    # pybigtools. It ships the entry point as an old-style data/scripts/modisco
+    # rather than a console_script. Needs NO torch: numpy, scipy, numba,
+    # scikit-learn, leidenalg, igraph, tqdm, pandas, logomaker, h5py,
+    # hdf5plugin, memelite.
     "modisco-lite>=2.0.0",
     # --- analysis / plotting ---
     # Both arrive transitively (matplotlib via logomaker via modisco-lite,
     # scipy via several), but src/analysis/ imports them directly.
     "matplotlib",
     "scipy",
-    "tangermeme>=1.0.0",
-
-    # NOTE: torch and cherimoya are NOT here. They are mutually exclusive
-    # extras -- see [project.optional-dependencies] below and the conflicts
-    # declaration in [tool.uv]. Putting either in the base set forces one torch
-    # version across every environment, which is exactly what cannot be done.
 
     # NOTE: the ENCODE pipeline's Python-side tools are NOT here. pyPINTS
     # (pints_caller) and umi-tools are both CLI tools that this repo only ever
@@ -67,39 +70,40 @@ dependencies = [
 # kept here as provenance for whoever implements it.
 
 [project.optional-dependencies]
-# TWO TORCH WORLDS, and they cannot be reconciled in one resolution.
+# EVERYTHING THAT NEEDS TORCH, in one extra.
 #
-# Sherlock's glibc tier has no manylinux wheel above torch 2.6.0, so anything
-# newer falls back to an sdist build that fails there. Cherimoya needs
-# `torch.optim.Muon`, which landed in **torch 2.10**. A single universal
-# resolution therefore cannot serve both, which is why torch is not a base
-# dependency and each world is an extra, declared mutually exclusive under
-# [tool.uv] so uv resolves them independently. Same arrangement as
-# procap-atlas, for the same cluster.
+#     uv sync                 # torch-free: tfmodisco, analysis, the launchers
+#     uv sync --extra torch   # adds training, benchmarking, attribution
 #
-#     uv sync --extra sherlock     # BPNet, benchmarking, attribution, modisco
-#     uv sync --extra cherimoya    # everything, on modern-glibc hardware
+# The split is by DEPENDENCY, not by task: tangermeme and bpnet-lite both
+# require torch, so every script importing either belongs on the torch side even
+# where the science does not obviously involve a model. That is fit_*,
+# benchmark_*, attribute.py, make_negatives.py, and
+# filter_nonACGT_regions.py --save-ohe (the filtering itself is torch-free; only
+# the one-hot encoding, which goes through extract_loci, is not).
 #
-# What `--extra sherlock` COSTS: no cherimoya, and no torch.optim.Muon, so
-# `fit_cherimoya.py` cannot run natively there -- it raises a pointed error
-# rather than falling back to PyPI `muon`, which is a multi-omics framework and
-# not the optimizer. Use the Apptainer image for cherimoya on Sherlock; images
-# are maintained at https://github.com/adamyhe/sherlock. Everything else in this
-# repo -- BPNet training, both benchmarks, attribution, tfmodisco -- runs fine
-# on 2.6.0.
-sherlock = [
-    "torch==2.6.0 ; sys_platform == 'linux'",
-    "torch ; sys_platform != 'linux'",
-]
-# Pinned by commit via [tool.uv.sources] below, not by version: 0.2.1 was never
-# released to PyPI. It differs from the published 0.2.0 only by a __version__
-# attribute in __init__.py -- cheri.py, cherimoya.py, io.py, losses.py,
-# performance.py and wrappers.py are byte-identical (verified by installing
-# both). The pin buys exact agreement with the container image and immunity to
-# tag movement, NOT different training results.
-cherimoya = [
-    "cherimoya",
+# Sherlock CANNOT install this extra, which is the whole point of separating it:
+# its glibc tier has no manylinux wheel for torch above 2.6.0, newer versions
+# fall back to an sdist build that fails, and 2.6.0 is too old for cherimoya's
+# torch.optim.Muon (2.10). conda-forge ships newer torch builds, but they do not
+# reliably use CUDA -- tried and rejected, see CLAUDE.md. So GPU work happens on
+# modern-glibc hardware and Sherlock gets the base set.
+#
+# torch >= 2.10 for torch.optim.Muon. fit_cherimoya.py raises a pointed error
+# rather than falling back to PyPI muon, which is a multi-omics framework and
+# not the optimizer, so muon is deliberately not a dependency.
+#
+# cherimoya is pinned by commit via tool.uv.sources below, not by version: 0.2.1
+# was never released to PyPI. It differs from the published 0.2.0 only by a
+# __version__ attribute in __init__.py -- cheri.py, cherimoya.py, io.py,
+# losses.py, performance.py and wrappers.py are byte-identical (verified by
+# installing both). The pin buys exact agreement with the container image and
+# immunity to tag movement, NOT different training results.
+torch = [
     "torch>=2.10",
+    "bpnet-lite>=1.0.0",
+    "tangermeme>=1.0.0",
+    "cherimoya",
 ]
 
 [tool.uv]

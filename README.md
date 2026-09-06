@@ -94,7 +94,9 @@ For model work, add the uv venv on top. Activate it **last** so its interpreter
 wins over anything conda pulled in:
 
 ```bash
-uv sync                      # creates .venv from pyproject.toml + uv.lock
+uv sync --extra torch        # creates .venv from pyproject.toml + uv.lock
+# or, on a CPU-only machine (Sherlock), the torch-free base set:
+uv sync                      # tfmodisco, analysis and the launchers only
 source .venv/bin/activate    # or run jobs with `uv run ...`
 ```
 
