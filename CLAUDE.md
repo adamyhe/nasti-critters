@@ -1044,6 +1044,32 @@ The reverse is also worth knowing: a change *below* trim usually will NOT be pic
 because the intermediate chain is `temp()` and already deleted, so the params/code comparison has no
 output file to compare and the persistent files downstream look up to date. Force those explicitly.
 
+## `--rerun-triggers mtime` CANNOT see a new input, so it cannot see a new decoy
+
+Measured on a fixture 2026-09-06, after
+`snakemake --rerun-triggers mtime --config experiments=...` reported **"Nothing to be done"** for a
+re-map that had just gained two organelle decoys.
+
+`mtime` compares the timestamps of a job's **existing** inputs against its outputs. A decoy that has
+never been fetched has no timestamp, and Snakemake does not schedule a missing input's rule when the
+downstream output already exists -- the same behaviour that makes a deleted `temp()` chain fail to
+retrigger. So adding an `organelle_accessions` or `rdna_accession` entry is **invisible** under `mtime`:
+no `fetch_decoy`, no `star_index`, no `align`. The `input` trigger, which is ON by default, is the one
+that notices a rule's input *set* changed.
+
+| invocation | result on the fixture |
+| --- | --- |
+| `--rerun-triggers mtime` | **Nothing to be done** |
+| default triggers | `fetch_decoy` -> `index` -> `align` |
+| `--rerun-triggers mtime --forcerun index` | `fetch_decoy` -> `index` -> `align` |
+
+**So use DEFAULT triggers for a config change and scope it with `--config experiments=`**, which is what
+bounds the cascade -- the reason to reach for `mtime` in the first place was avoiding a corpus-wide
+re-run, and a subset achieves that without disabling the trigger you need. It is also the more correct
+choice for a `genomes.yaml` edit generally, since those values reach `bedgraph` and `pints` as `params`,
+which `mtime` equally cannot see. Keep `mtime` for an edited SCRIPT, where the trigger is an existing
+input with a fresh timestamp.
+
 ## Data provenance and the re-mapping transition
 
 `processed:` paths in `config/experiment_config.yaml` now point at ENCODE-pipeline output under
