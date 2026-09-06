@@ -460,8 +460,30 @@ species:
     # without a sink those reads are attracted to nuclear NUPT/NUMT copies and
     # manufacture initiation signal inside main_chromosomes.
     organelle_accessions: [BK000554, U03843]   # cp 203,828 bp; mt 15,758 bp
+    # NO SINK: the 35S array is localized to chromosomes in this assembly, so
+    # rDNA reads map to their true source and the sink rule does not apply --
+    # same as S.cerevisiae, S.pombe and dm6.
     rdna_accession: null
-    rdna_regions: []
+    # MEASURED on this assembly 2026-09-06, because the swap took away the only
+    # other rRNA source: pct_rrna came from v5.5's GFF3 `rRNA` features, and
+    # ASM4749649v1 has no annotation at all. Without these coordinates
+    # rrna_content.py would score organelles only (~12%) against a previous
+    # 39.1% rRNA+organellar and look measured while nuclear rRNA was missing --
+    # the same false negative rdna_regions was added to fix for dm6 and ce11.
+    #
+    # Method: 29 30-mers tiled across an 18S sequence (JN903984.1) plus a 5.8S
+    # sequence (PX737393.1), searched on both strands. Two subtelomeric arrays,
+    # each running to its chromosome terminus, which is why each region is
+    # extended to the contig end:
+    #   chr_08 CM104926.1  45 18S + 50 5.8S hits over 4,583,746-4,602,203
+    #   chr_14 CM104932.1  79 18S + 84 5.8S hits over 4,123,744-4,155,420
+    # Reproduces v5.5's subtelomeric picture. Two dispersed partial copies are
+    # deliberately NOT included -- CM104926.1:~2,937,548 and
+    # CM104930.1:4,130,938-4,131,477 (539 bp) -- since they are degenerate
+    # fragments whose flanks are not rRNA.
+    rdna_regions:
+      - CM104926.1:4583000-4602485
+      - CM104932.1:4123000-4156167
     blacklist: null
     blacklist_source: 'None published for this species.'
     jaspar_collection: plants

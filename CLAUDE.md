@@ -1672,7 +1672,7 @@ Checked per species — is the 45S/35S array actually in the assembly?
 | S. cerevisiae | yes — `XII:451786-489469` (RDN37-1/2 plus RDN5-1..6) | none |
 | S. pombe | yes — `III:1-23130` and `III:2440994-2452883`, both ends | none |
 | A. thaliana | yes — `2:3706-5945` and `3:14197677-14199916` | none |
-| C. reinhardtii | yes — subtelomeric, **but those coordinates are v5.5's** (`1:~1100-19100`, `14:~4145334-4154986`) and have not been re-derived on ASM4749649v1 | none |
+| C. reinhardtii | yes — **re-derived on ASM4749649v1 2026-09-06**: subtelomeric arrays on `CM104926.1` (chr_08) and `CM104932.1` (chr_14), each running to its terminus | none |
 | P. patens | **unclear** — 80 rRNA genes but every SSU call is partial | none available |
 | S. moellendorffii | yes — 426 rRNA genes incl. a 4,408 bp LSU on `GL377567` | none |
 | C. griseus | **unchecked** — but no reference sequence exists to use | none available |
@@ -2387,21 +2387,30 @@ and their coordinates are already in the rDNA table above, so they are now confi
 `chrUn_CP007120v1` for dm6 and `chrI:15062083-15071033` for ce11. M. musculus needs none — its sink
 already serves — and the seven Ensembl species are covered by their GFF3.
 
-**C. reinhardtii now has NO nuclear rRNA source, as a side effect of the assembly swap — and it will
-report a populated `pct_rrna` anyway.** Its rRNA came from the v5.5 **GFF3 `rRNA` features**;
-ASM4749649v1 has no annotation at all (see above), and its `rdna_regions` is `[]` and `rdna_accession`
-`null`. So the only thing left to score against is `data/decoy/`, i.e. the two restored organelles —
-which means `pct_rrna` comes back as an **organellar-only ~12%** where the previous measurement was
-**39.1% rRNA + organellar**. That is precisely the false negative `rdna_regions` was added to fix for dm6
-and ce11: a number that looks measured while nuclear rRNA is silently absent from it, and `rrna_indexed`
-cannot catch it because the entry *is* indexed.
+**C. reinhardtii's rRNA is measured from `rdna_regions` now, not from annotation, and the coordinates
+were derived on the new assembly.** Its `pct_rrna` came from v5.5's **GFF3 `rRNA` features**, and
+ASM4749649v1 has no annotation at all — so with `rdna_regions: []` the only thing left to score against
+was `data/decoy/`, i.e. the two organelles, giving an **organellar-only ~12%** where the previous figure
+was **39.1% rRNA + organellar**. That is exactly the false negative `rdna_regions` exists to prevent for
+dm6 and ce11: a number that looks measured while nuclear rRNA is silently absent, which `rrna_indexed`
+cannot catch because the entry *is* indexed. And it is load-bearing here, because `pct_unique_adj`
+**20.7%** — the corpus's one `FAIL:very_low_mapping` — was computed from that 39.1%.
 
-It matters because this experiment's QC verdict rests on it: `pct_unique_adj` was **20.7%** — the
-corpus's one `FAIL:very_low_mapping` — computed from that 39.1%. Adjusted against ~12% instead, the same
-library reads far worse, and the change is an artifact of the annotation loss rather than of the data.
-**Remedy is to re-derive `rdna_regions` on the new assembly** (locate the 18S/26S by mapping v5.5's array
-onto ASM4749649v1's CM accessions), which needs the FASTA on the cluster. Until then, read C. reinhardtii's
-`pct_rrna` and `pct_unique_adj` as NOT comparable with their pre-swap values or with the other plants.
+**The array is LOCALIZED TO CHROMOSOMES in ASM4749649v1, so no sink is needed** (the rule is sink only
+where the array is missing) — measured 2026-09-06 with the repo's usual k-mer method: 29 30-mers tiled
+across an 18S sequence (`JN903984.1`) plus a 5.8S sequence (`PX737393.1`), both strands, against the
+assembly.
+
+| contig | chromosome | array | hits |
+| --- | --- | --- | --- |
+| `CM104932.1` | chr_14 | 4,123,744-4,155,420, to the terminus at 4,156,167 | 79 18S + 84 5.8S |
+| `CM104926.1` | chr_08 | 4,583,746-4,602,203, to the terminus at 4,602,485 | 45 18S + 50 5.8S |
+
+Both subtelomeric, reproducing v5.5's picture. `rdna_regions` is set to those two spans extended to each
+contig end. Two dispersed partial copies are deliberately excluded — `CM104926.1:~2,937,548` and
+`CM104930.1:4,130,938-4,131,477` (539 bp) — as degenerate fragments whose flanks are not rRNA; they are
+also the reason an in-assembly array matters, since reads from them score better against the true array
+than against the fragment.
 
 **Note `chrI`, not `I`.** The rDNA table above writes C. elegans' array as `I:15062083-15071033`, which is
 the WormBase name; ce11 is chr-prefixed, so the bare form would have indexed **nothing** and reported 0%
