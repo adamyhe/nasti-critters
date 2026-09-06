@@ -22,13 +22,23 @@ multi-task conditions or assay families into shared heads.
 Two model families are trained on the same data:
 
 - **BPNet** (`bpnetlite.BPNet`) — the main, multi-species path.
-- **Cherimoya** — newer architecture, *D. melanogaster* only. Training and benchmarking work, but per
+- **Cherimoya** — newer architecture. Training and benchmarking work, but per
   `src/cherimoya/README.md` the models are **not deployment-ready**.
+  **It is NOT D. melanogaster-only, and this file said so until 2026-09-03.** `fit_cherimoya.py` takes
+  `-e` and resolves paths, species and folds through `src/experiments.py` exactly as `fit_bpnet.py` does,
+  and `config/cherimoya_params.json` holds no species-specific value — it has been corpus-capable since
+  `f9f60cf` ported it onto the unified config. What made it *look* single-species was that the surrounding
+  scripts were left at the pre-unification interface: `src/cherimoya/fit/slurm.sh` ran `-f
+  $SLURM_ARRAY_TASK_ID` with **no `-e`**, so every array task exited 2; `benchmark/cmd.sh` hard-coded
+  `D.melanogaster-S2_PROcap.json` as its already-done check while passing `"$@"` through, so once fly was
+  benchmarked every other experiment printed "Skipping" and exited 0; and there was no launcher at all.
+  All fixed, and `src/bpnet/fit/slurm.sh` had the same missing `-e` (plus a relative path and a
+  `--job-name=s2_fit` from the dm3 era).
 
 All data lives in `data/`; models in `models/{bpnet,cherimoya}/`. Neither was gitignored before — the
 repo's `.gitignore` was a stock Python one with no `data/` rule, which only looked harmless because `data/`
 did not exist yet. Both are ignored now (along with `logs/`, `predictions/`, `performance_metrics/`,
-`attr/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
+`attributions/`); the full FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
 Every script resolves config/data paths relative to `REPO_ROOT`, computed from `__file__`, so scripts can be
 invoked from anywhere — but the launcher shell scripts assume the repo root as CWD.
 
@@ -48,12 +58,27 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   `snakemake` is deliberately NOT a uv dependency; do not add preprocessing-only deps there.
   `numpy`/`pandas`/`pyyaml` appear in both on purpose, because scripts on both sides import them.
 - **GC-matched negatives are model prep, not preprocessing, and are deliberately outside the DAG.**
-  They are a training input rather than a label, and `src/make_negatives.py` is the only thing here that
-  shells out to `bpnet negatives` from **bpnet-lite, which is PyPI-only** — not on bioconda or
-  conda-forge, so it can never move into `environment.yml` the way `umi_tools` and `pypints` did.
+  They are a training input rather than a label, and `src/make_negatives.py` imports
+  **`tangermeme`, which is PyPI-only** — checked 2026-09-02, HTTP 404 on both `bioconda/tangermeme` and
+  `conda-forge/tangermeme` — so it can never move into `environment.yml` the way `umi_tools` and
+  `pypints` did.
+  **The package behind that argument changed and the conclusion did not.** It used to be bpnet-lite,
+  because the script shelled out to `bpnet negatives`; it now calls
+  `tangermeme.match.extract_matching_loci` directly and does not import bpnet-lite at all. Both are
+  PyPI-only, so the DAG boundary is exactly where it was — do not read "no more bpnet-lite" as
+  permission to move this into `workflow/Snakefile`.
   Keeping it out of `workflow/Snakefile` is what makes the claim above true: the entire pipeline runs
   from the mamba env with no venv and no GPU stack. Run it separately, from the venv, before training —
   `uv run python src/make_negatives.py`. Do not add it back as a rule.
+- **The venv side must not shell out to a conda binary, and `make_negatives.py` did — three times.**
+  It failed with `No such file or directory: 'bigWigToBedGraph'`, because that binary is an
+  `environment.yml` package while this script runs from the uv venv. The other two would have been the
+  next two failures: `bgzip` in `filter_peaks`, which runs unconditionally, and a `samtools faidx`
+  fallback. All three are now in-process — `pybigtools` for the strand merge, the `gzip` module for the
+  BED, `pyfaidx` for the index. A fourth call, `bpnet negatives` itself, went the same way for a
+  different reason — see the negatives bullet under "Data conventions" — so **the script now makes no
+  subprocess calls at all.** Keep it that way: when adding to it, check which environment provides what
+  you are calling.
 - **When auditing that boundary, grep for `subprocess`, `run([` and bare command names in `shell:`
   blocks — not just imports.** An earlier version of this file claimed preprocessing needed no uv,
   verified by loading each script and checking `sys.modules`. That covers what a script *imports* and
@@ -63,25 +88,130 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   regenerate with
   `uvx --from conda-lock conda-lock lock -f environment.yml -p linux-64 --lockfile conda-lock.yml`
   and install with `conda-lock install --name nasti-critters conda-lock.yml`. `requirements.txt` is gone. Activate the venv last so its interpreter wins:
-  `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync && source .venv/bin/activate`.
+  `mamba env create -f environment.yml && mamba activate nasti-critters && uv sync --extra torch && source .venv/bin/activate` — drop `--extra torch` on a CPU-only machine such as Sherlock.
 - Version pins trace the ENCODE spec: `fastp=0.23.4`, `star=2.7.11a`, `samtools=1.18` (conda);
-  `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv). `torch>=2.10` is required for `torch.optim.Muon`.
+  `pyPINTS==1.1.10`, `umi-tools==1.1.5` (uv).
+- **TORCH IS NOT A BASE DEPENDENCY — the base set is torch-free and there is ONE extra.**
+
+      uv sync                 # torch-free: tfmodisco, analysis, every launcher
+      uv sync --extra torch   # adds training, benchmarking, attribution
+
+  Verified after the split: the default resolution contains **0** torch-carrying packages and
+  `--extra torch` adds **21** (torch, triton, the `nvidia-*` set, bpnet-lite, tangermeme, cherimoya).
+  **The split is by DEPENDENCY, not by task**, which is the part that trips people up: `tangermeme`
+  requires `torch>=2.0` and `bpnet-lite` `torch>=1.9.0`, so anything importing either is on the torch
+  side even where the science does not obviously involve a model — `fit_*`, `benchmark_*`,
+  `attribute.py`, `make_negatives.py`, and `filter_nonACGT_regions.py --save-ohe` (the filtering is
+  torch-free; only the one-hot encoding, which goes through `extract_loci`, is not). Before adding a
+  base dependency, run `pip download <pkg> --no-deps` and read its `Requires-Dist`.
+- **Sherlock takes the base set and runs the CPU-demanding jobs; GPU work happens elsewhere.** Its glibc
+  tier has no manylinux wheel for torch above **2.6.0**, newer versions fall back to an sdist build that
+  fails, and 2.6.0 is too old for cherimoya's `torch.optim.Muon` (2.10) — so there is no torch version
+  that both installs there and satisfies this repo. Rather than pin a crippled one, the base set simply
+  has no torch and installs cleanly, which is all tfmodisco needs.
+  This replaced a briefly-lived pair of mutually exclusive `sherlock` (torch==2.6.0) and `cherimoya`
+  (torch>=2.10) extras with a `[tool.uv] conflicts` declaration, copied from procap-atlas. That works
+  and is more machinery than the actual requirement: **Sherlock is not used for GPU jobs here.**
+- **Sherlock cannot build ANYTHING from source with its default toolchain, so the base set must install
+  from wheels alone.** Two facts, both measured rather than inferred. Its glibc is below 2.28 — from the
+  torch step change, `torch-2.6.0-...-manylinux1_x86_64.whl` against
+  `torch-2.7.0-...-manylinux_2_28_x86_64.whl` — so any package whose newest wheel is `manylinux_2_26` or
+  later falls back to an sdist. And its default compiler is **gcc 4.8.5 with binutils 2.27**, 2015
+  vintage, reported by meson as `c++ (GCC) 4.8.5` / `ld.bfd 2.27`. That toolchain has **no C++17** and
+  no AVX512-VNNI, so the fallback does not merely run slowly, it fails:
+
+      contourpy 1.3.3   ERROR: C++ Compiler does not support -std=c++17
+      pybigtools 0.3.0  Error: no such instruction: `vpdpbusd %ymm12,%ymm3,%ymm4`
+
+  **An earlier version of this note said a missing wheel means a source build, "not automatically a
+  failure". On this cluster it is.** That framing survived two rounds of pinning one package at a time,
+  each of which just moved the failure to the next package in the graph. The base set is now capped so
+  that **zero** of its 34 packages need a build — verify with the audit below after any dependency
+  change.
+
+  A newer `gcc` module would also work and would need no caps, but then every source-built extension
+  links against that module's libstdc++ and the module has to be loaded in each job too. Caps keep the
+  environment self-contained.
+
+  | pin | why |
+  | --- | --- |
+
+  | pin | why |
+  | --- | --- |
+  | `leidenalg==0.10.2` | 0.11.0 moved from `manylinux_2_17` to `2_26/2_28`; the sdist build fails. Arrives via **modisco**, so a tfmodisco-only install is affected |
+  | `igraph<1.0` | leidenalg's own dependency, same jump — 1.0.0 is 2_28-only, 0.11.9 is the last 2_17 |
+  | `pillow<12.3.0` | 12.3.0 dropped `manylinux_2_17` |
+  | `extra-build-variables` `HDF5PLUGIN_NATIVE=False` | hdf5plugin has no 2_17 wheel at any version, so it always builds; its `-march=native` probe emits AVX512-VPOPCNTDQ that Sherlock's assembler cannot assemble |
+  | `pybigtools` **moved out of base** | not pinned — moved into the `torch` extra, so Sherlock never builds it at all. See below |
+  | `contourpy<1.3.3`, `h5py<3.15.0`, `hdf5plugin<6.0.0`, `numpy<2.3.0`, `pandas<2.3.3`, `scikit-learn<1.8.0`, `scipy<1.17.0` | the first version of each whose linux x86_64 wheels moved past `manylinux_2_17` |
+
+  The first four are procap-atlas's, which is the right authority because it runs on the same cluster;
+  the caps are derived here. They are upper bounds, not exact pins, so patch releases on the
+  wheel-having line still resolve. **Do not raise one without re-running the audit** — the cap is the
+  wheel boundary, not a guess.
+- **`pybigtools` is in the `torch` extra, NOT in base, and that placement is load-bearing.** It is
+  `manylinux_2_28`-only at every version, so it always builds from source on a pre-2.28 glibc, and
+  0.3.0's build dies in `libdeflate-sys` with `no such instruction: vpdpbusd` — GCC emitting AVX512-VNNI
+  that Sherlock's assembler cannot assemble, the same class of failure as hdf5plugin's `-march=native`.
+  Pinning to 0.2.5 (procap-atlas's choice) was the first fix and is the weaker one, because 0.2.5 also
+  has to build. **Nothing on the base side needs it**: the only venv-side importer is
+  `src/make_negatives.py`, which is torch-side anyway since it imports tangermeme, and `orientation_qc.py`
+  reads bigWigs with it from the MAMBA env, where it is a conda package. So Sherlock never builds it.
+  Do not move it back to base to "declare what we import" — the declaration lives in the `torch` extra,
+  which is where the importer lives.
+- **Zero base packages now need a source build.** Re-audit after ANY dependency change: resolve the base
+  set, then check each wheel's platform tags against `manylinux_2_17`. A single uncapped transitive
+  dependency is enough to break `uv sync` on Sherlock, and it will surface as a compiler error deep in a
+  build log rather than as a resolution failure. **No 2_17 wheel means a
+  source build, not automatically a failure** — but do not lean on that the way an earlier version of
+  this note did. It cited `pybigtools` as proof, reasoning that upstream installs it on Sherlock despite
+  its being 2_28-only at every version. That had the example exactly backwards: upstream pins
+  **0.2.5** precisely *because* newer releases fail to build there. The general point survives (a
+  missing wheel is not by itself a problem); the evidence for it did not.
+  So the rule is empirical, not deductive: pin when a build actually fails, and take a pin from
+  procap-atlas as evidence that one does. Re-audit with:
+
+      uv export --no-emit-project --no-hashes   # then check each wheel's tags on PyPI
+
+- **Do NOT try to get a newer torch from conda-forge. Tried, rejected.** conda-forge ships pytorch up to
+  **2.13.0** for linux-64, and conda packages carry no manylinux tag, so it looks like the obvious way
+  round the wheel ceiling — a modern torch there would also let cherimoya run natively instead of
+  through Apptainer. It does not work: **conda's torch build does not reliably use CUDA.** The version
+  list is not the problem, so re-checking it proves nothing; this was established by experience on the
+  cluster.
+- **`modisco` cannot move to `environment.yml`, though by this repo's own rule it belongs there.**
+  Nothing imports `modiscolite`; `src/bpnet/modisco/` only ever shells out to the `modisco` CLI, exactly
+  like `umi_tools` and `pints_caller`. But it is PyPI-only — checked 2026-09-05, HTTP 404 for
+  `modisco`, `modisco-lite`, `modiscolite`, `tfmodisco-lite` and `tfmodisco` on **both** bioconda and
+  conda-forge, and its `memelite` dependency is 404 there too. Same situation as `tangermeme`. Do not
+  re-litigate this without re-checking those names.
 - Two package-name traps, both already handled — do not "fix" them back: the peak caller is **`pyPINTS`**
   (PyPI `pints` is unrelated time-series inference), and PyPI **`muon` is a multi-omics framework**, not the
   optimizer. `fit_cherimoya.py` imports `torch.optim.Muon` and raises a pointed error rather than falling
   back to it.
 - Sherlock: `mamba activate torch` also works; install the Python side with
-  `uv pip install --python "$CONDA_PREFIX/bin/python" -r pyproject.toml`. Module loads are in
-  `src/bpnet/fit/slurm.sh`.
+  `uv pip install --python "$CONDA_PREFIX/bin/python" -r pyproject.toml`. Site-specific module loads
+  go in a `launch.py --setup-file`; no tracked script carries them.
 - Preprocessing shells out to: fastp, STAR, samtools, bedtools, GNU coreutils `sort`, `bgzip`,
-  `bedGraphToBigWig`/`bigWigToBedGraph`/`bigWigMerge`, `pints_caller`, `umi_tools`, and the `bpnet` CLI
-  (`bpnet negatives`). The pipeline pulls FASTQs straight from ENA over HTTPS, so SRA Toolkit is not
+  `bedGraphToBigWig`, `pints_caller` and `umi_tools`. **`bigWigToBedGraph` and `bigWigMerge` are gone**,
+  and so is the `bpnet` CLI from this list — see the next bullet. The pipeline pulls FASTQs straight from ENA over HTTPS, so SRA Toolkit is not
   needed; homerTools, `fasterq-dump` and `proseq2.0` are no longer used anywhere.
-- **No site-specific values are hard-coded any more.** Launchers and `launch.py` take `--partition`/`-C`
-  at submit time and emit no such directive by default; container use is opt-in via `APPTAINER_IMAGE` /
-  `APPTAINER_BIND`; job environment setup defaults to activating this repo's mamba env + uv venv, with
-  `launch.py --setup-file` for site-specific module loads. Do not reintroduce cluster paths or partition
-  names into tracked files.
+- **Site-specific values: PARTITIONS AND THE GPU CONSTRAINT ARE NOW DEFAULTED; everything else is not.**
+  This reverses part of an earlier rule, deliberately and on request (2026-09-05) — typing
+  `--partition`/`-C` on every submission is its own error source. `src/launcher.py` holds
+  `GPU_PARTITION = "akundaje,owners"`, `CPU_PARTITION = "normal,akundaje,owners"` and `GPU_CONSTRAINT`,
+  the `|`-joined GPU SKU list copied from procap-atlas's cherimoya launchers (`|` is SLURM's OR, so any
+  one card satisfies it). Both stay overridable, so another site needs a flag rather than a patch.
+  **Which set a launcher gets is derived from ONE argument**, `_add_common_args(..., gpu=)`, so the
+  partition and the constraint cannot drift apart from each other or from `_emit`'s `gpus`. `-C` is
+  additionally gated on `gpus` at emission, so a global `--constraint` cannot leak onto a CPU job and
+  narrow it to GPU nodes for nothing.
+  **The `owners` partition caps jobs at 48:00:00** and is in every default here, so a longer `--time`
+  will simply not schedule there; `modisco motifs` sits exactly on that cap.
+  Everything else is unchanged: container use is opt-in via `APPTAINER_IMAGE` / `APPTAINER_BIND`; job
+  environment setup defaults to activating this repo's mamba env + uv venv, with `launch.py
+  --setup-file` for site-specific module loads. **Do not reintroduce cluster PATHS into tracked files**,
+  and note the `.sh` launchers still emit no partition or constraint of their own.
 - **Do not add an Apptainer definition to this repo.** Container images are maintained externally and
   authoritatively at [adamyhe/sherlock](https://github.com/adamyhe/sherlock) (`cherimoya/cherimoya.def`, base
   `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime`). A project-local `src/cherimoya/apptainer/` existed and
@@ -153,13 +283,40 @@ python src/bpnet/fit/fit_bpnet.py -e D.melanogaster-S2_PROcap -f 0 -v
 python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py --time 12:00:00 --mem 32G
 
-# Train Cherimoya (D. melanogaster / dm3 config set only)
-python src/cherimoya/fit/fit_cherimoya.py -f 0
+# Same selection, no SLURM: bare commands on stdout, skips and summary on stderr
+python src/bpnet/fit/launch.py --print-commands | bash
+
+# Train Cherimoya, one experiment/fold -- any experiment, same interface as BPNet
+python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0
+
+# Submit all (experiment x fold) Cherimoya jobs; same launcher as BPNet
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --print-commands | bash
+
+# Compare the two model families on shared benchmark metrics
+python src/analysis/compare_bpnet_cherimoya.py
 
 # Evaluate / attribute
 python src/cherimoya/benchmark/benchmark_cherimoya.py --save-output
 python src/bpnet/benchmark/benchmark_predictions.py
-python src/bpnet/attribute/attribute.py --attribute-type profile
+python src/bpnet/attribute/attribute.py -e D.melanogaster-S2_PROcap --attribute-type profile
+
+# Submit all attribution jobs; job unit is (experiment x type), NOT x fold
+python src/bpnet/attribute/launch.py --dry-run
+python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
+
+# Optional, and STANDALONE -- nothing calls it. Drops loci whose window holds a
+# non-ACGT base, and writes the one-hot for what survives. Reaches attribution
+# only via --loci; without that, attribute.py reads exp.peaks and ignores both.
+# REQUIRED before attribution: deep_lift_shap rejects any window containing an N,
+# and extract_loci(ignore=...) blanks rather than drops those. Also writes the
+# one-hot array TF-MoDISco needs alongside the attributions.
+python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per experiment
+python src/bpnet/attribute/launch.py --dry-run    # requires the filtered set
+
+# TF-MoDISco: motifs then report. Both CPU-only; motifs is long (allow days).
+python src/bpnet/modisco/launch.py --dry-run
+python src/bpnet/modisco/launch_report.py --dry-run
 ```
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
@@ -199,6 +356,369 @@ need the old dm3 dataset, add it as an experiment rather than resurrecting a par
 `{name}.torch` every time validation loss improves — so it can exist after one epoch — and
 `{name}.final.torch` exactly once at the end of `fit()`. `model_path(..., final=True)` is
 the only safe test of completion.
+
+**A bpnet-lite checkpoint IS a pickled module, not a state dict — load it with
+`experiments.load_model()`.** `bpnetlite/bpnet.py` persists with `torch.save(self, ...)` for both
+paths, verified in the installed source. Two things follow, and the downstream scripts got both wrong
+until 2026-09-04:
+
+- **`weights_only=False` is required.** PyTorch 2.6 flipped the default to `True`, so
+  `benchmark_predictions.py` died with `UnpicklingError: ... Unsupported global: GLOBAL
+  bpnetlite.bpnet.BPNet was not an allowed global by default`. Allowlisting with `add_safe_globals` is
+  the wrong remedy: it would have to cover BPNet and every type it pickles, and these checkpoints are
+  this repo's own training output, not untrusted input. procap-atlas passes `weights_only=False` at
+  every bpnet-lite load site.
+- **Do not reconstruct a `BPNet` and call `load_state_dict`.** Both scripts did, and it could never
+  have worked at any `weights_only` setting — reproduced on torch 2.10, it raises
+  `TypeError: Expected state_dict to be dict-like, got <class 'BPNet'>`. It also carried a quieter
+  hazard: the architecture came from the *current* `config/bpnet_params.json`, so a checkpoint trained
+  under a different `n_filters`/`n_layers` would be loaded into the wrong shape.
+
+`attribute.py` was additionally unrunnable one line earlier: it read `params["n_outputs"]` and
+`params["n_control_tracks"]`, which are set **nowhere** — absent from `bpnet_params.json`, from the
+`params.update()` block and from any CLI flag — so it raised `KeyError` before reaching the load.
+Deleting the reconstruction removed that too.
+
+**Cherimoya does not go through `load_model()`.** It saves a dict payload and reconstructs via
+`cls(**payload['config'])` inside its own `Cherimoya.load()`, which the `weights_only` change does not
+affect. That is the only other model-load site in the repo; audited 2026-09-04, there are exactly three.
+
+## Peak-level splits were ignored by every downstream script
+
+S. pombe and S. moellendorffii assign folds per PEAK, not per chromosome, so `fold_split()` returns
+`test_chroms=None` for them and the filtering has to happen on the peak table. `fit_bpnet.py` and
+`fit_cherimoya.py` do that through `exp.fold_loci()`. **Nothing downstream did**, and the two failure
+modes were very different:
+
+- **`attribute.py` crashed.** `chroms = [c for f in folds for c in f["test_chroms"]]` raised
+  `TypeError: 'NoneType' object is not iterable`. Loud, and the reported symptom.
+- **Both benchmark scripts silently scored every fold's model on ALL loci** — its own training peaks
+  included — because `chroms=None` means "no chromosome filter" rather than "no loci". Metrics inflated,
+  no error. This is the worse one, and it was only found by chasing the crash.
+
+Fixes, and note they are deliberately different because the two scripts want different things:
+
+- `fold_loci()` gained **`test_loci`**. It already returned `train_loci`/`valid_loci` but only a
+  `n_test` COUNT, so benchmarking had nothing to filter with. Under chromosome-level splits it returns
+  every peak and `test_chroms` does the work, so that path is unchanged; under peak-level it returns the
+  fold's held-out peaks. Verified on a fixture: 4 of 20 loci for fold 0 of 5, zero train/test overlap,
+  and all 20 returned under chromosome-level.
+- Both benchmarks now extract `exp.fold_loci(loci, fold)["test_loci"]`.
+- `attribute.py` takes `[... for c in (f["test_chroms"] or [])] or None`, i.e. **no chromosome filter**
+  for peak-level species. That is correct rather than a workaround: their peaks are all in the fold
+  table, and attribution does not hold out anyway — see below.
+
+**Attribution deliberately does NOT hold out, and that is inherited, not accidental.** It extracts every
+locus once and attributes it with EVERY fold's model, then averages. Upstream's `attribute_bpnet.py`
+does the same, with `chroms=all_chrom`. So each locus is attributed by four models that saw it in
+training plus the one that did not: it is an **ensemble attribution, not a held-out estimate**, and
+reading it as evidence of generalisation would be wrong. `benchmark_predictions.py` is the per-fold
+held-out path and is where generalisation numbers come from.
+
+## attributions/ and modisco/ are split by family; the filtered BED and OHE are not
+
+    attributions/{experiment}_filtered.bed          shared
+    attributions/{experiment}_ohe.npz               shared
+    attributions/{family}/{experiment}_attr_{type}_{mode}.npz
+    modisco/{family}/{experiment}_{type}_{mode}.modisco.h5
+    modisco/{family}/{experiment}_{type}_{mode}.modisco/
+
+**The split follows what produces each file.** Attributions come out of a MODEL, so bpnet's and
+cherimoya's are different files and belong under `attributions/{family}/` beside the `models/{family}/`
+and `performance_metrics/{family}/` convention. The filtered BED and its one-hot encoding depend only on
+(loci, sequences, in_window), so every family attributing the same experiment shares them — putting them
+under a family directory would imply they need producing twice, and would mean `launch_filter.py` had to
+know which family it was filtering for, which it does not.
+
+`attribution_path()` therefore takes `family` first, matching `model_path()`; `filtered_loci_path()` and
+`ohe_path()` do not take one at all. `attribute.py` is BPNet-only and pins `FAMILY = "bpnet"` at module
+level rather than accepting a flag, because cherimoya attribution is blocked on rescale rules, not on
+plumbing.
+
+`modisco/` is split the same way — `modisco/{family}/{experiment}_{type}_{mode}.modisco.h5` and the
+matching `.modisco/` report directory — since motifs are discovered FROM a model's attributions and
+inherit their provenance. Only `bpnet/` exists today, because cherimoya attribution is blocked, but the
+level is there so the second family does not need a migration.
+
+## `filter_nonACGT_regions.py` is REQUIRED for attribution, and produces modisco's other input
+
+An earlier version of this section called it optional and said a blank column is usually tolerable.
+**Both were wrong.**
+
+**`deep_lift_shap` refuses a sequence containing an unknown base.** Verified directly against tangermeme
+1.4.1 on a two-sequence fixture: a single all-zero column gives
+`ValueError: X must be one-hot encoded. and cannot have unknown characters.` — and it fails in **BOTH**
+reference modes, so the frequency default does not rescue it. The check is inside `deep_lift_shap`
+itself, not in the dinucleotide shuffle.
+
+**And `extract_loci(ignore=IGNORE)` is exactly what creates that column.** `ignore` KEEPS a locus
+containing an N and zeroes the column rather than dropping the locus (verified: one N gives 1 row with
+exactly 1 blank column). So the setting every `extract_loci` call in this repo passes is what makes
+attribution fail, and `filter_nonACGT_regions.py` — which DROPS such loci — is the remedy. That is the
+whole reason it exists; the `snp_bed` variable name is a leftover from where it was first used.
+
+**A PINTS peak file is RAGGED, and the filter script has to read it line by line because of that.**
+`combine_peaks` concatenates the unidirectional and bidirectional calls, which carry different numbers
+of columns, so `pd.read_csv(peaks, sep="\t", header=None)` dies with
+`Expected 6 fields in line 2, saw 9`. **`load_bed()` is unaffected** — its `usecols=[0, 1, 2]` with three
+matching `names` reads a ragged file fine, which is why training, benchmarking and attribution never hit
+this. Adding `usecols` to the filter script would fix the read and be wrong: its output is written back
+out as a BED, and upstream deliberately keeps PINTS' strand/confidence/class/summit columns rather than
+cutting to BED3 — the summit column is what makes `extract_loci(summits=True)` possible. So it keeps the
+raw line, which preserves every column whatever their number, and returns `(kept_lines, coords)`.
+It also has to handle **bgzipped** input, since that is what `combine_peaks` writes.
+
+`attribute.py` now catches this before the library does, because the library's message names neither the
+loci nor the remedy: it counts the offending rows, prints the first few, and prints the two commands
+that fix it.
+
+**The filtered set is the DEFAULT locus set, not an opt-in.** It was briefly a `--use-filtered` flag on
+the launcher, which had the default backwards: if `deep_lift_shap` cannot accept an N and
+`extract_loci(ignore=...)` always produces one, then attributing raw peaks is the broken path and must
+not be what happens when you pass nothing. So `attribute.py --loci` now defaults to
+`filtered_loci_path(exp.id)` and exits 1 with the `launch_filter.py` command if it is absent, and the
+launcher skips an unfiltered experiment rather than emitting a job that would fail. `--loci` survives
+only for a genuinely different locus set, and only then does its stem enter the output filename — the
+default run keeps the plain `attribution_path()` name.
+
+**The `--save-ohe` array is not a convenience either — TF-MoDISco requires it.** modisco takes
+one-hot sequences alongside contribution scores, so the OHE is a second required input rather than a
+debugging aid. That is the strongest argument for it living in the filter step: it must describe exactly
+the loci that were attributed, and the filter is what decides which those are.
+
+**`attribute.py` saves HYPOTHETICAL attributions**, which is also what modisco wants
+(`hypothetical_contribs`): `hypothetical=True` is passed unconditionally, and the stored array is the
+mean over folds of those. Observed/actual contributions are `hypothetical * one_hot`, derivable from the
+two files, so the pair is complete for modisco and nothing else needs saving.
+
+**Passing `--loci` changes the default output name** (`attributions/bpnet/{exp}_{stem}_attr_{type}_{mode}.npz`), for
+the same reason the reference mode is in there: different loci give different numbers, and nothing else
+on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
+check follows.
+
+## Launchers: six of them, one emission path
+
+`src/launcher.py` holds the selection rule and the emission machinery; the three
+`launch.py` files are thin wrappers. All three take the same emission modes —
+`--print-commands` (bare commands on stdout, skips and summary on stderr), `--dry-run` (full sbatch
+scripts) and the default (submit) — and the same SLURM flags, because `_add_common_args` and `_emit` are
+shared. Do not add a fourth copy of that block.
+
+| launcher | job unit | jobs | GPU | skips |
+| --- | --- | --- | --- | --- |
+| `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | yes | `.final.torch` exists, missing inputs, no fold assignment |
+| `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
+| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
+| `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
+| `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 42 x types | **no** | .h5 exists, attribution or OHE npz missing |
+| `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 42 x types | **no** | report dir exists, .h5 or MEME db missing |
+
+Run order is filter -> attribute: `launch_filter.py`, then `launch.py`. The second **skips any experiment the first has not covered**, because attribution of unfiltered peaks cannot work.
+
+**Attribution's job unit is not the fold**, which is why it needed its own enumeration rather than a flag
+on the fit launcher: `attribute.py` loops every fold internally and averages their attributions, so one
+job covers all folds of one experiment. It follows that a partly trained experiment is not partly
+attributable — `attribute.py` exits 1 — so the launcher skips it and reports `3/5 folds trained` rather
+than just refusing.
+
+**`launch_filter.py` requests NO GPU, which is why it is a fourth launcher rather than a flag on the
+third.** `filter_nonACGT_regions.py` reads a FASTA and one-hot encodes; sending that to the GPU
+partition would queue it behind training and then hold an idle card. `_emit(..., gpus=0)` omits the
+`#SBATCH --gpus` directive and the `nvidia-smi` line; every other launcher passes the default 1.
+It also gates on `missing_paths(kinds=("peaks", "sequences"))` rather than on `exp.missing`, which would
+additionally demand negatives and trained models that this step has nothing to do with.
+
+**The already-done check must predict the output path**, and the reference mode is part of that path, so
+`experiments.attribution_path()` is the single definition shared by `attribute.py` and the launcher. Two
+copies of that format string is exactly how a launcher starts re-running finished work.
+
+## Comparing the two model families
+
+`src/analysis/compare_bpnet_cherimoya.py` collates
+`performance_metrics/{bpnet,cherimoya}/{experiment}.json`, inner-joins on experiment, writes
+`plots/bpnet_vs_cherimoya/collated.tsv` and one figure per metric: a scatter with a y=x line plus a
+histogram of per-experiment deltas, with a Wilcoxon signed-rank test. Ported from procap-atlas's
+`src/analysis/compare_bpnet_cherimoya.py`, which is why it looks the way it does.
+
+It only works because **both benchmark scripts now write the same schema** — that was the point of
+giving `benchmark_predictions.py` a metrics JSON at all. The four shared metrics are
+`profile_pearson`, `profile_jsd`, `log_counts_pearson`, `counts_spearman`; BPNet's extra
+`counts_pearson` is skipped automatically rather than half-plotted.
+
+Two deliberate departures from upstream:
+
+- **Points are coloured by SPECIES, not read depth.** Upstream is human-only, so depth is its only
+  axis; here the question is whether one architecture wins uniformly or only on some clades, which a
+  12-species corpus can actually answer. `--colour-by depth` restores the upstream view from
+  `qc/stats/experiment_stats.tsv`.
+- **No consolidate step.** Upstream inner-joins two pre-consolidated TSVs; reading the per-experiment
+  JSONs directly removes a stage that could go stale against them.
+
+**`--aggregate` picks how folds are reduced, and the three options give genuinely different numbers.**
+The default is `fold-mean`, not the benchmark's `genome_wide` block:
+
+| | what it is | weights equally |
+| --- | --- | --- |
+| `fold-mean` *(default)* | mean of the per-fold metrics | every **fold** |
+| `genome-wide` | the benchmark's pooled block — one correlation over all folds' predictions concatenated | every **locus** |
+| `per-fold` | one row per fold | — |
+
+**`genome-wide` is NOT the mean of the per-fold correlations** and generally differs from it, which is
+why this is a choice rather than an implementation detail. Pooling lets a large fold pull the number
+harder; for C. elegans, where one fold is one chromosome, the fold sizes differ enough for that to
+matter.
+
+`fold-mean` also carries `{metric}_sd` and `n_folds` into the collated TSV and draws ±1 sd error bars on
+the scatter. That is worth having: a bare point invites reading a 0.01 gap between families as real when
+the folds behind it span 0.05.
+
+`per-fold`'s Wilcoxon p is **not interpretable** — folds of one experiment share an architecture, a
+library and a peak set, so 5 × 42 is not 210 independent pairs and the test is anticonservative. Use it
+to see spread, not significance.
+
+Cherimoya is not deployment-ready, so treat anything this produces as a development comparison rather
+than a result.
+
+## TF-MoDISco: the package is `modisco`, NOT `modisco-lite`
+
+`modisco-lite` is the **deprecated name for the same project**, and both are on PyPI — `modisco` 2.5.2
+against `modisco-lite` 2.4.0. They are not two packages: `modisco` installs the same top-level
+`modiscolite/` package and the same `modisco` script, so anything installing both gets whichever landed
+second, silently.
+
+That is a live risk here rather than a hypothetical, because the two upstreams disagree:
+**cherimoya 0.2.0 requires `modisco>=2.0.0`, bpnet-lite 1.0.0 on PyPI still requires
+`modisco-lite>=2.0.0`** — so `uv sync --extra torch` would pull both. `[tool.uv] override-dependencies`
+drops `modisco-lite` behind the same unsatisfiable marker used for `macs3`; verified with
+`uv export`, where it appears as `modisco-lite==2.4.0 ; sys_platform == 'nonexistent'` and never
+resolves, while `modisco==2.5.2` installs.
+
+**The CLI surface is identical across the rename**, checked rather than assumed: subcommands
+`motifs`/`report`/`convert`/`meme`, and `-n/--max_seqlets`, `-l/--n_leiden` (still defaulting to 2),
+`-w/--window`, `-m/--meme_db`, `-l/--lite` all unchanged. So `src/bpnet/modisco/` needed no edit. The
+only dependency difference is that `modisco` adds `jinja2`.
+
+## TF-MoDISco
+
+`src/bpnet/modisco/` follows procap-atlas's scripting: `modisco motifs` then `modisco report`, one job
+per (experiment x attribute type), with their parameters — `-n 1000000` seqlets, `-w 1000` window,
+and `--lite` on the report. **`-l` is 2, not procap-atlas's 50**: it is the number of Leiden
+CLUSTERINGS (restarts with different seeds), not clusters, so 50 is 25x modisco's own default in
+compute for a parameter upstream appears to have set under the wrong description.
+
+    launch_filter.py -> attribute/launch.py -> modisco/launch.py -> modisco/launch_report.py
+
+**`modisco motifs` needs BOTH npz files**: the attribution and the one-hot. That is what
+`filter_nonACGT_regions.py --save-ohe` is for, and it is why the OHE lives with the filter rather than
+with attribution — it must describe exactly the loci that were attributed.
+
+**Both stages are CPU-only (`gpus=0`), and their resource defaults are NOT shared** — the two commands
+differ by more than an order of magnitude in every dimension:
+
+| | CPUs | mem | time | `NUMBA_NUM_THREADS` |
+| --- | --- | --- | --- | --- |
+| `modisco motifs` | 32 | 64G | 48:00:00 | 32 |
+| `modisco report` | **4** | 16G | **2:00:00** | **4** |
+| fit launchers (for contrast) | 4 | 32G | 6:00:00 | unset |
+
+`motifs` is numba-parallel and runs for many hours; **`report` finishes inside two** — it reads one
+`.h5`, matches its motifs against a MEME database and writes logos. Defaulting them together meant every
+report job reserved 32 idle cores for 48 hours, which queues badly and wastes allocation.
+
+**`report` is not literally single-threaded, though, and the numba pin is NOT a no-op for it.** Traced
+2026-09-05 because the obvious reading is that only `motifs` touches numba: `modiscolite/report.py`
+imports none, but it calls `memelite.tomtom`, which is `@njit(parallel=True, cache=True)` over a
+`prange` and calls `numba.set_num_threads(n_jobs)`. `report.py` invokes it as
+`tomtom(ppms, target_pwms, n_nearest=top_n_matches)` — **no `n_jobs`** — so it takes memelite's default
+of `-1` and uses every numba thread available. Without the pin a 1-CPU report job would spawn one thread
+per core on the node, which is precisely the oversubscription the pin exists to stop.
+
+So report gets **4** cores: enough for that parallel section to be worth having, and far short of
+motifs' 32 because the tomtom call is small — tens of query motifs against a few hundred JASPAR targets
+— and the wall is dominated by logo rendering and HTML. The pin follows `--cpus-per-task`, so raising it
+is picked up by tomtom rather than ignored.
+
+`_add_modisco_args` therefore takes `default_cpus`/`default_mem`/`default_time` as **required** keyword
+arguments with no fallback, so the next caller cannot inherit the wrong set by omission;
+`_add_common_args` takes them the same way with the fit values as its defaults.
+
+**`NUMBA_NUM_THREADS` is pinned to `--cpus-per-task` on every modisco job.** numba otherwise sets it
+from every core it can SEE, which on a shared node is the whole machine and not the slice SLURM granted
+— a job holding 32 CPUs on a 128-core node spawns 128 threads, oversubscribes its own cgroup and can run
+slower than if it had asked for less, while degrading everything else on the node. tfmodisco is
+numba-heavy throughout, which is why this is set here and nowhere else.
+
+It rides on the command as a `VAR=value cmd` prefix rather than an `export` line in the sbatch body, so
+one string carries it through all three emission modes. An `export` would silently vanish under
+`--print-commands` — the mode most likely to be run on a box where the variable matters.
+
+**The MEME database is chosen PER SPECIES, and this is the one place the port could not follow upstream.**
+procap-atlas hardcodes JASPAR CORE **vertebrates**, which it can afford to because it is human-only;
+reporting a yeast or plant motif against a vertebrate database yields matches that mean nothing. So
+`config/genomes.yaml` carries `jaspar_collection` per species and `experiments.motif_db_path()` resolves
+it:
+
+| collection | species |
+| --- | --- |
+| vertebrates | M. musculus, C. griseus |
+| insects | D. melanogaster |
+| nematodes | C. elegans |
+| fungi | S. cerevisiae, S. pombe |
+| plants | A. thaliana, C. reinhardtii, P. patens, S. moellendorffii, G. arboreum, G. hirsutum |
+
+**Nothing fetches those files** — download them from JASPAR into `data/motifs/` as
+`JASPAR2026_CORE_{collection}_non-redundant_pfms_meme.txt`. They are deliberately not a pipeline step:
+the report is a convenience layer and the database has no effect on which motifs modisco discovers.
+`--motif-db` overrides with a single file for every experiment, which is rarely right here.
+
+`modisco` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
+transitively, because these scripts invoke its `modisco` CLI — same reasoning as `pybigtools`. Note it
+ships the entry point as an old-style `data/scripts/modisco`, not a `console_script`.
+
+**Not ported: upstream's `hitcall/` tree** (Fi-NeMo hit calling, `compute_trim_floor.py`,
+`link_hits_to_compendium.py`) and `modisco/relaunch_timeout.py`. The first depends on `finemo`, which is
+Linux-only and a further scope step; the second exists to resubmit jobs that hit a wall clock, which is
+a site policy rather than a pipeline stage.
+
+## Where benchmark output goes
+
+Both benchmark scripts now write the same three things; `performance_metrics/`, `predictions/` and
+`logs/` are all gitignored, so nothing here is committed.
+
+| | BPNet | Cherimoya |
+| --- | --- | --- |
+| metrics JSON | `performance_metrics/bpnet/{experiment}.json` | `performance_metrics/cherimoya/{experiment}.json` |
+| override | `--metrics-dir` | `--metrics-dir` |
+| raw predictions | `--output-fname` (joblib, opt-in) | `--save-output` -> `predictions/cherimoya/` (npz) |
+| printed | per-fold **and** genome-wide | per-fold **and** genome-wide |
+
+**`benchmark_predictions.py` saved NOTHING until 2026-09-04 — it only printed.** So every BPNet
+benchmark run before then left no artifact, while `benchmark_cherimoya.py` had always written a JSON.
+The JSON now carries the same shape as cherimoya's (`run_name`, `model_paths`, `per_fold`,
+`genome_wide`) so the two families are directly comparable, plus `counts_pearson`, which this script
+already computed and cherimoya's does not. It also gained the genome-wide block it was missing.
+
+**Genome-wide is POOLED across folds, not averaged over them** — `pearson_corr` over the
+concatenation, so each locus counts once regardless of how large its fold was. Averaging per-fold
+correlations would weight a small fold equally with a large one, and for C. elegans, where one fold is
+one chromosome, the fold sizes differ enough to matter. Same construction in both scripts; keep them in
+step.
+
+Note upstream's `benchmark_bpnet.py` also reports `orientation_index_pearson`, which neither script
+here computes. Not an oversight to fix silently — adding it means defining the orientation index the
+same way upstream does.
+
+**Progress bars are ON by default in the benchmarks and in `attribute.py`, via `--no-progress` to
+suppress.** They are tangermeme's
+`verbose` argument to `extract_loci` and `predict`, which is *only* the tqdm bar, so it is wired to
+`--no-progress` rather than to `-v`: a long benchmark should show progress without turning on every
+other message. Bars go to stderr, so stdout stays clean for the printed metrics and can be piped.
+`benchmark_predictions.py` and `attribute.py` both had **no `-v` flag at all**, so `params["verbose"]`
+was permanently `false` from `config/bpnet_params.json` and no bar could ever appear; both have one now.
+
+`attribute.py` also gets an **outer bar over folds**, which is the one that matters there: each fold is a
+whole `deep_lift_shap` pass over every locus, so without it the only feedback for minutes at a time is
+tangermeme's inner bar restarting from zero with no indication of how many more times it will do so.
 
 **Heavy imports are deferred.** `torch`, `bpnetlite`, `cherimoya`, `tangermeme` and
 `data_loader` are imported *inside* `main()`, after argparse and path validation, so
@@ -256,7 +776,8 @@ Two drivers, same steps:
   unconstrained, which is why the default is set rather than merely declared.
   Run-level intermediates are keyed by *run*, not experiment, so a run shared by two experiments is
   mapped once. Scope is fetch -> negatives; `resolve_runs.py`/`build_experiment_config.py` stay outside
-  (metadata, not DAG work) and training stays on `launch.py`.
+  (metadata, not DAG work) and training stays on `launch.py` — one per family, both thin wrappers over
+  `src/launcher.py`, which also drives `src/bpnet/attribute/launch.py`.
 - **`src/data_preprocessing/run_procap_pipeline.py`** — single-experiment path, serial, caches on output
   existence. Useful for `-e <one>` debugging and `--fetch-genomes`/`--index-only`.
 
@@ -390,8 +911,11 @@ Things that will bite you:
   `genomecov` pass instead of N passes plus a merge plus a re-conversion. It also avoids a real trap:
   **`bigWigMerge` defaults `-threshold` to 0 and drops values at or below it**, so a minus-strand track
   stored as negative values merges to nothing. The deleted legacy fly script needed
-  `-threshold=-1000000` for precisely this, and `src/make_negatives.py` still abs-values the minus bigWig
-  before merging strands. Do not "modernise" this into a bigWig-level merge.
+  `-threshold=-1000000` for precisely this. Do not "modernise" this into a bigWig-level merge.
+  **Nothing in this repo calls `bigWigMerge` any more** — `src/make_negatives.py` was the last user and
+  now sums the two strands in-process with `pybigtools`. It still abs-values the minus track first, and
+  that is still load-bearing: without it the strands cancel instead of summing. The threshold trap went
+  with the tool; the reason it existed is worth keeping.
 - **We do NOT use `biodatatools`, and the unrecorded subcommand does not matter.** ENCODE produces its
   per-replicate bigWigs with `biodatatools` 0.0.7 and the source document omits the subcommand. That was
   logged as a blocker; it is not one, because the quantity is pinned from both ends. procap-atlas consumes
@@ -520,6 +1044,47 @@ It is the source of truth for **io, sampling, and training standards**; this rep
 multi-species: per-species FASTA from `experiment_config.yaml`, species-keyed `chrom_splits.yaml`, and
 peak-level random folds for S. pombe. **Never** replace that logic with a wholesale copy of theirs.
 
+**Training hyperparameters were NOT synced until 2026-09-03, and both families diverged.** Asked
+directly ("does early stopping match upstream?") and the answer was no, on more than early stopping.
+Upstream's defaults live in each fit script's `params` dict; ours in `config/{family}_params.json`. What
+differed, now aligned:
+
+| | upstream | was here | note |
+| --- | --- | --- | --- |
+| bpnet `max_epochs` | 50 | 100 | |
+| bpnet `early_stopping` | **None** | 20 | |
+| cherimoya `max_epochs` | 50 | 100 | |
+| cherimoya `early_stopping` | **None** | 15 | |
+| cherimoya `max_jitter` | 500 | **50** | a 10x augmentation difference |
+| cherimoya `muon_wd` | 0.03 | 0.01 | |
+| cherimoya `adam_lr` | 0.001 | 0.004 | |
+| cherimoya `adam_wd` | 0.0 | **0.2** | |
+| ~~cherimoya `negatives_ratio`~~ | ~~1/7~~ | 1/4 | **reverted 2026-09-04** — procap-atlas overrides it, but 1/4 is `cherimoya.io.PeakGenerator`'s own default and is what this repo follows |
+| cherimoya `warmup_epochs` | 5, `--warmup-epochs` | hard-coded 5 | now configurable |
+| cherimoya `decay_epochs` | None, `--decay-epochs` | absent | now present |
+
+Everything else already matched: bpnet's `max_jitter` 200, `n_filters` 512, `n_layers` 8,
+`count_loss_weight` 100, `learning_rate` 0.0005, `batch_size` 64, `negatives_ratio` 1/7, `n_shuffles` 20;
+cherimoya's `n_filters` 128, `n_layers` 9, `batch_size` 64, `muon_lr` 0.025 and all three `lw_*`.
+
+**`early_stopping: null` is a decision with evidence behind it, so do not "restore" a value.** Upstream
+swept it — `performance_metrics/cherimoya/{20_5_2,100_None_5,50_None_5,50_None_5_15decay}` — and settled
+on `50_None_5` (50 epochs, no early stopping, 5 warmup). Re-enabling it at 5, against both
+`decay_epochs=None` and `decay_epochs=15`, **underperformed on every benchmark metric, profile and count
+alike** — not a profile/count tradeoff. The proposed mechanism is architecture-independent and applies to
+bpnet-lite identically: `fit()` checkpoints whenever `valid_count_corr > best_corr`, a bare validation
+count-correlation comparison, so more epochs give that rule more chances to overfit the validation set —
+and stopping on the *same* metric compounds it.
+
+**Upstream states the caveat itself and it should travel with the number**: none of those comparisons
+control for random initialization. `--random-state` only makes negative sampling and data-loader order
+reproducible, and no `torch.manual_seed` is set anywhere in either script, so run-to-run noise is not
+separated from the hyperparameter effect. Treat it as upstream's considered default, weakly evidenced —
+not a settled result. A seed-controlled repeat would be needed to do better.
+
+Aligning cost nothing here: no model in this repo has trained yet, so there were no checkpoints to stay
+comparable with. Had there been, this would have been a re-train.
+
 Already synced:
 
 - `src/bpnet/fit/data_loader.py` — byte-identical to theirs; do not fork it.
@@ -532,6 +1097,51 @@ Already synced:
   `from bpnetlite.bpnet import BPNet`, optional `blacklist`/`exclusion_lists`, `dtype=torch.float`, and
   `alpha` renamed to `count_loss_weight` (`--alpha` kept as an alias).
 - `src/cherimoya/fit/fit_cherimoya.py` — ported to the cherimoya >= 0.2 API (see below).
+- `src/bpnet/attribute/attribute.py` — **the DeepLIFT reference**, synced 2026-09-04. It was using
+  tangermeme's default dinucleotide shuffling (`n_shuffles=20`) where upstream defaults to a
+  **nucleotide-frequency reference**: one soft PFM per input sequence carrying that sequence's own
+  A/C/G/T frequencies at every position. `--reference-mode {frequency,dinucleotide}` selects, default
+  `frequency`, and `--n-shuffles` now has a CLI override (it was JSON-only).
+  **The reason is that a dinucleotide shuffle is not reliably NEUTRAL.** Upstream's locus diagnostics
+  found shuffles that produce cryptic promoter-like signal — for some loci as active as, or more active
+  than, the genomic input — which makes the baseline reference-sensitive, the one thing a DeepLIFT
+  reference must not be. **That argument is stronger here than upstream**, because several of these
+  genomes are far denser than human: S. cerevisiae carries 1.2-4.1 peaks per 2114 bp window, so nearly
+  every window contains a promoter and a composition-preserving shuffle is correspondingly more likely
+  to reassemble something initiation-competent. Same reasoning that moved the initiator PWM to relative
+  entropy against *local* composition.
+  Two implementation details that matter: the reference is passed as a **callable**, so it is built per
+  batch and never reaches tangermeme's tensor-reference one-hot validator, which would reject a soft
+  tensor; and frequency mode forces **`n_shuffles=1`**, since that reference is deterministic and
+  further copies are byte-identical (verified). Verified numerically: shape `(N, n, 4, L)`, sums to 1
+  at every position, per-sequence composition matches the input exactly, positionally flat, genuinely
+  soft, and `n=0` rejected.
+  **The default output path now carries the mode** (`attributions/bpnet/{exp}_attr_{type}_{mode}.npz`), a deliberate
+  divergence from upstream's mode-less name: the two references give different numbers, and without it
+  a frequency run silently overwrites a dinucleotide one with nothing on disk recording which is which.
+
+Also not copied from their attribution tree: `--head orientation`, which attributes the profile
+orientation index `max(sum(plus), sum(minus)) / (sum(plus) + sum(minus))` through a DeepLIFT-compatible
+ReLU form of the binary maximum. Same metric as the `orientation_index_pearson` our benchmarks do not
+report, so those two are one piece of work. (`attribute/launch.py` was the other gap here and is now
+closed.)
+
+**Cherimoya attribution is BLOCKED, not merely absent — do not start it.** There is no
+`src/cherimoya/attribute/` and it should stay that way for now: it needs DeepLIFT **rescale rules that
+are still in development and are not in tangermeme yet**. This is not a wrapper-writing exercise, and
+the missing piece is upstream of this repo entirely.
+
+What the code shows, for whoever picks it up when the rules land. The ordinary nonlinearities are
+already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax`, and those are the only
+activations `cherimoya/cheri.py` and `cherimoya.py` use — so the gap is at the WRAPPER level, exactly
+where bpnet-lite needs `{_ProfileLogitScaling: _nonlinear}`. `cherimoya/wrappers.py` defines
+`ControlWrapper`, `_ProfileLogitScaling`, `ProfileWrapper`, `LogCountWrapper` and
+**`ExpectedCountsWrapper`**. The first four mirror bpnet-lite's, but note cherimoya's
+`_ProfileLogitScaling` is its OWN class, so a rule keyed on bpnetlite's would not match it.
+`ExpectedCountsWrapper` is the one with no counterpart: it composes `torch.expm1` with a per-group
+`softmax` over `cat`/`split` tensors, and `expm1` is absent from tangermeme's rule table. Treat that as
+the visible candidate rather than the confirmed blocker — the authority here is that the rules are in
+development, not this inspection.
 
 Deliberately not copied: `--background NAME:RATIO` multi-source negatives (its `ccre` source is
 GRCh38-only), `--min-reads` (needs their `config/n_reads.txt`), and their hitcall/modisco/predict/
@@ -554,7 +1164,16 @@ breaks are fixed, ported from procap-atlas:
 - `PeakGenerator(signals=[params["signals"]])` — **nested**. A flat 2-element list now means two independent
   unstranded groups, which breaks reverse-complement channel swapping. `params["signals"]` itself stays flat
   for `extract_loci` and for `signal_groups`.
-- `Cherimoya.load(path, device=...)` is unchanged and still compatible.
+- `Cherimoya.load(path, device=...)` is unchanged and still compatible — but **it defaults to
+  `compile=True`**, so `benchmark_cherimoya.py` was compiling unconditionally until 2026-09-04. Both
+  scripts now take an explicit flag, with **deliberately opposite defaults**, because the warmup
+  economics differ: `benchmark_cherimoya.py --compile` is **opt-in** (one inference pass over the test
+  set does not amortise compilation), while `fit_cherimoya.py --no-compile` is **opt-out** (50 epochs
+  do). Both stay gated on `sys.version_info < (3, 14) or torch.__version__ >= "2.10"` — `torch.compile`
+  raises unconditionally on Python 3.14+ below torch 2.10, and the limit is Dynamo, not Triton. The
+  benchmark warns when `--compile` is asked for and cannot be honoured, rather than silently ignoring
+  it. Not applicable to this repo's own lock (torch 2.13 on Python 3.11); it matters where a site
+  interpreter differs.
 
 Note `load()` reconstructs via `cls(**payload['config'])`, so a checkpoint saved by a pre-0.2 cherimoya
 whose stored config contains `n_outputs` will fail to load under the pinned version.
@@ -761,7 +1380,7 @@ Related: cotton is 77-86% poly-G in **every** file, the highest in the corpus by
 real work here.
 
 **Both are assigned now, chromosome-level, from peak counts (2026-09-02).** Both entries **originate
-here** — neither csRNAnet nor plant-design has a cotton assignment — so push them upstream before using
+here** — there was no prior cotton assignment — so carry them across before using
 cotton beyond this repo, or a locus in test here becomes train there. Reproduce with
 `python config/write_split_csvs.py --peak-counts -e G.{arboreum,hirsutum}-ovule_GROcap`.
 
@@ -812,10 +1431,10 @@ silently (zero loci, or an exclusion list that excludes nothing).
 Two consequences already applied:
 
 - **Mouse is mm10, not mm39** — this overrides the manifest's `recommended_realign_assembly` column. mm10
-  also matches csRNANet (`data/mm10.fa`), is what the canonical peak-matched folds were tuned on, and is the
+  also matches the lab's other mouse work, is what the peak-matched folds were tuned on, and is the
   only mouse assembly with a published exclusion list. Chromosome names are identical between the two
   assemblies, so the fold assignment transferred unchanged.
-- **dm6 names are chr-prefixed here** (`chr2L`), where the canonical csRNANet/plant-design file writes `2L`.
+- **dm6 names are chr-prefixed here** (`chr2L`), where the earlier lab file writes `2L`.
   The fold *assignment* is identical; only naming differs, so models stay comparable. This resolves a
   long-standing unverified flag and is what makes the dm6 exclusion list usable at all.
 
@@ -832,9 +1451,27 @@ Two consequences already applied:
 | S. moellendorffii | v1.0 | none published | — |
 | C. griseus | CriGri-PICRH-1.0 | none published | — |
 
-Boyle-Lab lists download as plain BEDs and are fetched by
-`run_procap_pipeline.py --fetch-genomes`; naming verified chr-prefixed for all three (`chr2L`, `chrI`,
-`chr1`).
+Boyle-Lab lists arrive **gzipped**, matching their `.bed.gz` names — `file` reports
+`gzip compressed data, was "ce11-blacklist.v2.bed"` despite the URL being raw.githubusercontent, so
+nothing gunzips them. An earlier version of this line called them plain BEDs; it was wrong. Naming
+verified chr-prefixed for all three (`chr2L`, `chrI`, `chr1`).
+
+**They were in NEITHER driver's DAG until 2026-09-03, and that silently cost 114 of 214 training jobs.**
+Only `run_procap_pipeline.py --fetch-genomes` fetched them, so a run driven by `workflow/Snakefile` — the
+preferred path — left all three absent, and `launch.py` then skipped every mouse, fly and worm experiment
+with `missing data — blacklist[0]: ...`. Three files under 60 KB gating 65 + 25 + 24 jobs. Same class of
+asymmetry as `rdna_accession`, which this driver used to ignore while the serial one read it.
+`rule fetch_blacklist` now covers it, and it is in `all`, in `fetch_only` and in a standalone
+`blacklists` target (`snakemake blacklists -c1`, the cheapest way to unblock an existing tree).
+
+**An exclusion list is a TRAINING input and is in the DAG anyway** — worth being precise about, because
+GC-matched negatives are also a training input and are deliberately *out*. The boundary that keeps the
+Snakefile runnable from the mamba env with no venv and no GPU stack is a **dependency** one, not a
+labels-versus-training one: fetching a list needs wget, where negatives need PyPI-only `tangermeme`. So
+this costs the boundary nothing. `BLACKLIST_FILES` is built only from species with a `blacklist_url`,
+which excludes A. thaliana's in-repo list and the eight species with none, and a `blacklist_url` pointing
+anywhere but `data/` **raises at DAG construction** rather than downloading into a path nothing reads
+(verified by pointing C. elegans at `elsewhere/`).
 
 Arabidopsis is the exception: excluderanges ships **only as R `.rds`**, so it is converted to BED and
 versioned at `config/blacklists/TAIR10.Klasfeld.Excludable.bed.gz` rather than fetched — no R dependency at
@@ -848,7 +1485,7 @@ set is `chr1`-`chr5` and was stripped to bare `1`-`5`** to match the Ensembl Pla
 would have excluded nothing. See `config/blacklists/README.md` for the regeneration recipe (base R only;
 `GenomicRanges` is not needed, the GRanges slots deserialise directly).
 
-csRNANet's convention was exclusion lists for human and mouse only; this repo extends that to fly, worm and
+The lab convention was exclusion lists for human and mouse only; this repo extends that to fly, worm and
 Arabidopsis because published lists exist.
 
 There is **no mm39 exclusion list** in Boyle-Lab or ENCODE (excluderanges has one, `mm39.excluderanges`,
@@ -1465,7 +2102,7 @@ Regenerating would silently revert all of it. Do it the same way next time.
 | project | species | experiments | notes |
 | --- | --- | --- | --- |
 | `Tome2018_mm_CoPRO` | M. musculus | 2 | CoPRO capped fraction, MEF ± heat shock. Nothing new needed. |
-| `McDonald2024_plant_5GRO` | C. reinhardtii, P. patens, S. moellendorffii | 3 | 5'GRO-seq; same GEO series (GSE233927) csRNANet already uses. |
+| `McDonald2024_plant_5GRO` | C. reinhardtii, P. patens, S. moellendorffii | 3 | 5'GRO-seq from GSE233927. |
 | `Shamie2021_cg_5GRO` | C. griseus | 7 | Chinese hamster GRO-cap atlas; CHO-K1 has 2 reps, 6 tissues n=1. |
 
 All 14 runs were resolved against ENA and all report `SINGLE`. Findings worth keeping:
@@ -1568,10 +2205,10 @@ reports what the pipeline actually produced, per experiment:
 | `pct_unique` | `unique/input`. Low means wrong assembly, contamination, or unsplit spike-in. |
 | `signal_reads` | reads in the merged BAM, i.e. what `genomecov -5` counts. **The number that matters.** |
 | `peaks_total` | PINTS uni + bi, matching the training locus set (`divergent` excluded). |
-| `reads_per_peak` | crude signal density; very low means peaks called from thin coverage. |
+| `reads_per_peak` | signal density, and **the basis of the `thin_coverage` flag** — the cross-species-comparable depth measure. See the note below on why absolute depth is not. |
 | `pct_rrna` | rRNA + organellar share of the raw reads, from `src/qc/rrna_content.py`. Blank means NOT MEASURED, which is not the same as 0. |
 | `pct_unique_adj` | `unique / non-rRNA input`. **This is the mapping-quality number**; `pct_unique` is not. |
-| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. Advisory — exclusion stays a manual `tier` decision. |
+| `qc_flags` | comma-joined `FAIL:`/`WARN:` findings. **Advisory only — nothing is excluded on them; see below.** Note the `low_mapping(N%,adj)` flags contain a comma themselves, so naive splitting on `,` breaks them; new flags should avoid commas. |
 
 **`pct_unique` is not a quality metric, and reading it as one produced three wrong verdicts.** Where the
 rDNA array sits in the assembly in 2+ near-identical copies, every rRNA read is a multimapper, gets
@@ -1658,6 +2295,53 @@ Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the
 rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
 enough to be committed.
 
+**`umi_report.py` was checking the WRONG MATE, and it was the last place the old 3'-adaptor assumption
+survived.** It hardcoded `expect = declared if (not paired or mate_i == 2) else 0`, with a comment
+asserting "for a 3' adaptor UMI that is R2, which is what fastp is told (--umi_loc read2)" — the exact
+claim the Spt5 investigation overturned. The pipeline was corrected to `5' adaptor -> read1`; this report
+was not, so for all six Spt5 runs it expected 10 nt on R2, found none, and printed
+`MISMATCH (manifest says 10)` on R2 while R1 read `no UMI signature`. **Both lines were artifacts of the
+report, not findings about the data.** It now resolves the mate through the same
+`steps.dedup.umi_locations` table both drivers hand to fastp, and raises on an unmapped prose value rather
+than defaulting. Verified: `5' adaptor -> mate 1`, `3' adaptor -> mate 2`, and `declared` now sits on R1
+for Spt5.
+
+**But the `detected` column is BLIND for most of this corpus, so do not re-fetch FASTQs to populate it.**
+`candidate_len` counts the leading run of positions whose per-base entropy is at or above
+`UNIFORM_BITS = 1.95` and needs `MIN_RUN = 4`. A uniform random UMI is 2.000 bits, and random genomic
+sequence at *f* GC is `H(f)` — so the signal to resolve is `2.000 - H(f)`, which is tiny wherever base
+composition is near-even:
+
+| species | %GC | genomic H | vs 1.95 | can the screen see a UMI? |
+| --- | --- | --- | --- | --- |
+| P. patens | 33.4 | 1.9190 | −0.031 | yes |
+| G. arboreum / G. hirsutum | 33.5 / 34.5 | 1.920 / 1.930 | −0.030 / −0.021 | yes |
+| C. elegans, S. pombe, A. thaliana, C. reinhardtii | 35-36 / 64 | 1.938-1.943 | −0.012 to −0.007 | marginal |
+| S. moellendorffii | 37.5 | 1.9544 | **+0.004** | **no** |
+| **S. cerevisiae** | 38.2 | 1.9594 | **+0.009** | **no** |
+| C. griseus, M. musculus, D. melanogaster | 41.5-41.8 | 1.979-1.981 | **+0.029 to +0.031** | **no** |
+
+For S. cerevisiae the target signal is **0.041 bits** against observed position-to-position scatter of
+**~0.13 bits**, and genomic entropy (1.959) is *above* the 1.95 threshold — so genomic sequence itself
+counts as "random" and whether a position passes is sampling noise. That is exactly what happened: the
+Spt5 R1 profile reads `1.98 1.93 1.90 1.95 …`, the run breaks at position 1, and the verdict is
+`no UMI signature` for a library that demonstrably has a 10-nt UMI.
+**So a `-` or a `0` in `detected` is not evidence against a declared UMI here.** The real evidence for the
+Spt5 UMI is the genomic k-mer offset test recorded above, not this screen. And the screen's *primary*
+purpose — catching an UNDECLARED UMI — is unavailable for 6 of 12 species including all three of mouse,
+fly and hamster, which leaves the default-deny policy resting entirely on manifest curation with no
+working automated backstop. Fixing it properly needs a different statistic (the k-mer offset test, or
+per-position base *composition* against the genome's own rather than against uniform), not a threshold
+tweak.
+
+**Fixing the mate requires no re-mapping, but it does re-run against the raw FASTQs.** `umi_report.py` is pure
+reporting — its only output is `qc/umi/{exp}.tsv`, consumed by nothing but the `all` and `qc` targets, and
+the pipeline's UMI handling never came from it. No BAM, bigWig, peak or negative changes. But the script
+is a declared `input:` of the `umi_report` rule, so editing it re-runs that rule for all 42 experiments,
+and the rule's other inputs are the **raw FASTQs**. Where those have been deleted, `snakemake qc` will
+try to re-fetch them. Run `python src/data_preprocessing/umi_report.py -e <exp>` standalone instead if
+the FASTQs are gone and only the table is wanted.
+
 **A handled interleaved deposit is not a defect, and `declared_interleaved` in the survey TSV is what says
 so.** `M.musculus-GCB_PROcap` was reported `FAIL:interleave_suspect` after the re-map even though its
 interleaving is declared and deinterleaved — the per-file printout said "(already declared)" but the
@@ -1715,6 +2399,107 @@ This also matches the project's stated design (one experiment == one species x o
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
 
+## Nothing is excluded: every dataset is analysed and modelled
+
+**Standing decision, 2026-09-03, and it generalises every "should we drop X?" question below.** Model
+every experiment, including the problematic ones, and QC at the end. The reason is structural rather than
+optimistic: **one experiment == one species x one condition == one model**, with no multi-tasking and no
+shared heads, so a weak dataset cannot contaminate a strong one. There is nothing to protect by excluding
+it in advance, and a trained model is *better* evidence about a library than a pre-hoc read count is.
+
+So `tier` gates preprocessing only, `launch.py` deliberately does not filter on it or on `qc_flags`, and
+proposals to add an `exclude` tier have been declined. The flags exist to tell you which numbers to
+distrust when reading results, not to decide what runs.
+
+### Depth requirements scale with the nascent transcriptome, NOT with a constant
+
+**The depth a library needs is proportional to the size of the transcribed space being sampled.** An
+organism with a small genome, few distal elements and little intergenic transcription reaches the same
+coverage per initiation site on far fewer reads than mouse or human. Ranking libraries by raw
+`signal_reads` across species therefore penalises the compact genomes for being compact — it measures the
+organism, not the library.
+
+This was not a hypothetical: `experiment_stats.py` carried `SHALLOW_SIGNAL_READS = 10_000_000`, one
+absolute threshold applied to all twelve species, and it was **measurably wrong in both directions**:
+
+| | signal | reads/peak | old flag |
+| --- | --- | --- | --- |
+| `S.pombe_PROcap` | 23.1 M | **2,513** | none — and it is the best-sampled experiment in the corpus |
+| `M.musculus-GCB_PROcap` | **150.4 M** | 2,325 | none |
+| `S.cerevisiae_PROcap` | 4.9 M | 721 | **SHALLOW** — false positive; matches CHO's 723 on 1/10 the reads |
+| `C.reinhardtii-liquidculture_5GRO` | 6.3 M | 770 | **SHALLOW** — false positive |
+| `M.musculus-BMDM_5GRO-ctl` | 18.2 M | **450** | **none** — false negative |
+| `D.melanogaster-S2_5GROcap` | 22.2 M | **518** | **none** — false negative |
+
+S. pombe on 23 M reads is better sampled than mouse on 150 M. Two libraries above 18 M were covering
+their much larger transcriptomes more thinly than several flagged ones and escaped silently.
+
+Replaced with `THIN_COVERAGE_READS_PER_PEAK = 500` and a `WARN:thin_coverage(N/peak)` flag. `peaks_total`
+is this pipeline's own measure of how much transcribed space exists, so dividing by it asks how deeply
+each initiation site is covered. It is **not fully depth-independent** — peak calling saturates, so a
+shallow library calls fewer peaks and shrinks its own denominator — but it errs conservatively, since
+peaks fall more slowly than reads. The threshold is a heuristic recalibrated from this corpus with no
+clean gap in the distribution, the same provisional status as the FLAT initiator threshold; do not treat
+500 as principled.
+
+Net effect on the real corpus: 10 flagged before, 8 after. `M.musculus-BMDM_5GRO-ctl` gained a flag it
+should always have had; `S.cerevisiae_PROcap`, `C.reinhardtii-liquidculture_5GRO` and
+`C.griseus-BMDM-KLA1h_GROcap` lost ones they never deserved.
+
+## Should the S. cerevisiae perturbation experiments be dropped?
+
+Asked 2026-09-03, on the grounds that Ino80/Spt5 depletion produces massive widespread transcription and
+that even their controls look poor. **Answer: no — keep and train them.** The evidence points the other
+way, and the framing has the yeast libraries ranked backwards.
+
+**The extra peaks carry the strongest initiator motif in the corpus's yeast set.** Ranked with every other
+S. cerevisiae experiment:
+
+| experiment | %rRNA | %uniq_adj | Inr bits | offset | orientation flags |
+| --- | --- | --- | --- | --- | --- |
+| `Spt5IAA1h` | 17.8 | 88.7 | **1.18** | −1 | 0 |
+| `Spt5IAA4h` | 4.5 | 79.8 | **1.18** | −1 | 0 |
+| `Ino80KD` | 8.9 | 77.2 | 1.09 | −1 | 0 |
+| `Ino80ctl` | 14.0 | 82.4 | 1.00 | −1 | 0 |
+| `Spt5EtOH` | **49.7** | 82.4 | 0.61 | +0 | 0 |
+| `S.cerevisiae_PROcap` (Booth WT) | **70.3** | **54.8** | **0.45** | −1 | 0 |
+
+A depleted sample calling 23,642 peaks at 1.18 bits is not calling noise — that is a stronger, correctly
+placed Inr than any other yeast library here. Adjusted mapping is 77-89% across all five; the raw 41.4%
+for `Spt5EtOH` is entirely its rRNA. **Dropping this study would remove the best yeast data and leave the
+worst**, since the independent Booth WT baseline is the weakest S. cerevisiae library in the corpus on
+rRNA, depth and motif alike.
+
+**And they are not the corpus's worst libraries — not close.** Ranked worst-first on rRNA, adjusted
+mapping, depth and motif together, the six below all sit beneath `Spt5EtOH`, and the four Ino80/Spt5
+depletion experiments sit in the better half:
+
+| experiment | %rRNA | %uniq_adj | signal | Inr |
+| --- | --- | --- | --- | --- |
+| `P.patens-plateculture_5GRO` | 47.4 | 27.8 | 2.4 M | 0.39 |
+| `C.reinhardtii-liquidculture_5GRO` | 39.1 | **20.7** | 6.3 M | 0.23 |
+| `S.cerevisiae_PROcap` | **70.3** | 54.8 | 4.9 M | 0.45 |
+| `S.moellendorffii-stemleaf_5GRO` | 26.1 | 36.8 | 6.9 M | 0.78 |
+| `M.musculus-BMDM_GROcap` | 30.7 | 84.2 | **4.0 M** | 0.42 |
+| `C.griseus-BMDM_GROcap` | 15.5 | 49.7 | 5.3 M | 0.65 |
+
+**Do not rank on Inr bits alone.** It is diluted by peak-set size, so `G.hirsutum` (0.11 over 171,640
+peaks) and `D.melanogaster-S2_5GROcap` (0.13 over 42,854) score low while being fine — both correctly
+placed at +0. Bits are only interpretable against a comparable peak count.
+
+**The real caveat is narrower than "these experiments are bad".** It is that *within-study, cross-condition*
+comparison in the Spt5 series is confounded: the vehicle control is 49.7% rRNA against 4.5% at IAA 4 h, an
+11-fold difference in cap-selection quality running in the same direction as the peak counts
+(10,811 -> 21,591 -> 23,642). That gradient is what Spt5 loss should do biologically, and it is also what
+differing library quality would do, and these data cannot separate them — note the rRNA difference runs
+*opposite* to the biology, since depleting Pol II elongation should raise the rRNA fraction, not cut it by
+11-fold. A depth-matched subsample would settle it.
+**That confound does not touch a per-experiment model**, which is all this repo builds — one experiment,
+one model, no multi-tasking. So: train them, and deprioritise any analysis that reads *across* the Spt5
+conditions. The `tier` column already encodes this — controls `include`, perturbations `conditional`.
+The Ino80 pair is much better matched (14.0% vs 8.9% rRNA, 35.4 vs 33.3 M signal) and shows almost no
+peak-count difference, which is itself a useful negative result.
+
 ## Cross-validation splits
 
 Convention everywhere: **test = fold `i`, validation = fold `(i+1) % n_folds`, train = the rest.**
@@ -1752,11 +2537,10 @@ peaks, so its absence is a to-do rather than drift. The CSVs are a legacy artifa
 pre-unification split; `src/experiments.py` reads the YAML, so the CSVs now exist only for external
 consumers and could be dropped once nothing outside this repo reads them.
 
-**Fold assignments are canonical, from [adamyhe/plant-design](https://github.com/adamyhe/plant-design)'s
-`config/chrom_splits.yaml`**, which uses this same species-keyed schema across 17 species. `A.thaliana`,
-`D.melanogaster`, `M.musculus`, `S.cerevisiae` and `S.pombe` are verified identical to it. Do not "improve"
-them: diverging folds make models incomparable across repos, since a locus in test here could be train
-there. **Folds are assigned by manually matching peak counts across folds — not sequence length.** bp totals are
+**Fold assignments are the lab's own, and several are reused UNCHANGED from earlier projects** —
+`A.thaliana`, `D.melanogaster`, `M.musculus`, `S.cerevisiae`, `C.reinhardtii` and `P.patens`. Do not
+"improve" a reused entry: the only thing it buys is that a locus in test here is in test everywhere else
+we train, and a divergence destroys that silently. **Folds are assigned by manually matching peak counts across folds — not sequence length.** bp totals are
 not expected to match and must not be "rebalanced": a fold can be tight in bp and badly skewed in loci, and
 loci are what affect training. Check any assignment against real peaks with
 `python config/write_split_csvs.py --peak-counts -e <experiment>`, which also flags chromosomes present in
@@ -1764,38 +2548,40 @@ the peaks but absent from every fold (a naming mismatch symptom).
 
 **ENCODE publishes no mouse folds.** chrombpnet ships only `helpers/make_chr_splits/splits.py`, a formatter
 that takes `--test_chroms`/`--valid_chroms` and writes train as the remainder — no assignment logic, no
-committed fold files for any genome, nothing mouse-specific. The lab convention (identical in csRNANet and
-plant-design) is therefore the authoritative source, not a stand-in for something official.
+committed fold files for any genome, nothing mouse-specific.
 
-**Reuse from csRNANet and plant-design, re-checked 2026-08-30 for the new species.** Both repos were
-searched; the result is that two of the four new species were already solved upstream and two are not
-solvable there:
+**There is NO public or authoritative source for ANY of these fold assignments — every one of them was
+made in this lab.** That matters for how to treat them. They are not standards to be looked up and they
+carry no external validation; their whole value is that the same assignment is used everywhere the lab
+trains, so a model here and a model in another of our repos are comparable. Read "canonical" throughout
+this file as "the shared lab assignment", never as "published". Anything reused from
+Anything reused is reused for consistency with our own prior work, not for authority.
 
-| species | csRNANet | plant-design | outcome |
-| --- | --- | --- | --- |
-| C. reinhardtii | yes | yes | **copied verbatim**; the two upstream copies were verified identical first |
-| P. patens | yes | yes | **copied verbatim**; likewise verified identical |
-| S. moellendorffii | no | no | peak-level folds, permanently (no chromosomes exist); **built 2026-09-02** |
-| C. griseus | no | no | chromosome-level; **assigned here 2026-09-01** from CHO peak counts |
+**Reuse checked 2026-08-30 for the species added then**, with the result that two of the four were
+already assigned in earlier lab work and two were not:
 
-The two cottons were added later and are the same story: neither is in csRNAnet or plant-design, both are
+| species | assigned before? | outcome |
+| --- | --- | --- |
+| C. reinhardtii | yes | **reused unchanged** |
+| P. patens | yes | **reused unchanged** |
+| S. moellendorffii | no | peak-level folds, permanently (no chromosomes exist); **built 2026-09-02** |
+| C. griseus | no | chromosome-level; **assigned here 2026-09-01** from CHO peak counts |
+
+The two cottons were added later and are the same story: no prior assignment, both
 chromosome-level, and both were **assigned here 2026-09-02** from their own peak counts. All four
 locally-originated entries — plus the retuned six-fold `C.elegans` — need pushing upstream before those
 species are used outside this repo.
 
-csRNANet holds the canonical `configs/splits/{species}_data_fold_assignments.csv` files that
-plant-design's `chrom_splits.yaml` is derived from, and for both reused species the CSV and the YAML
-agree exactly, so there is one assignment rather than two candidates. Note plant-design also carries an
-`S.pombe` entry with **3** folds; this repo deliberately does not use it, because peak-level folds are
-S. pombe's single mechanism here.
+For both reused species the two copies we hold agree exactly, so there is one assignment rather than two
+candidates. Note an earlier assignment also exists for `S.pombe` with **3** folds; this repo deliberately
+does not use it, because peak-level folds are S. pombe's single mechanism here.
 
-csRNANet has already processed **GSE233927** — the same GEO series as `McDonald2024_plant_5GRO`
-(`src/data_preprocessing/make_GSE233927_bigwigs.py`, `download_McDonald2024.sh`). Only the genome URLs
-and fold assignments are reusable: csRNANet consumes that series' **csRNA-seq** GEO tracks, whereas this
-repo maps its **5'GRO-seq** FASTQs from scratch.
+**GSE233927 has been touched before in this lab, but for a different assay in the same series.** Only the
+genome URLs and the fold assignments carry over; this repo maps the series' **5'GRO-seq** FASTQs from
+scratch rather than reusing anyone's processed tracks.
 
-**One trap inherited from csRNANet's downloader: Chlamydomonas moved Ensembl divisions.** It is under
-**plants** as of release-63, not **protists**, so csRNANet's `protists/release-55` URL now 404s. The
+**One trap inherited from an older download script: Chlamydomonas moved Ensembl divisions.** It is under
+**plants** as of release-63, not **protists**, so the old `protists/release-55` URL now 404s. The
 assembly (v5.5) is unchanged, so the fold assignment is unaffected — only the URL. All eight new
 FASTA/GFF3 URLs in `config/genomes.yaml` were verified to return HTTP 200 with real content lengths.
 
@@ -1840,7 +2626,7 @@ so its fold exceeds a fifth of the data however the other 10 units are arranged.
 constraint is 1793 (14,549 against a perfectly even 12,756 elsewhere); the remaining ~500 is the lumpiness
 of the other units. **Do not "rebalance" this by moving an arm.**
 
-**This entry originates here** — neither csRNANet nor plant-design has a C. griseus assignment. Push it
+**This entry originates here** — there was no prior C. griseus assignment. Push it
 upstream before using hamster beyond this repo, or a locus in test here becomes train there, which is the
 `C.elegans` mistake repeated.
 
@@ -1852,8 +2638,8 @@ lists exactly 10 assembled molecules (`NC_048595.1`-`NC_048604.1`). Each is larg
 together they are 23% of the genome, so excluding them would discard all of chromosome 1. Same reasoning
 as S. pombe's MTR/AB325691: judge the sequence by what it is, not by the label the assembly gives it.
 
-**`C.elegans` is the one species on SIX folds, retuned 2026-09-01.** It originates here — neither csRNANet
-nor plant-design has an entry — and it had been assigned by chromosome count rather than by matching peak
+**`C.elegans` is the one species on SIX folds, retuned 2026-09-01.** It originates here — no earlier
+assignment existed — and it had been assigned by chromosome count rather than by matching peak
 counts, the one entry in the file that did not follow the project's method.
 
 Retuning exposed a structural problem rather than a mis-tuned split. Worm has 6 chromosomes of near-equal
@@ -1867,8 +2653,8 @@ that fold then holds 31.4% of the peaks against 16.2% for the smallest:
 | **6 folds, one chromosome each** | **432** | **12%** |
 
 76% would have remained the worst balance in the repo by a wide margin, so worm now uses **6 folds**.
-`n_folds` is already per-species (`len(folds)`, with validation at `(f+1) % n`), plant-design itself
-carries a 3-fold `S.pombe` entry, and worm has no upstream assignment to stay compatible with. The four
+`n_folds` is already per-species (`len(folds)`, with validation at `(f+1) % n`), an earlier lab
+assignment uses 3 folds for `S.pombe`, and worm has no prior assignment to stay compatible with. The four
 worm experiments therefore contribute 24 (experiment × fold) jobs rather than 20.
 
 `D.melanogaster` has the same 6-units-into-5-folds shape and is fine, because dm6's `chr4` is tiny so
@@ -1924,9 +2710,9 @@ Consequences, none of which change the assignment:
   regions into an exclusion list is forbidden here for good reason.
 
 Chromosome naming follows the `chrom_style` in `config/genomes.yaml` and must match the actual FASTA.
-Note plant-design's `config/A.thaliana/chrom_splits.json` uses `chr1..chr5`, but that is a dataset-specific
-renaming for its own TAIR10 build (NCBI GCA_000001735.1 with organelles as `chrM`/`chrC`); the canonical
-form, and ours, is bare `1`-`5` as in the Ensembl Plants FASTA.
+Note an earlier lab config uses `chr1..chr5` for A. thaliana, but that is a dataset-specific renaming for
+a different TAIR10 build (NCBI GCA_000001735.1, organelles as `chrM`/`chrC`); ours is bare `1`-`5` as in
+the Ensembl Plants FASTA.
 - *Peak-level* (S. pombe): only 3 chromosomes, so `make_random_splits.py` assigns individual peaks to
   5 folds, grouping peaks whose training windows could overlap (centers within `in_window + 2*max_jitter`
   = 2514 bp) so they never straddle a split — this is the leakage guard, preserve it if you touch that script.
@@ -1970,18 +2756,28 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   exists *only* to add these `abs()` calls around `bpnetlite`'s `PeakGenerator`. Any new code that reads
   signal must do the same.
 - **Non-ACGT.** Every `extract_loci` call passes `ignore=list("QWERYUIOPSDFHJKLZXVBNM")`.
-- **Outlier peaks: no signal-based filter is applied, deliberately.** Both fit scripts pass
-  `max_counts=None`, matching procap-atlas, which does the same in its `fit_bpnet.py` and
-  `fit_cherimoya.py`. The pre-unification `fit_bpnet.py` (at `a806e0d`) did drop peaks above
-  `quantile(total_signal, 0.99) * 1.2`; the port to `data_loader.PeakGenerator` removed it, which brought
-  this repo in line with upstream. Do not reinstate it casually: the threshold is data-dependent, so every
-  species and library gets a different effective cutoff, which is corrosive in a repo whose point is
-  cross-species comparison — and the top of a PRO-cap signal distribution is real biology (snRNA, histone,
-  ribosomal-protein promoters), i.e. the most informative loci for an initiation model. Upstream uses
-  signal quantiles only in *diagnostics* (`locus_diagnostics`, `generate_warning_flags.py`), never to drop
-  training data. Artifact removal is the exclusion lists' job, and those are canonical published lists —
+- **Outlier peaks ARE dropped, at `quantile(0.99) * 1.2`. An earlier version of this file said the
+  opposite and it was wrong.** The claim was that the port to `data_loader.PeakGenerator` removed the
+  filter the pre-unification `fit_bpnet.py` (at `a806e0d`) had. It did not remove it — it MOVED it. The
+  filter now lives inside `src/bpnet/fit/data_loader.py`:
+
+      outlier_threshold = torch.quantile(loci_counts, 0.99) * 1.2
+      outlier_idxs = loci_counts > outlier_threshold
+      ...
+      peak_sequences=X_peaks[0][~outlier_idxs],
+
+  `max_counts=None` in both fit scripts is true and was the evidence for the wrong claim, but it is a
+  *different* knob — `max_counts` is tangermeme's own cutoff inside `extract_loci`, and this quantile
+  filter is applied afterwards, on top. `data_loader.py` is byte-identical to procap-atlas's, so upstream
+  drops them too; this is inherited, not local.
+  **The objection the old text raised is therefore live, not avoided.** The threshold is data-dependent,
+  so every species and library gets a different effective cutoff, which is corrosive in a repo whose
+  point is cross-species comparison — and the top of a PRO-cap signal distribution is real biology
+  (snRNA, histone, ribosomal-protein promoters), i.e. the most informative loci for an initiation model.
+  Roughly the top 1% of peaks per experiment is being discarded. Decide deliberately whether to keep it;
+  do not assume it is off. Artifact removal is the exclusion lists' job, and those are canonical published lists —
   **do not hand-curate regions into them**, or folds and preprocessing stop being comparable with
-  plant-design, csRNANet and procap-atlas.
+  procap-atlas.
 - **The real gap this leaves:** S. cerevisiae and S. pombe have no published exclusion list *and* no
   outlier filter, so their only guards are non-ACGT filtering and the fold structure. Their in-assembly
   rDNA arrays (`XII:451786-489469`; `III:1-23130` and `III:2440994-2452883`) will be among the
@@ -1990,9 +2786,36 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   than a bug — but check it before publishing yeast numbers.
 - **Negatives live in `main_chromosomes`, from `config/genomes.yaml`** — the same allow-list the bigWig
   and PINTS steps use, so negatives are drawn from exactly the space the peaks occupy.
-  `src/make_negatives.py` applies it in three places: the peak set, both bedgraphs, and the chrom.sizes
-  it feeds `bedGraphToBigWig`. All three are needed — restricting only chrom.sizes makes
-  `bedGraphToBigWig` abort on the first contig it no longer lists.
+  `src/make_negatives.py` applies it to the peak set, to the merged bigWig, and — the one that was
+  missing — to the **negative sampling space itself**.
+  **That last one was not being applied at all, and the claim above was false until 2026-09-02.**
+  The script shelled out to `bpnet negatives`, whose first line is
+  `chroms = list(pyfaidx.Fasta(args.fasta).keys())` — the whole assembly. `chroms` is not merely a filter
+  on the input loci: `extract_matching_loci` builds its candidate space from it
+  (`chrom_sizes = {key: len(fa[key]) for key in chroms}`), so negatives were drawn from organelles and
+  unplaced scaffolds no matter what the peaks and signal were restricted to. It is now a direct
+  `tangermeme.match.extract_matching_loci(..., chroms=keep)` call, which is the same three lines as the
+  CLI with that one argument changed. **Do not go back to the CLI** unless bpnet-lite grows a `--chroms`
+  flag.
+  It surfaced as a crash rather than as bad data only because the merged bigWig *is* restricted:
+  `_counts_from_coords` asked it for a contig it does not contain and pybigtools raised
+  `KeyError: 'No chromomsome with name \`scaffold_37\` found.'` (and `Mito` on S. cerevisiae). **A less
+  restricted bigWig would have returned counts and the negatives would have been quietly wrong** — which
+  is what had been happening for every species whose peaks happened to cover the whole assembly.
+  Calling `extract_matching_loci` directly is fine rather than a fork: `bpnet negatives` is a thin
+  wrapper around exactly that function. The alternative considered and rejected was to keep the CLI and
+  hand it a **symlink to the FASTA with a `.fai` subset to `main_chromosomes`** — which does work
+  (verified: pyfaidx reports only the indexed contigs and still reads sequence through the original
+  offsets), but restricts the CLI by trickery rather than by saying what is meant.
+- **`-j` is a PROCESS pool, and has to be.** It was a `ThreadPoolExecutor`, which was fine while the
+  work happened in `bigWigToBedGraph`/`bpnet` subprocesses that release the GIL. Once the strand merge
+  and the GC matching both moved in-process, threads serialised on the GIL and `-j 42` used about two
+  cores. Note the cost inside `extract_matching_loci` is a `joblib.Parallel(n_jobs=...)` scan over
+  chromosomes that the CLI pins to `n_jobs=1`, so a single experiment is single-threaded either way —
+  `-j` buys parallelism ACROSS experiments, not within one. Each worker holds a genome, so a large `-j`
+  on the multi-gigabase species is memory-hungry.
+  The `.fai` fallback in `make_chrom_sizes` used to be guarded by a `threading.Lock`, which processes do
+  not share; `main()` now builds every missing index serially before the pool starts.
   This replaced a hand-written per-*experiment* `CHROM_EXCLUDE` regex map, which was wrong two ways.
   It **under-covered**: 3 of the 38 experiments then defined had an entry, so 35 filtered nothing while
   chrom.sizes came
@@ -2004,8 +2827,409 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
   ints and would match nothing), and raises if `main_chromosomes` and the FASTA disagree rather than
   silently emitting a short chrom.sizes. `ALPHA` stays per-experiment: it is a tuning parameter, not a
   property of the genome.
-- **Negatives ratio.** GC-matched negatives are sampled at a low ratio (1/7 in `fit_bpnet.py`, 0.1 in the
-  JSON configs) rather than a balanced mix.
+- **A purely numeric chromosome column silently drops EVERY peak inside `extract_matching_loci`.** Its
+  path branch is `pandas.read_csv(loci, sep='\t', usecols=[0,1,2], header=None, names=[...])` with **no
+  `dtype`**, so a BED whose first column is all digits infers as `int64`. The next line is
+  `numpy.isin(loci['chrom'], chroms)` against our all-string `chroms`, every comparison is False, `loci`
+  becomes empty, and the run dies further down on `zero-size array to reduction operation maximum` —
+  which names nothing.
+  This is the exact failure `main_chromosomes()`'s `str()` exists to prevent, happening one library
+  deeper. It took out **A. thaliana (1-5), C. reinhardtii (1-17) and P. patens (1-27)** — the only three
+  species with purely numeric names — and spared C. griseus purely because it has an `X`, which makes the
+  column `object`. Roman numerals and `chr`/`NC_` prefixes are safe for the same accidental reason.
+  **bpnet-lite has the same latent bug — verified, not assumed.** `pyfaidx.Fasta(...).keys()` returns
+  `str` unconditionally (checked on a FASTA with contigs `1`/`2`/`10`), so `bpnet negatives` passes string
+  `chroms` against the same int64 column and keeps **0 of 3** rows. It never surfaces upstream only
+  because bpnet-lite is used on human and mouse, where `chr`-prefixed names force `object` dtype. So this
+  is pre-existing rather than caused by dropping the CLI, and those three species never had working
+  negatives by either route.
+  Curiously the `chroms=None` fallback is the one safe path: it derives `chroms` from the loci column
+  itself, so `fa[numpy.int64(1)]` raises `TypeError: Record name must be a string, not int64` — loud
+  instead of silent. **The real fix belongs upstream**, as `dtype={0: str}` in that one `read_csv`; it
+  would fix the CLI too and is worth a tangermeme PR.
+  `sample_negatives` now reads the BED itself with `dtype={0: str}` and passes the **DataFrame**, which
+  skips tangermeme's read entirely. **A fixture with `chrA`/`chrI`-style names cannot catch this** — the
+  regression test uses all three naming styles on purpose. (`dtype={0: str}` does work alongside
+  `names=`, checked directly: both `{0: str}` and `{"chrom": str}` give `object`.)
+
+  **The SAME bug has a second instance, in `tangermeme.io._load_exclusion_zones`, and it hit A. thaliana
+  training on 2026-09-03.** `KeyError: 1` out of
+  `exclusion_zones[chrom][start:end] = True` — the zones dict is keyed by the FASTA's string names while
+  the exclusion BED's column came back `int64`. Same missing `dtype`, opposite failure mode: **loud**
+  here, where `extract_matching_loci` was silent. A. thaliana is the only species that is both
+  numerically named *and* has a published exclusion list, which is why it was the one to break; the other
+  two numeric species carry `blacklist: null`, so the call never happens.
+
+  **It could not be fixed at the call site the way the first one was.** `_load_exclusion_zones` calls
+  `pandas.read_csv` on each element of `exclusion_lists` itself, so there is no pre-typed DataFrame to
+  hand it, and no file-level trick makes pandas infer `object` for an all-digit column. Renaming the BED's
+  contigs is worse than the bug: the published list was deliberately stripped to bare `1`-`5` to match the
+  Ensembl FASTA, and a list whose names do not match **excludes nothing, silently**. The remaining choices
+  were to fork `data_loader.py` — forbidden, it is byte-identical to procap-atlas's — or to patch the one
+  function, so `src/tangermeme_compat.py` patches it.
+
+  **`patch_numeric_chroms()` is SELF-RETIRING**, which is the part worth preserving. It functionally
+  probes the installed tangermeme with a numeric BED and returns without patching if the probe passes, so
+  the shim vanishes when tangermeme is fixed instead of shadowing a corrected implementation forever. It
+  also refuses to install a patch that fails its *own* probe, rather than silently breaking exclusion
+  lists for the nine species that were working. Called from all five scripts that pass a blacklist into
+  `extract_loci` (both fit scripts, both benchmarks, `attribute.py`), right after the deferred tangermeme
+  import.
+  Verified against the genuine upstream body lifted from the 1.4.1 wheel: unpatched reproduces
+  `KeyError: 1` on the real `TAIR10.Klasfeld.Excludable.bed.gz`; patched excludes 2.86 Mb across
+  chromosomes `1`-`5`; `chr`-prefixed lists behave identically through the patch; and a simulated
+  fixed-upstream is declined.
+  **So the tangermeme PR is now worth two `dtype={0: str}` edits, not one** — `match.extract_matching_loci`
+  and `io._load_exclusion_zones`.
+- **The two yeasts get 1-7% of the negatives every other species gets, and it is STRUCTURAL.** Measured
+  over the first full run (2026-09-03), negatives per peak. **These are the filter-ON numbers**, kept
+  because they are what motivated `NO_SIGNAL_FILTER`; the yeast rows are 3-4x higher at the sparse end
+  now that the filter is off for them, and the shape of the finding is unchanged:
+
+  | species | negatives/peak | negatives as % of all candidate windows |
+  | --- | --- | --- |
+  | S. cerevisiae (6 experiments) | **0.01-0.07** | 4.5-7.7% |
+  | S. pombe | **0.03** | 5.3% |
+  | C. elegans | 0.26-0.70 | 20-36% |
+  | D. melanogaster | 0.73-1.00 | 31-48% |
+  | everything else | **1.00** | 0.7-16% |
+
+  **The predictor is PEAKS PER 2114 bp WINDOW, not genome size**, and the cutoff is sharp at 1.0:
+
+  | experiment | bp per peak | peaks per window | negatives per peak |
+  | --- | --- | --- | --- |
+  | `S.cerevisiae-Spt5IAA4h` | 512 | **4.13** | 0.01 |
+  | `S.cerevisiae-Ino80ctl` | 784 | **2.70** | 0.02 |
+  | `S.pombe_PROcap` | 1,358 | **1.56** | 0.03 |
+  | `S.cerevisiae_PROcap` | 1,790 | **1.18** | 0.07 |
+  | `C.elegans-L3` | 2,792 | 0.76 | 0.26 |
+  | `D.melanogaster-S2_PROcap` | 5,641 | 0.37 | 1.00 |
+
+  Everything at or above one peak per window collapses; everything below it is fine. **Small genomes are
+  not the problem** — C. reinhardtii is 13.2 kb per peak and P. patens 46 kb, the two sparsest in the
+  corpus. It is the two yeasts, where the spacing between peaks is at or below the training window itself,
+  so no 2114 bp window can avoid one.
+
+  Worth knowing where those yeast peak counts come from, since they drive this. Against annotated TSSs,
+  `S.cerevisiae_PROcap` (Booth, 4.9 M signal) calls **6,759 peaks = 1.04 per TSS**, which is a textbook
+  number. The Spt5 and Ino80 experiments call 10,811-23,642, i.e. **1.7-3.6 per TSS**, and are only 7-22%
+  unidirectional against Booth's 59%. The Spt5 series rises with depletion time (10,811 EtOH -> 21,591
+  IAA1h -> 23,642 IAA4h), which is the direction Spt5 loss should push cryptic initiation — **but
+  `signal_reads` rises with it too** (11.3 -> 16.7 -> 18.5 M), so depth and biology are confounded here
+  and neither reading is established. Either way the yeast peak sets are 2-3x denser than the annotation,
+  which is what breaks negative sampling.
+
+  `extract_matching_loci` tiles each chromosome into NON-OVERLAPPING `in_window` blocks, so the entire
+  candidate pool is `genome / 2114` — about **5,700 windows for a 12 Mb yeast genome**. Windows
+  overlapping a peak are masked out, and `S.cerevisiae-Spt5IAA4h_PROcap` has **23,642 peaks, four times
+  more than there are windows in the whole genome**. Almost nothing survives. Every large genome instead
+  hits 1.00, meaning GC matching found a partner for essentially every peak and the peak count is the
+  binding constraint.
+
+  **`NEGATIVE_WINDOW` in `make_negatives.py` is the knob, and every run now reports the cost.** It
+  overrides the candidate-tiling width per species for GC matching only. Shrinking it places candidate
+  midpoints more finely; it does NOT shrink the training window, because both
+  `_resize_coords_generator` and the loader's `extract_loci` resize to the same midpoint. The written BED
+  intervals do take that width, so nothing downstream may depend on it. `out_window` is scaled with it,
+  since `extract_matching_loci` asserts `in_window >= out_window`.
+  Alongside it, `sample_negatives` prints negatives per peak and **`pct_peak_overlap`** — the share whose
+  *2114 bp* window overlaps a peak, which is what the model will see. On a synthetic 2.4 Mb genome with a
+  peak every 780 bp (S. cerevisiae density) the trade is stark:
+
+  | tiling | negatives | per peak | overlap a peak |
+  | --- | --- | --- | --- |
+  | 2114 (default) | **0** | 0.00 | — |
+  | 1200 | 2 | 0.00 | 0.0% |
+  | 600 | 620 | 0.20 | **99.7%** |
+  | 400 | 2,466 | 0.80 | **99.8%** |
+
+  So narrowing does not buy clean negatives at yeast density — it buys many contaminated ones. That
+  synthetic is uniform and therefore worst case; real yeast peaks cluster, which is why the real run finds
+  310 rather than 0 at the default. **`NEGATIVE_WINDOW` is deliberately empty**: set an entry only with a
+  measured `pct_peak_overlap` in front of you, and record why.
+  **`--no-signal-filter` is the other lever, and for a densely transcribed genome it is the one that
+  binds.** `bigwig=None` disables the signal restriction and nothing else: in `_extract_and_filter_chrom`
+  both the threshold and the `values <= signal_threshold` mask sit behind `if bigwig is not None`, while
+  GC matching, `max_n_perc` and the peak-tile mask are unconditional. On a synthetic genome at
+  `S.cerevisiae_PROcap` density (one peak per 1,840 bp, 1.15 per window):
+
+  | inter-peak signal | filter ON | filter OFF |
+  | --- | --- | --- |
+  | none | 792 negatives | 792 negatives (filter inert) |
+  | pervasive | **0 negatives** | 792 negatives, **median signal 41% of peak median** |
+
+  So where the genome is quiet between peaks the filter costs nothing, and where it is not the filter
+  alone takes the count to zero. Yeast is the second case. The bar is
+  `window signal <= signal_beta x (1st percentile of peak signal)`, which in a genome where essentially
+  everything is transcribed almost nothing clears.
+  **The recovered negatives are peak-free but not quiet** — 0.0% overlap a called peak, yet they carry a
+  large fraction of peak-level signal. Whether that is a defect depends on what negatives are for here:
+  they are not labelled zero, the loader extracts their real measured signal, so a GC-matched peak-free
+  window carrying ordinary background transcription is arguably a *better* sample of "non-peak yeast
+  genome" than an artificially quiet subset of it. `sample_negatives` now prints
+  `median signal N vs M in peaks = X%` on every run so this is measured per experiment rather than
+  assumed.
+
+  **Measured on the real `S.cerevisiae_PROcap`, and it is a clear gain:**
+
+  | | negatives | per peak | overlap a peak | median signal |
+  | --- | --- | --- | --- | --- |
+  | filter on | 440 | 0.07 | — | — |
+  | filter off | **1,905** | **0.28** | **0.0%** | 271 vs 961 in peaks (28.2%) |
+
+  **Read the 271 against the genome, not against the peaks.** An average 2114 bp window in this library
+  holds **853** reads (4.87 M over 12.07 Mb), so the negatives sit at **0.32x a random window** while the
+  *median* peak window sits at 1.13x. 28.2% sounds like contamination and is not: it is the peak median
+  that is unremarkable, because at 1.18 peaks per window essentially every window contains one and the
+  informative peaks are in the tail. So the filter was discarding 4.3x more negatives that are three times
+  quieter than average genome and never overlap a called peak.
+  **Every run now also reports the RANDOM-GENOME baseline**, from 2,000 random windows, because the peak
+  median is the misleading comparator wherever the peak set saturates the genome. Read
+  `negatives are Nx genome`, not the percentage against peaks.
+
+  **Turning the filter off is NOT a no-op on the large genomes, and an earlier version of this note said
+  it was.** The claim was that where the count is already capped at one negative per peak — 9 of the 23
+  measured experiments — removing the filter can change nothing. The COUNT cannot change, that part is
+  right. The COMPOSITION changes completely. Measured on a synthetic at 0.10 peaks per window, capped, with
+  heterogeneous background:
+
+  | | negatives | median signal | vs random genome |
+  | --- | --- | --- | --- |
+  | filter on | 559 | **0** | 0.00x |
+  | filter off | 559 | **24** | **0.67x** |
+
+  Identical count, different windows. `matched_loci_bin_count = min(bg, loci)` saturates per GC bin, but
+  the pool it draws from is `random_state.shuffle`d and truncated, so a larger pool means a different — and
+  noisier — sample. The earlier synthetic that showed no change had *uniform* background, so the filter
+  rejected nothing; it demonstrated only that the test was degenerate.
+
+  What this means for the choice. **With the filter on, negatives are the SILENT TAIL of the genome**
+  (median 0); with it off they are **representative peak-free background** (0.67x genome). Both are
+  defensible and they are different things, so this is not a free switch to flip corpus-wide — it would
+  change the negatives of every experiment, including the 33 that have no problem. bpnet-lite and
+  procap-atlas choose the silent tail, and this repo tracks their standards.
+  So the realistic options were: keep it on everywhere and accept that the dense yeast experiments train
+  on a few hundred negatives; or turn it off for those specific experiments as a **deliberate, documented
+  departure**, accepting that their negatives then mean something slightly different from every other
+  species'.
+
+  **The second was chosen, 2026-09-03: `NO_SIGNAL_FILTER = {"S.cerevisiae", "S.pombe"}`.** It is not a
+  comparability-free option — it makes the cost explicit and per-species rather than silent, and anything
+  derived from yeast negatives is no longer strictly comparable with the other ten species. The switch is
+  three-state now, because populating the set has to leave a way back to upstream behaviour: `auto`
+  (respect the set, the default), `--no-signal-filter` (off for every species), and
+  **`--force-signal-filter`** (on for every species, overriding the set — which is how the `filter on`
+  column below was measured and how it can be re-measured). `resolve_signal_filter()` returns the reason
+  alongside the decision, so every run prints which of the four states it is in rather than leaving the
+  reader to infer it from a species name.
+
+  **All seven yeast experiments measured (2026-09-03), and the gain decays monotonically with density:**
+
+  | experiment | peaks/window | filter on | filter off | gain | negs/peak | median negative | median peak |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `S.cerevisiae_PROcap` | 1.18 | 440 | 1,905 | **4.3x** | 0.28 | 271 | 961 |
+  | `S.pombe_PROcap` | 1.56 | 311 | 947 | **3.0x** | 0.10 | 831 | 3,518 |
+  | `Spt5EtOH` | 1.89 | 257 | 738 | **2.9x** | 0.07 | 316 | 1,873 |
+  | `Ino80ctl` | 2.70 | 310 | 579 | 1.9x | 0.04 | 90 | 4,701 |
+  | `Ino80KD` | 2.95 | 313 | 520 | 1.7x | 0.03 | 95 | 4,975 |
+  | `Spt5IAA1h` | 3.78 | 348 | 419 | 1.2x | 0.02 | 41 | 2,956 |
+  | `Spt5IAA4h` | 4.14 | 301 | 327 | **1.1x** | 0.01 | 16 | 3,264 |
+
+  Two conclusions, and they point different ways.
+
+  **Turning the filter off is safe.** Zero peak overlap everywhere, and the recovered negatives are not
+  merely acceptable but very quiet — median 16 to 831 reads per 2114 bp against peak medians of
+  1,873-4,975. The densest experiment's negatives sit at 16 against a peak median of 3,264. There is no
+  contamination to trade against, so the earlier worry was unfounded at every density measured.
+
+  **But it does not rescue the dense experiments, and the crossover is near 2 peaks per window.** Below
+  it the signal threshold is what binds and removing it gains 3-4x; above it the supply of peak-free tiles
+  binds and removing it gains 10-20%. `Spt5IAA4h` goes 301 -> 327, still 0.014 negatives per peak, using
+  5.7% of all tiles in the genome — which is simply the peak-free fraction at 4.14 peaks per window.
+  **This corrects an earlier note here that `NEGATIVE_WINDOW` was probably unnecessary.** That was true
+  for `S.cerevisiae_PROcap`, where the filter bound; it is false for the four densest, where only finer
+  tiling could help and finer tiling costs the peak contamination measured above. For those four there is
+  no good option — at the configured 1/7 and 23,642 peaks, `Spt5IAA4h` would draw 3,377 negatives an
+  epoch from a pool of 327, recycling each one 10.3x.
+  **This is not a bug and `--force` will not change it.** Two honest readings, and this one is genuinely
+  undecided: non-peak sequence space in a 12 Mb, densely transcribed genome is *genuinely* tiny, so ~330
+  windows may be a fair sample of what exists; or the pool is too small to teach anything and yeast needs
+  a different background scheme (a strided rather than tiled candidate set would give many more, and would
+  need an upstream change). What the repo does instead is refuse to recycle: the ratio cap in
+  `fit_bpnet.py` lowers `negatives_ratio` to the pool, so the pool size becomes visible in the training
+  log rather than hidden in a resampling loop. **Read yeast negatives-derived metrics with this in mind.**
+- **Cherimoya has THREE sources of defaults and they disagree — checked 2026-09-04 against the 0.2.0
+  wheel.** Worth having in one place, because "cherimoya's default" is ambiguous:
+  `cherimoya_cli.defaults.default_fit_parameters` (its CLI), the Python API's own signatures
+  (`Cherimoya.__init__`, `fit()`, `io.PeakGenerator`), and procap-atlas.
+
+  | | CLI | API | procap-atlas | here |
+  | --- | --- | --- | --- | --- |
+  | `negative_ratio` | 0.25 | 0.25 | 1/7 | **0.25** |
+  | `max_jitter` | 500 | 500 | 500 | **500** |
+  | `n_filters` / `n_layers` | 128 / 9 | 128 / 9 | 128 / 9 | 128 / 9 |
+  | `expansion` / `residual_scale` | 2 / 0.15 | 2 / 0.15 | unset | unset -> 2 / 0.15 |
+  | `muon_lr`/`wd`, `adam_lr`/`wd`, `lw_*` | 0.025/0.03, 0.001/0.0, … | — | same | same |
+  | `max_epochs` | **20** | **50** | 50 | 50 |
+  | `early_stopping` | **5** | **None** | None | None |
+  | warmup epochs | **2** | — | 5 | 5 |
+  | `dtype` | float32 | float32 | float32 | **bfloat16** |
+
+  Three things fall out.
+
+  **The CLI's schedule is exactly the `20_5_2` config procap-atlas swept and rejected** — max_epochs 20,
+  early_stopping 5, warmup 2. So upstream's comparison was, in effect, testing cherimoya's own CLI
+  default and finding `50_None_5` better on every benchmark metric.
+
+  **On that schedule the API and the CLI disagree with each other**, and we follow the API:
+  `Cherimoya.fit()` is declared `max_epochs=50, early_stopping=None`, which is also procap-atlas's
+  choice and ours. So `max_epochs: 50, early_stopping: null` here is not a departure from cherimoya at
+  all — it matches the library's *function* default, and only the CLI wrapper differs.
+
+  **`expansion` and `residual_scale` are not passed by `fit_cherimoya.py` and do not need to be**: the
+  class defaults (2, 0.15) are identical to the CLI's, so the architecture is the same either way.
+
+  **`dtype=torch.bfloat16` is the one place this repo diverges from BOTH sources**, and it was never
+  recorded as a decision — cherimoya's CLI, its `fit()` signature and procap-atlas all use `float32`
+  (upstream passes `dtype=torch.float32` explicitly). `fit()` applies it through
+  `torch.autocast(device_type=device, dtype=dtype)`, so this is autocast precision for the whole
+  training loop, not a storage detail. Faster on Ampere and later, and usually harmless, but it is an
+  unflagged numerical divergence in a repo that otherwise tracks upstream — **decide it deliberately
+  rather than inheriting it.**
+
+- **Negatives ratio is 1/7 for BPNet and 1/4 for Cherimoya** — negatives are 1/8 and 1/5 of a batch.
+  Each family follows ITS OWN library's `PeakGenerator` default, which is the thing to remember, because
+  the two libraries disagree and the number has been wrong here in three different ways.
+  **Verified from the installed sources**: `bpnetlite`'s `PeakGenerator` defaults to `negative_ratio=0.1`
+  and `cherimoya.io.PeakGenerator` to `negative_ratio=0.25` (its `PeakNegativeSampler` uses 0.1, which is
+  the easy one to misread). `config/bpnet_params.json` sets 0.142857… — 1/7, which is procap-atlas's
+  choice rather than bpnet-lite's 0.1 — and `config/cherimoya_params.json` sets 0.25.
+  The history, since this line keeps attracting corrections: it first read "1/7 in `fit_bpnet.py`, 0.1 in
+  the JSON configs", which was backwards, since the JSON is where 1/7 lives and **0.1 never applies at
+  all** (both fit scripts pass `params["negatives_ratio"]` explicitly). It was then briefly set to 1/7
+  for both families on 2026-09-03, on the reasoning that procap-atlas's `--background` defaults to
+  `gc:0.1429` for both — that is true of procap-atlas but overrides cherimoya's own default, and
+  **1/4 was restored on 2026-09-04**. Note `max_jitter=500`, aligned in the same pass, IS cherimoya's
+  library default as well as upstream's, so only the ratio moved back.
+  The ratio is negatives per peak, so 1/4 means one negative for every four peaks.
+  It matters for the yeasts, where it sets how hard the small pool is recycled. Draws per epoch against
+  the pool available with the signal filter off:
+
+  | experiment | peaks | draws/epoch at 1/7 | pool | reuse |
+  | --- | --- | --- | --- | --- |
+  | `Spt5IAA4h` | 23,642 | 3,377 | 327 | **10.3x** |
+  | `Spt5IAA1h` | 21,591 | 3,084 | 419 | **7.4x** |
+  | `Ino80KD` | 16,865 | 2,409 | 520 | 4.6x |
+  | `Ino80ctl` | 15,431 | 2,204 | 579 | 3.8x |
+  | `Spt5EtOH` | 10,811 | 1,544 | 738 | 2.1x |
+  | `S.pombe_PROcap` | 9,208 | 1,315 | 947 | 1.4x |
+  | `S.cerevisiae_PROcap` | 6,759 | 966 | 1,905 | **0.5x** |
+
+  So `S.cerevisiae_PROcap` is fine once the filter is off — it cannot even use its pool once per epoch —
+  and the two Spt5 depletions recycle roughly ten and seven times over.
+- **`negative_ratio` is therefore CAPPED at the available pool**, in both `fit_bpnet.py` and
+  `fit_cherimoya.py`: `min(configured, len(negatives) / len(peaks))`, so no negative is drawn more than
+  once per epoch and the cap is printed when it engages. **It is on by default and complements
+  `NO_SIGNAL_FILTER` rather than substituting for it** — an earlier version of this line said the cap was
+  chosen *over* loosening the filter, which is no longer the arrangement. The filter is what decides how
+  many distinct negatives exist; the cap is what stops whatever number that is from being recycled. Both
+  are needed for the dense experiments, where the filter buys only 10-20% and the pool stays a few
+  hundred.
+  Computed from **whole-genome** counts rather than the fold's: `PeakGenerator` filters peaks and
+  negatives by the same `chroms`, so `pool/peaks` is near-constant across folds, and the exact per-fold
+  numbers are not knowable at the call site without duplicating `extract_loci`. An approximate cap that
+  always errs in the right direction beats forking `data_loader.py`, which is byte-identical to
+  procap-atlas's.
+  **The cap addresses RECYCLING, not DIVERSITY, and they are orthogonal.** The pool is the same N distinct
+  windows at any ratio; capping only lowers how often each is seen, and with it the negative share of a
+  batch — 12.5% to ~1.3% for `Spt5IAA4h`. If the negative class's batch weight matters more than avoiding
+  repeats, `--no-ratio-cap` keeps the configured composition — present on **both** fit scripts, since
+  cherimoya had the cap but no way off it. Neither setting adds a single new background sequence; only
+  `NO_SIGNAL_FILTER` does that.
+
+- **Negative DIVERSITY in the yeasts has a GENOMIC ceiling, and dropping the signal filter is what
+  reaches it.** S. cerevisiae holds **5,710** non-overlapping 2114 bp windows in total, and the peak-free
+  share of them runs from 33% at 1.18 peaks per window down to 5.7% at 4.14. **The filter-off pools are
+  essentially those peak-free windows; the filter-on pools were a subset of them**, which is why removing
+  it gains 3-4x at the sparse end and 10-20% at the dense end. Poisson on the observed density predicts
+  1,753 free windows for `S.cerevisiae_PROcap` and 91 for `Spt5IAA4h`: the first matches the measured
+  1,905 almost exactly, and the second is exceeded (327 found) because real peaks cluster, which leaves
+  more empty tiles than a uniform model allows.
+  An earlier version of this bullet read "no pipeline setting can raise it" and quoted the 257-440
+  filter-on pools as the peak-free total. The **ceiling** is genomic, which is the part that holds; the
+  pools were not at it.
+
+  **In RELATIVE terms the pool is not impoverished at all**, which is worth knowing before treating it as
+  a defect. Yeast rows are the filter-off pools now in use; mouse keeps the filter:
+
+  | | pool | unique background sequence | share of genome |
+  | --- | --- | --- | --- |
+  | `Spt5IAA4h` | 327 | 691 kb | **5.7%** |
+  | `S.pombe_PROcap` | 947 | 2,002 kb | **16.0%** |
+  | `S.cerevisiae_PROcap` | 1,905 | 4,027 kb | **33.4%** |
+  | `M.musculus-GCB_PROcap` | 64,667 | 136,706 kb | 5.15% |
+
+  So the densest yeast experiment samples about the same fraction of its genome as mouse does of its
+  (5.7% vs 5.15%), and the sparse ones sample far more. What is small is the genome, not the sampling.
+
+  **The asymmetry that IS real is negative vs positive unique sequence, and it now spans an order of
+  magnitude within one species.** Yeast peak windows overlap heavily, so their union is roughly the whole
+  genome minus the peak-free part:
+
+  | | positive union | negative union | ratio |
+  | --- | --- | --- | --- |
+  | `Spt5IAA4h` | ~11.4 Mb | 0.69 Mb | **1:17** |
+  | `S.cerevisiae_PROcap` | ~8.0 Mb | 4.03 Mb | **1:2** |
+  | `M.musculus-GCB_PROcap` | ~137 Mb | ~137 Mb | 1:1 |
+
+  Mouse peak windows barely overlap, hence parity. So the model trained on `Spt5IAA4h` sees seventeen
+  times more distinct positive than negative sequence while the one trained on the WT library sees
+  roughly a 2:1 split — and that spread is set by peak density, not by any setting. It is also the
+  strongest argument for reading the two groups' negatives-derived numbers separately rather than as
+  "the yeasts".
+
+  Levers, with what each actually buys:
+  - **Jitter on negatives.** `data_loader.py` passes `max_jitter=0` for the background while peaks get
+    the configured 200. Enabling it would add **+19%** unique sequence (2114 -> 2514 bp per locus), which
+    is augmentation rather than diversity, and it means forking a file that is byte-identical to
+    procap-atlas's. Not worth it for 19%.
+  - **Stricter peak calling — NOT available through `--min-mu-percent`, checked 2026-09-03.** The
+    `Spt5IAA4h` PINTS log ends with *"To reduce false positives, PINTS overrided your current
+    --min-mu-percent value… consider increasing (current: 0.10) to 0.15"*, which reads like an untaken
+    opportunity and is not one. In `calling_engine.py` the override is **applied in place** before the
+    calls are made — `if bkg_mu_threshold < 0.5 and len(all_peak_mus) > 1000: bkg_mu_threshold =
+    np.quantile(all_peak_mus, suggest_val)` — and the `.mmp` file it writes exists only so
+    `on_the_fly_qc` can print that message afterwards. The log shows it firing: chromosome IV reports
+    `Minimum mu in local environment 0.500000`, exactly the floor. So passing `0.15` would silence the
+    message and reproduce roughly the thresholds already used. (Verified against the 1.2.1 source while
+    the run used the pinned 1.1.10; the message text is identical, so the logic almost certainly is, but
+    that is inference.)
+    **What the log does show is that saturation is a depth-versus-genome-size effect, not loose
+    settings.** The per-chromosome candidate thresholds are densities of **1.92-2.82**, while the library
+    averages **1.53 reads/bp** across the genome (18.5 M over 12.07 Mb) — so the bar for a candidate peak
+    sits at 1.3-1.8x the genome-wide mean. Nearly everything clears it because nearly everything is
+    covered.
+    Also worth recording as a **negative** result: PINTS' own cap-selection check, which warns that "the
+    proportion of significant short peaks is relatively high, which usually indicates the cap-selection
+    process didn't work well" and suggests `--disable-small`, **did not fire**. So the library is not
+    failing cap selection, despite `keep_sticks: True` and `disable_small: False`.
+  - **Accept it**, and treat yeast negatives-derived numbers as weakly supported.
+
+**Should the signal filter be loosened for the other experiments where negatives < peaks? No.** That is
+the wrong threshold — what matters is `pool/peaks` against `negatives_ratio`, not against 1. Sorted, the
+corpus has a clean gap with nothing in it:
+
+| | pool/peaks | vs 1/7 |
+| --- | --- | --- |
+| the 7 yeast experiments | 0.013 - 0.065 | **all below** |
+| `C.elegans-L3` (worst non-yeast) | **0.262** | 1.8x above |
+| `C.elegans` others, `D.melanogaster` | 0.57 - 1.00 | 4-7x above |
+| everything else | ~1.00 | 7x above |
+
+`C.elegans-L3` has 9,411 negatives for 35,923 peaks, which *looks* alarming and is not: at 1/7 an epoch
+draws 5,132, well inside the pool, so nothing recycles. Loosening the filter there would change what its
+negatives mean — silent tail to representative background — for **no training benefit at all**. Leave
+every non-yeast experiment alone.
 - Windows are `in_window=2114` / `out_window=1000` throughout; `trimming` is always
   `(in_window - out_window) // 2`.
 
@@ -2021,10 +3245,20 @@ changes only the CSV's row order, not which fold a peak lands in (numpy `default
 - `load_bed()` reads only columns 0–2 with `dtype={"chrom": str}` — chromosome names must stay strings
   (S. cerevisiae uses roman numerals, dm has `4`/`X`).
 - Cherimoya optimization splits parameters: **Muon** for 2-D weight matrices except `linear.weight`, **AdamW**
-  for everything else, each with linear warmup (5 epochs) → cosine decay, trained in `bfloat16`.
+  for everything else, each with linear warmup → cosine decay, trained in `bfloat16` — which is a
+  divergence from cherimoya's own default and from procap-atlas, both `float32`; see the defaults table
+  above. Warmup was
+  hard-coded at 5 epochs and is now `warmup_epochs` in the config with a `--warmup-epochs` flag, plus
+  `decay_epochs` / `--decay-epochs` to decouple the decay's length from `max_epochs` — both ported from
+  upstream, both no-ops at their defaults (5 and None give exactly the previous schedule, verified: 4,500
+  decay iterations either way and no third stage). Setting `decay_epochs` shorter adds a **`ConstantLR`
+  hold at `eta_min`**, which is load-bearing rather than cosmetic: `CosineAnnealingLR` is *periodic*, so
+  without it the LR would start climbing again past `T_max`. Its `total_iters` is deliberately far larger
+  than the hold (`num_hold_iters * 10 + 10**6`) because `ConstantLR` reverts to the optimizer's base LR
+  once reached — sized exactly, it would snap the LR back up on the last step of training.
 
 ## Scope note
 
-Human K562 PRO-cap configs from the csRNANet workspace are deliberately excluded from this repo.
+Human K562 configs from other work in this lab are deliberately excluded from this repo.
 `planning/nonhuman_capped_runon_manifest.xlsx` tracks candidate non-human datasets not yet wired into
 `config/`.

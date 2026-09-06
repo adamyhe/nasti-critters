@@ -12,7 +12,7 @@ Keeping both by hand invites drift, and the CSVs were missing entirely for
 species added later (M.musculus, C.elegans, A.thaliana), which silently left the
 second group of scripts falling back to the D.melanogaster default. This script
 makes chrom_splits.yaml the single source of truth and regenerates the CSVs from
-it. Modelled on plant-design's configs/import_chrom_splits.py.
+it.
 
 Peak-level split files (config/splits/<species>_random_fold_assignments.csv,
 written by make_random_splits.py) are a different mechanism and are never

@@ -15,24 +15,74 @@ version = "0.0.0"
 description = "Sequence-to-function models of PRO-cap initiation profiles in non-human species"
 requires-python = ">=3.11"
 
+# THE BASE SET IS TORCH-FREE, deliberately. Everything here installs from wheels
+# on any glibc, so `uv sync` with no extras works on Sherlock, whose tier has no
+# manylinux wheel for torch above 2.6.0. Sherlock runs the CPU-demanding jobs --
+# tfmodisco above all -- and needs nothing more than this.
+#
+# Everything that pulls torch lives in the `torch` extra below. Before adding a
+# dependency here, check `pip download <pkg> --no-deps` and read its
+# Requires-Dist: tangermeme (torch>=2.0) and bpnet-lite (torch>=1.9.0) both look
+# innocuous and are not.
 dependencies = [
-    # --- modelling ---
-    "bpnet-lite>=1.0.0",
-    "tangermeme>=1.0.0",
-    # Pinned by commit via [tool.uv.sources] below, not by version: the version this project needs (0.2.1) was never
-    # released to PyPI. Note: 0.2.1 differs from the published 0.2.0 only by the
-    # addition of a __version__ attribute in __init__.py -- cheri.py,
-    # cherimoya.py, io.py, losses.py, performance.py and wrappers.py are
-    # byte-identical between the two (verified by installing both). The pin is
-    # for exact agreement with the container image and immunity to tag movement,
-    # NOT because 0.2.0 trains differently.
-    "cherimoya",
-    # torch.optim.Muon landed in torch 2.10. fit_cherimoya.py falls back to
-    # `from muon import Muon`, but PyPI `muon` is a multi-omics framework, not
-    # the optimizer -- installing it would import the wrong package. Pinning
-    # torch >= 2.10 keeps the fallback from ever firing, so `muon` is
-    # deliberately NOT a dependency here.
-    "torch>=2.10",
+    # tfmodisco. Declared directly because src/bpnet/modisco/ invokes its
+    # `modisco` CLI -- same reasoning as pybigtools. It ships the entry point as
+    # an old-style data/scripts/modisco rather than a console_script. Needs NO
+    # torch: numpy, scipy, numba, scikit-learn, leidenalg, igraph, tqdm, pandas,
+    # logomaker, h5py, hdf5plugin, memelite, jinja2.
+    #
+    # **`modisco`, NOT the deprecated `modisco-lite`.** They are the same project
+    # renamed: `modisco` 2.5.2 installs the same top-level `modiscolite/` package
+    # and the same `modisco` script, so installing both collides on every file.
+    # cherimoya 0.2.0 already requires `modisco>=2.0.0`; bpnet-lite 1.0.0 on PyPI
+    # still requires `modisco-lite>=2.0.0`, which is why the override below
+    # exists. Verified the CLI surface is unchanged across the rename --
+    # subcommands motifs/report/convert/meme, and `-n/--max_seqlets`,
+    # `-l/--n_leiden` (default 2), `-w/--window`, `-m/--meme_db`, `-l/--lite`
+    # all identical -- so src/bpnet/modisco/ needed no change.
+    "modisco>=2.0.0",
+    # leidenalg 0.11.0 moved its linux wheels from manylinux_2_17 to
+    # manylinux_2_26/2_28, so on Sherlock -- glibc < 2.28, the same boundary
+    # that caps torch at 2.6.0, which is manylinux1 where 2.7.0 is 2_28 -- uv
+    # falls back to an sdist build that fails. 0.10.2 is the last release with a
+    # 2_17 wheel, and procap-atlas pins the identical version for the identical
+    # reason. It arrives via modisco-lite (leidenalg>=0.8.10), which is why a
+    # tfmodisco-only install is affected at all.
+    "leidenalg==0.10.2",
+    # igraph is leidenalg's own dependency and made the same jump: 1.0.0 is
+    # 2_28-only, 0.11.9 is the last with a 2_17 wheel.
+    "igraph<1.0",
+    # pillow 12.3.0 dropped manylinux_2_17; same pin as procap-atlas.
+    "pillow<12.3.0",
+    # WHEEL-ONLY CAPS. Sherlock's default toolchain is gcc 4.8.5 with binutils
+    # 2.27 -- 2015 vintage, no C++17 and no AVX512-VNNI -- so a source build
+    # there does not merely take a long time, it fails. contourpy 1.3.3 dies on
+    # `C++ Compiler does not support -std=c++17`; pybigtools died on
+    # `no such instruction: vpdpbusd`. The base set therefore has to install
+    # from wheels ALONE, and each cap below is the first version whose linux
+    # x86_64 wheels moved past manylinux_2_17.
+    #
+    # These are upper bounds rather than exact pins, so patch releases on the
+    # wheel-having line are still picked up. Re-derive them with the audit
+    # recorded in CLAUDE.md when a cap starts to bite; do not simply raise one
+    # without checking the wheel tags.
+    #
+    # Loading a newer gcc module on Sherlock would also work and would need no
+    # caps at all -- but then every source-built extension links against that
+    # module's libstdc++ and the module has to be loaded in each job too. Caps
+    # keep the environment self-contained.
+    "contourpy<1.3.3",
+    "h5py<3.15.0",
+    "hdf5plugin<6.0.0",
+    "numpy<2.3.0",
+    "pandas<2.3.3",
+    "scikit-learn<1.8.0",
+    "scipy<1.17.0",
+    # --- analysis / plotting ---
+    # Both arrive transitively (matplotlib via logomaker via modisco, scipy via
+    # several), but src/analysis/ imports them directly. scipy's version cap is
+    # in the wheel-only block above.
+    "matplotlib",
 
     # NOTE: the ENCODE pipeline's Python-side tools are NOT here. pyPINTS
     # (pints_caller) and umi-tools are both CLI tools that this repo only ever
@@ -44,16 +94,17 @@ dependencies = [
     # --- workflow ---
 
     # --- data handling used across src/ ---
-    "numpy",
-    "pandas",
     "pyyaml",
     "joblib",    # benchmark_predictions.py
-    # pyfaidx and pybigtools come via tangermeme, which is what its
-    # extract_loci uses; do not add pyfastx or pyBigWig back.
+    # pybigtools is DIRECT, not merely transitive via tangermeme: since
+    # make_negatives.py merges the two strand bigWigs in-process, src/ imports
+    # it, and a package you import belongs in the dependency list whatever else
+    # happens to pull it in. pyfaidx is still transitive (tangermeme's
+    # extract_loci uses both). Do not add pyfastx or pyBigWig back -- those are
+    # the readers this repo deliberately does not use.
     "tqdm",
 ]
 
-[project.optional-dependencies]
 # NO encode-exact extra. ENCODE converts BAM -> bigWig and merges replicates
 # with biodatatools 0.0.7, but the source document does not record the
 # subcommand, so that path was never implemented -- nothing imports
@@ -61,7 +112,68 @@ dependencies = [
 # unused package is a promise the repo cannot keep, so it is gone; the pin is
 # kept here as provenance for whoever implements it.
 
+[project.optional-dependencies]
+# EVERYTHING THAT NEEDS TORCH, in one extra.
+#
+#     uv sync                 # torch-free: tfmodisco, analysis, the launchers
+#     uv sync --extra torch   # adds training, benchmarking, attribution
+#
+# The split is by DEPENDENCY, not by task: tangermeme and bpnet-lite both
+# require torch, so every script importing either belongs on the torch side even
+# where the science does not obviously involve a model. That is fit_*,
+# benchmark_*, attribute.py, make_negatives.py, and
+# filter_nonACGT_regions.py --save-ohe (the filtering itself is torch-free; only
+# the one-hot encoding, which goes through extract_loci, is not).
+#
+# Sherlock CANNOT install this extra, which is the whole point of separating it:
+# its glibc tier has no manylinux wheel for torch above 2.6.0, newer versions
+# fall back to an sdist build that fails, and 2.6.0 is too old for cherimoya's
+# torch.optim.Muon (2.10). conda-forge ships newer torch builds, but they do not
+# reliably use CUDA -- tried and rejected, see CLAUDE.md. So GPU work happens on
+# modern-glibc hardware and Sherlock gets the base set.
+#
+# torch >= 2.10 for torch.optim.Muon. fit_cherimoya.py raises a pointed error
+# rather than falling back to PyPI muon, which is a multi-omics framework and
+# not the optimizer, so muon is deliberately not a dependency.
+#
+# cherimoya is pinned by commit via tool.uv.sources below, not by version: 0.2.1
+# was never released to PyPI. It differs from the published 0.2.0 only by a
+# __version__ attribute in __init__.py -- cheri.py, cherimoya.py, io.py,
+# losses.py, performance.py and wrappers.py are byte-identical (verified by
+# installing both). The pin buys exact agreement with the container image and
+# immunity to tag movement, NOT different training results.
+torch = [
+    "torch>=2.10",
+    "bpnet-lite>=1.0.0",
+    "tangermeme>=1.0.0",
+    "cherimoya",
+    # Declared because src/make_negatives.py imports it directly, though
+    # tangermeme requires it too. It belongs HERE rather than in the base set,
+    # and that placement is load-bearing for Sherlock: pybigtools is
+    # manylinux_2_28-only at every version, so it always builds from source on a
+    # pre-2.28 glibc, and 0.3.0's build dies in libdeflate-sys with
+    # `no such instruction: vpdpbusd` -- GCC emitting AVX512-VNNI that Sherlock's
+    # assembler cannot assemble, the same class of failure as hdf5plugin's
+    # -march=native. Keeping it out of base means Sherlock never builds it at
+    # all, which beats pinning a version that still has to.
+    #
+    # The QC scripts also read bigWigs with pybigtools, but they run from the
+    # mamba env, where it is a conda package (environment.yml) -- so they are
+    # unaffected either way.
+    "pybigtools",
+]
+
 [tool.uv]
+# The sherlock pin (torch==2.6.0) and the cherimoya extra (torch>=2.10) are
+# never installed together, so let uv resolve them independently rather than
+# failing to find one universal torch that satisfies both.
+conflicts = [
+    [
+        { extra = "sherlock" },
+        { extra = "cherimoya" },
+    ],
+]
+
 
 # macs3 is a transitive dependency of both bpnet-lite and cherimoya, and NOTHING
 # in this repo imports it. It ships no wheels at any version, so uv builds it
@@ -77,8 +189,25 @@ dependencies = [
 override-dependencies = [
     "macs3 ; sys_platform == 'nonexistent'",
     "cykhash ; sys_platform == 'nonexistent'",
+    # modisco-lite is the DEPRECATED name for the same project. bpnet-lite 1.0.0
+    # still requires it while cherimoya 0.2.0 has moved to `modisco`, so
+    # `--extra torch` would otherwise install both -- and they ship the same
+    # `modiscolite/` package and the same `modisco` script, so the second to
+    # install silently overwrites the first. Dropped by the same unsatisfiable
+    # marker used for macs3; `modisco` in the base set provides everything it
+    # would have.
+    "modisco-lite ; sys_platform == 'nonexistent'",
 ]
 package = false
+
+# hdf5plugin, pulled in by modisco-lite, publishes no manylinux_2_17 wheel and
+# so always builds from source on Sherlock. Its build script probes the host and
+# adds -march=native, which makes GCC auto-vectorise the popcount loops in the
+# bundled SPERR sources into AVX512-VPOPCNTDQ instructions that Sherlock's
+# assembler cannot assemble. Disabling native also keeps the login node's ISA
+# out of filter plugins that jobs load on older compute nodes. Taken from
+# procap-atlas, which hit this on the same cluster.
+extra-build-variables = { hdf5plugin = { HDF5PLUGIN_NATIVE = "False" } }
 
 [tool.uv.sources]
 # Match the authoritative Apptainer image at

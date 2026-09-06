@@ -16,8 +16,8 @@ Usage:
     python src/bpnet/fit/fit_bpnet.py -e S.pombe_PROcap -f 0
 """
 
-# Derived from csRNANet's src/bpnet/fit/fit.py
-# (commit 2590f0a579afc037e7786d67c69b347eeb302440).
+# Tracks kundajelab/procap-atlas's src/bpnet/fit/fit_bpnet.py, which is this
+# repo's source of truth for io, sampling and training standards.
 
 import argparse
 import sys
@@ -83,9 +83,24 @@ def main():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--early-stopping", type=int, default=None)
+    parser.add_argument(
+        "--early-stopping", type=int, default=None,
+        help="stop after this many consecutive epochs without improvement "
+             "(default: None, from config/bpnet_params.json, training the full "
+             "--max-epochs budget). Deliberately OFF, matching procap-atlas: "
+             "re-enabling it there consistently made benchmark metrics worse, "
+             "including profile metrics, not just a profile/count tradeoff",
+    )
     parser.add_argument("--max-jitter", type=int, default=None)
     parser.add_argument("--random-state", type=int, default=None)
+    parser.add_argument(
+        "--no-ratio-cap", action="store_true",
+        help="do not cap negatives_ratio at the available pool. The cap stops a "
+             "negative being drawn more than once per epoch, but it also lowers "
+             "the negative share of each batch (12.5%% -> ~1.3%% for the densest "
+             "yeast experiment). Use this to keep the configured batch "
+             "composition and accept the repeats",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -157,6 +172,12 @@ def main():
     import torch
     from bpnetlite.bpnet import BPNet
     from tangermeme.io import extract_loci
+    from tangermeme_compat import patch_numeric_chroms
+
+    # Numeric chromosome names (A.thaliana 1-5, C.reinhardtii 1-17,
+    # P.patens 1-27) hit a dtype bug in tangermeme's BED reading. Self-retiring
+    # no-op once tangermeme is fixed -- see src/tangermeme_compat.py.
+    patch_numeric_chroms(verbose=params["verbose"])
     from torch.optim import AdamW
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -206,6 +227,41 @@ def main():
         )
     else:
         print(f"Fold {args.fold}: test={split['test_chroms']}, valid={split['valid_chroms']}")
+
+    # Cap negative_ratio at the pool actually available, so no negative is drawn
+    # more than once per epoch. `negative_ratio` is negatives PER PEAK in a
+    # batch, so an epoch over N peaks draws N * ratio; where the pool is smaller
+    # than that the same regions recycle. That is not hypothetical -- with the
+    # configured 1/7, `S.cerevisiae-Spt5IAA4h_PROcap` draws 3,377 from a pool of
+    # 327, about 10x over, because its peaks are denser than one per training
+    # window and almost no window is peak-free.
+    #
+    # Computed from the WHOLE-GENOME counts, not the fold's. PeakGenerator
+    # filters both peaks and negatives by the same `chroms`, so pool/peaks is
+    # near-constant across folds, and the exact per-fold counts are not knowable
+    # here without duplicating extract_loci. An approximate cap that is always
+    # in the right direction beats forking data_loader.py, which is
+    # byte-identical to procap-atlas's.
+    #
+    # Only ever engages for the yeasts: every other experiment's pool is at
+    # least 0.26 per peak, comfortably above 1/7.
+    # NOTE this addresses RECYCLING, not DIVERSITY, and they are orthogonal: the
+    # pool is the same N distinct windows whichever ratio is used. Capping only
+    # lowers how often each is seen, which also lowers the negative share of a
+    # batch -- 12.5% to about 1.3% for Spt5IAA4h. If the negative class's batch
+    # weight matters more than avoiding repeats, pass --no-ratio-cap.
+    configured_ratio = params["negatives_ratio"]
+    available_ratio = len(negatives) / max(len(peaks), 1)
+    if args.no_ratio_cap:
+        available_ratio = configured_ratio
+    if available_ratio < configured_ratio:
+        params["negatives_ratio"] = available_ratio
+        print(
+            f"negative_ratio capped {configured_ratio:.4f} -> {available_ratio:.4f}: "
+            f"{len(negatives):,} negatives for {len(peaks):,} peaks, so the "
+            f"configured ratio would recycle each negative "
+            f"{configured_ratio / available_ratio:.1f}x per epoch"
+        )
 
     # Training DataLoader. Delegated to data_loader.PeakGenerator (identical to
     # procap-atlas's) rather than reimplemented here: it already applies the

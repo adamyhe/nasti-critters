@@ -18,16 +18,54 @@ python src/cherimoya/fit/fit_cherimoya.py -e S.cerevisiae-Ino80ctl_PROcap -f 0 -
 python src/cherimoya/fit/fit_cherimoya.py -e D.melanogaster-S2_PROcap -f 0 --n-filters 196
 ```
 
+For every (experiment, fold) pair, use the launcher — the same one BPNet uses,
+via `src/launcher.py`, so the selection rule cannot drift between families:
+
+```bash
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --partition gpu --requeue
+python src/cherimoya/fit/launch.py --print-commands | bash    # no SLURM
+```
+
+It skips folds whose `.final.torch` exists, skips experiments with missing
+inputs, and reads `n_folds()` per species — which matters, since C. elegans has
+six folds and everything else has five.
+
 The script uses Muon for 2D weight matrices and AdamW for the remaining parameters, with warmup plus cosine learning-rate schedules.
+
+`torch.compile()` is **on by default when training** and **off by default when benchmarking**. That
+asymmetry is deliberate, not an oversight: 50 epochs amortise compilation's warmup, one inference pass
+does not. `Cherimoya.load()` itself defaults to `compile=True`, so the benchmark had been compiling
+unconditionally with no way to stop it. Override either way:
+
+```bash
+python src/cherimoya/fit/fit_cherimoya.py -e <exp> -f 0 --no-compile
+python src/cherimoya/benchmark/benchmark_cherimoya.py -e <exp> --compile
+```
+
+Both are additionally gated on `torch.compile` being usable at all — it raises on Python 3.14+ below
+torch 2.10, where the limit is Dynamo rather than Triton — and the benchmark warns rather than silently
+ignoring `--compile` when it cannot be honoured.
 
 Cluster launchers run **natively** by default and take no site-specific values;
 pass partition and GPU constraints at submit time:
 
 ```bash
-bash src/cherimoya/benchmark/cmd.sh
-sbatch --partition=gpu src/cherimoya/benchmark/slurm.sh
-sbatch --partition=gpu src/cherimoya/fit/slurm.sh          # array: one task per fold
+bash src/cherimoya/benchmark/cmd.sh -e D.melanogaster-S2_PROcap
+sbatch --partition=gpu src/cherimoya/benchmark/slurm.sh -e D.melanogaster-S2_PROcap
+sbatch --partition=gpu src/cherimoya/fit/slurm.sh D.melanogaster-S2_PROcap
 ```
+
+**The experiment is required in all three, and was previously absent from two of
+them.** `fit/slurm.sh` ran `-f $SLURM_ARRAY_TASK_ID` with no `-e`, so every array
+task exited 2; `benchmark/cmd.sh` hard-coded `D.melanogaster-S2_PROcap.json` as
+its already-done check while forwarding `"$@"` verbatim, so once fly had been
+benchmarked every other experiment reported "Skipping" and exited 0 without
+running. Both were single-experiment assumptions left over from before the
+config unification; `fit_cherimoya.py` itself has taken `-e` since `f9f60cf`.
+`fit/slurm.sh` also still carries a static `--array=0-4`, so pass
+`--array=0-5` for C. elegans or use the launcher, which gets it right per
+species.
 
 To run in a container instead, point them at an image; this repo does not define
 one, and should not — the authoritative images are maintained at
@@ -76,10 +114,18 @@ had already resolved it:
 | `PeakGenerator(signals=[params["signals"]])` — nested | a flat 2-element list now means two *independent unstranded* groups, breaking reverse-complement channel swapping |
 | `data_loader.py` is now a thin wrapper over `cherimoya.io` | it was a ~440-line frozen fork of the pre-refactor `PeakGenerator`, incompatible with the pinned version |
 
-`Cherimoya.load(path, device=...)` is unchanged and still compatible, so
-`benchmark_cherimoya.py` needed no changes. But `load()` reconstructs the model
-via `cls(**payload['config'])`, so a checkpoint written by a pre-0.2 cherimoya
-whose stored config contains `n_outputs` will not load under the pinned version.
+`Cherimoya.load(path, device=...)` is unchanged and still compatible, so the API
+port needed nothing on the benchmark side. Two later caveats do apply to it,
+neither from the 0.2 break: `load()` defaults to `compile=True`, which is why
+the benchmark now passes `compile=` explicitly (see above); and `load()`
+reconstructs the model via `cls(**payload['config'])`, so a checkpoint written
+by a pre-0.2 cherimoya whose stored config contains `n_outputs` will not load
+under the pinned version.
+
+Note also that cherimoya checkpoints are a **dict payload**, not a pickled
+module, so they are unaffected by PyTorch 2.6's `weights_only` default flip —
+unlike bpnet-lite's, which `torch.save(self, ...)` and must be read through
+`experiments.load_model()`.
 
 Historical note: the first Cherimoya models were trained while `cherimoya` was in
 early development, using commit `69f16dc7ff48ad094aafd4b93433972181c65d50`. Check

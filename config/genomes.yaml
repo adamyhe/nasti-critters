@@ -62,6 +62,10 @@
 
 species:
   D.melanogaster:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: insects
     assembly: dm6              # modENCODE/ENCODE standard for D. melanogaster
     n_chromosomes: 6    # 2L 2R 3L 3R 4 X; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -116,12 +120,16 @@ species:
       "rDNA" and the 211000* scaffolds out of the signal instead of using a decoy.
 
   M.musculus:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: vertebrates
     # mm10 (GRCm38), NOT mm39. ENCODE maps mouse data to mm9/mm10 and its
     # reference is mm10_no_alt_analysis_set_ENCODE.fasta, so mm10 is the standard
     # to remap onto. This overrides the manifest's recommended_realign_assembly
     # column, which says mm39. Consequences of the choice, all favourable:
-    #   * coordinates match csRNANet (data/mm10.fa), so mouse models there and
-    #     here are directly comparable;
+    #   * coordinates match the lab's other mouse work, so those models and
+    #     these are directly comparable;
     #   * the canonical peak-matched fold assignment was tuned on mm10;
     #   * exclusion lists exist for mm10 and not for mm39 in Boyle-Lab or ENCODE.
     # Chromosome names are identical between mm10 and mm39 (chr1-chr19, chrX/Y),
@@ -181,6 +189,10 @@ species:
       rDNA decoy matters most here. Resolve the accession before large-scale runs.
 
   C.elegans:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: nematodes
     assembly: ce11             # modENCODE/ENCODE standard for C. elegans
     n_chromosomes: 6    # I-V X; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -234,6 +246,10 @@ species:
       annotation alone (manifest Field Guide, "C. elegans caveat").
 
   S.cerevisiae:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: fungi
     assembly: R64-1-1
     n_chromosomes: 16    # I-XVI; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -262,8 +278,8 @@ species:
     blacklist: null
     blacklist_source: >-
       None published. Neither Boyle-Lab/Blacklist nor excluderanges has a
-      sacCer3/R64-1-1 set, and yeast is not an ENCODE/modENCODE organism. csRNANet's
-      convention is likewise to use exclusion lists for H.sapiens and
+      sacCer3/R64-1-1 set, and yeast is not an ENCODE/modENCODE organism. The
+      lab convention is likewise to use exclusion lists for H.sapiens and
       M.musculus only.
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
@@ -287,6 +303,10 @@ species:
       separate decoy is less critical than for mammals.
 
   S.pombe:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: fungi
     assembly: ASM294v2
     n_chromosomes: 3    # I II III; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -314,8 +334,8 @@ species:
     blacklist: null
     blacklist_source: >-
       None published. Neither Boyle-Lab/Blacklist nor excluderanges has a
-      ASM294v2 set, and yeast is not an ENCODE/modENCODE organism. csRNANet's
-      convention is likewise to use exclusion lists for H.sapiens and
+      ASM294v2 set, and yeast is not an ENCODE/modENCODE organism. The
+      lab convention is likewise to use exclusion lists for H.sapiens and
       M.musculus only.
     # Organelle contigs ALREADY IN this assembly. Needed so
     # src/qc/rrna_content.py can measure organellar content -- it would
@@ -337,6 +357,10 @@ species:
     rdna_note: rDNA repeats are present on chromosome III in the primary assembly.
 
   A.thaliana:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     assembly: TAIR10
     n_chromosomes: 5    # 1-5; caps PINTS --thread
     # Chromosomes the pipeline actually works on. bigWigs and PINTS are
@@ -402,15 +426,18 @@ species:
   # ---------------------------------------------------------------------------
 
   C.reinhardtii:
-    # Fold assignment is CANONICAL: identical in csRNANet
-    # (configs/splits/C.reinhardtii_data_fold_assignments.csv) and plant-design
-    # (configs/chrom_splits.yaml), verified equal to each other and copied
-    # unchanged. Do not retune -- diverging folds make models incomparable.
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
+    # Fold assignment is REUSED UNCHANGED from earlier lab work, after checking
+    # the two copies we hold against each other. Do not retune -- diverging
+    # folds make models incomparable with our other work.
     assembly: Chlamydomonas_reinhardtii_v5.5
     n_chromosomes: 17   # 1-17; caps PINTS --thread
     main_chromosomes: [1, 10, 11, 12, 13, 14, 15, 16, 17, 2, 3, 4, 5, 6, 7, 8, 9]
     # NOTE the division: Chlamydomonas moved from Ensembl **protists** to
-    # **plants**. csRNANet's download_genomes.sh still points at
+    # **plants** as of release-63. Older download scripts point at
     # protists/release-55, which now 404s. The assembly (v5.5) is unchanged, so
     # chromosome names and the fold assignment are unaffected.
     annotation_url: http://ftp.ensemblgenomes.org/pub/plants/release-63/gff3/chlamydomonas_reinhardtii/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.63.gff3.gz
@@ -464,8 +491,12 @@ species:
       decoys; they are outside main_chromosomes so they cannot enter a fold.
 
   P.patens:
-    # Fold assignment is CANONICAL: identical in csRNANet and plant-design,
-    # verified equal to each other and copied unchanged.
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
+    # Fold assignment is REUSED UNCHANGED from earlier lab work, after checking
+    # the two copies we hold against each other.
     assembly: Phypa_V3
     n_chromosomes: 27   # 1-27; caps PINTS --thread
     main_chromosomes: [1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 2, 20, 21, 22, 23, 24, 25, 26, 27, 3, 4, 5, 6, 7, 8, 9]
@@ -514,6 +545,10 @@ species:
       Organelles stay in the index as decoys and are outside main_chromosomes.
 
   S.moellendorffii:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     # THE ONLY SPECIES HERE WITH NO CHROMOSOMES AT ALL. v1.0 is a 759-scaffold
     # JGI draft: Ensembl reports an EMPTY karyotype and zero chromosome-coord
     # regions, 212.6 Mb total, N50 1.75 Mb, largest scaffold 6.95 Mb.
@@ -594,6 +629,10 @@ species:
       decoys but are outside main_chromosomes, so they cannot enter a fold.
 
   C.griseus:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: vertebrates
     # Chinese hamster. NOT an ENCODE organism, so bare Ensembl names.
     # CriGri-PICRH-1.0 assembles only TEN chromosomes -- 2,3,4,5,6,7,8,9,10,X.
     # Chromosome 1 is genuinely NOT assembled: it remains unplaced as
@@ -677,6 +716,10 @@ species:
   # rrna_content.py can measure organellar content, and excluded from
   # main_chromosomes so they never reach a fold.
   G.arboreum:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     assembly: ASM2569848v2
     assembly_accession: GCF_025698485.1
     n_chromosomes: 13
@@ -715,6 +758,10 @@ species:
   # stricter, so expect a lower pct_unique for structural reasons rather than
   # library-quality ones. Read it against the measured value, not this note.
   G.hirsutum:
+    #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
+    #: vertebrates; this repo spans four taxa, and scoring a yeast or
+    #: plant motif against a vertebrate database is meaningless.
+    jaspar_collection: plants
     assembly: Gossypium_hirsutum_v2.1
     assembly_accession: GCF_007990345.1
     n_chromosomes: 26

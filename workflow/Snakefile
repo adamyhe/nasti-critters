@@ -3,11 +3,13 @@
 Covers fetch -> map -> signal -> peaks, terminating at
 data/procap/{experiment}_{pl,mn}.bw and _peaks.bed.gz.
 
-GC-matched negatives are NOT part of this. They are a model-training input
-rather than a label, and are the only thing here that needs bpnet-lite (PyPI
-only, so it cannot go in environment.yml). Excluding them is what keeps the
-whole pipeline runnable from the mamba env with no venv. Run
-src/make_negatives.py separately before training.
+GC-matched negatives are NOT part of this. They are the only thing here that
+needs `tangermeme` (PyPI only, so it cannot go in environment.yml), and
+excluding them is what keeps the whole pipeline runnable from the mamba env with
+no venv. Run src/make_negatives.py separately before training. Note the
+boundary is that DEPENDENCY, not the labels-versus-training distinction --
+exclusion lists are a training input too and are fetched here, because wget
+costs the boundary nothing.
 
 Out of scope by design:
   * resolve_runs.py / build_experiment_config.py -- metadata generation, not DAG
@@ -344,6 +346,35 @@ def run_fastqs(run_id):
 
 GENOME_FILES = {Path(g["fasta"]).name: sp for sp, g in GENOMES.items()}
 
+#: Exclusion lists that have to be FETCHED, basename -> species. Only the three
+#: Boyle-Lab assemblies qualify: A. thaliana's list is versioned in-repo under
+#: config/blacklists/ (excluderanges ships it as R .rds only) and the other eight
+#: species have none published, so both are absent from this map and no rule
+#: tries to download them.
+BLACKLIST_FILES = {
+    Path(g["blacklist"]).name: sp
+    for sp, g in GENOMES.items()
+    if g.get("blacklist_url") and g.get("blacklist")
+}
+for _name, _sp in BLACKLIST_FILES.items():
+    # The rule below writes into data/, so a fetched list configured anywhere
+    # else would be produced at a path nothing reads. Fail at DAG construction
+    # rather than downloading into the void.
+    _configured = GENOMES[_sp]["blacklist"]
+    if Path(_configured).parent != Path("data"):
+        raise WorkflowError(
+            f"{_sp}: blacklist_url is set but blacklist is '{_configured}', "
+            "which is not under data/. Fetched lists must live in data/; "
+            "versioned ones (see A. thaliana) must have no blacklist_url."
+        )
+
+
+def blacklist_targets():
+    """Fetched exclusion lists for the species actually being built."""
+    species = {EXPERIMENTS[e]["species"] for e in TARGETS}
+    return [f"{REPO_ROOT}/data/{name}"
+            for name, sp in BLACKLIST_FILES.items() if sp in species]
+
 wildcard_constraints:
     exp="|".join(re.escape(e) for e in EXPERIMENTS) if EXPERIMENTS else "$^",
     run="[A-Z]RR[0-9]+",
@@ -356,21 +387,29 @@ wildcard_constraints:
     ext="gtf|gff3",
     species="|".join(re.escape(s) for s in GENOMES),
     genome_file="|".join(re.escape(g) for g in GENOME_FILES) if GENOME_FILES else "$^",
+    blacklist_file=("|".join(re.escape(b) for b in BLACKLIST_FILES)
+                    if BLACKLIST_FILES else "$^"),
     strand="pl|mn",
     fq=".+\\.fastq\\.gz",
 
 
 # ------------------------------------------------------------------- targets
 rule all:
-    """Label generation: bigWigs and peak calls.
+    """Label generation: bigWigs and peak calls, plus the fetched exclusion lists.
 
-    GC-matched negatives are deliberately NOT here. They are a model-training
-    input, not a label, and the only thing in this repo that needs bpnet-lite --
-    a PyPI-only package that cannot go in environment.yml. Keeping them out is
-    what lets the whole pipeline run from the mamba env with no venv and no GPU
-    stack. Build them separately with src/make_negatives.py before training.
+    GC-matched negatives are deliberately NOT here. They are the one thing in
+    this repo that needs `tangermeme` -- PyPI-only, so it cannot go in
+    environment.yml -- and keeping them out is what lets the whole pipeline run
+    from the mamba env with no venv and no GPU stack. Build them separately with
+    src/make_negatives.py before training.
+
+    Exclusion lists ARE here even though they too are a training input rather
+    than a label, because the boundary above is a DEPENDENCY one: fetching them
+    needs wget and nothing more. They were previously in neither driver's DAG,
+    which cost 114 of 214 training jobs -- see rule fetch_blacklist.
     """
     input:
+        blacklist_targets(),
         expand(f"{OUT}/{{exp}}_pl.bw", exp=TARGETS),
         expand(f"{OUT}/{{exp}}_mn.bw", exp=TARGETS),
         expand(f"{OUT}/{{exp}}_peaks.bed.gz", exp=TARGETS),
@@ -415,6 +454,17 @@ rule fetch_only:
          for fq in run_fastqs(run)],
         [f"{REPO_ROOT}/{g['fasta']}" for sp, g in GENOMES.items()
          if sp in {EXPERIMENTS[e]["species"] for e in TARGETS}],
+        blacklist_targets(),
+
+
+rule blacklists:
+    """Just the fetched exclusion lists. Under 60 KB total, so this is the
+    cheapest way to unblock `launch.py` on an existing tree:
+    `snakemake blacklists -c1`. The other nine species need nothing -- eight
+    have no published list and A. thaliana's is versioned in-repo.
+    """
+    input:
+        blacklist_targets(),
 
 
 rule signal_only:
@@ -441,6 +491,45 @@ rule fetch_genome:
              --timeout=60 -O {output}.gz {params.url} > {log} 2>&1
         gunzip -f {output}.gz >> {log} 2>&1
         """
+
+
+rule fetch_blacklist:
+    """Boyle-Lab exclusion list. A TRAINING input, unlike everything else here.
+
+    It lives in the DAG anyway, and the reason is worth being precise about: the
+    boundary that keeps `workflow/Snakefile` runnable from the mamba env with no
+    venv and no GPU stack is a DEPENDENCY one, not a labels-versus-training one.
+    Fetching a list needs wget and nothing else, so it costs that boundary
+    nothing -- where GC-matched negatives need PyPI-only tangermeme and
+    therefore cannot come in.
+
+    It is here because it was in NEITHER driver's DAG: only
+    `run_procap_pipeline.py --fetch-genomes` fetched these, so a Snakemake-driven
+    run left all three absent and `launch.py` then skipped every mouse, fly and
+    worm experiment with `missing data - blacklist[0]`. That is 114 of 214
+    (experiment x fold) jobs, silently, for three files totalling under 60 KB.
+    Same class of asymmetry as `rdna_accession`, which this driver used to ignore
+    while the serial one read it -- keep the two in step.
+
+    The served files are genuinely gzipped despite arriving from raw
+    githubusercontent (`gzip compressed data, was "ce11-blacklist.v2.bed"`), so
+    this wgets straight to the .bed.gz with no gunzip. An earlier note in
+    CLAUDE.md called them plain BEDs; it was wrong.
+    """
+    output:
+        protected(f"{REPO_ROOT}/data/{{blacklist_file}}")
+    params:
+        url=lambda w: GENOMES[BLACKLIST_FILES[w.blacklist_file]]["blacklist_url"],
+    resources:
+        downloads=1,
+    retries: 2
+    log:
+        f"{WORK}/logs/fetch_blacklist/{{blacklist_file}}.log"
+    shell:
+        "mkdir -p $(dirname {output}) $(dirname {log}) && "
+        "wget -nv --tries=3 --waitretry=10 --retry-connrefused "
+        "--timeout=60 -O {output} {params.url} > {log} 2>&1 && "
+        "test -s {output} && gzip -t {output}"
 
 
 rule faidx:
@@ -487,10 +576,18 @@ rule fetch_decoy:
     """rDNA decoy sequence from ENA.
 
     Run-on assays capture Pol I as well as Pol II, so PRO-cap libraries carry
-    abundant rDNA reads. Where the assembly has no rDNA (mm10, dm6 and ce11 have
-    none at all), those reads mismap onto rDNA-like fragments in the nuclear
-    genome; a decoy contig absorbs them instead. This is why ENCODE aligns to
-    genome + rDNA.
+    abundant rDNA reads. Where the array is MISSING from the assembly those reads
+    mismap onto degenerate rDNA-like fragments in the nuclear genome; a decoy
+    holding the true full-length sequence outscores those fragments and absorbs
+    them instead. This is why ENCODE aligns to genome + rDNA.
+
+    **mm10 is the only species here that needs one.** An earlier version of this
+    docstring said mm10, dm6 and ce11 all lack rDNA, which is wrong: dm6 carries
+    the array on chrUn_CP007120v1 (76,973 bp) and ce11 on chrI:15062083-15071033,
+    and masking a real in-assembly locus would discard true signal. Hence
+    `rdna_accession` is BK000964.3 for mouse and null for the other eleven. The
+    other users of this rule are organelle decoys, which fix reads that cannot
+    map at all rather than reads that mismap.
     """
     output:
         f"{REPO_ROOT}/data/decoy/{{accession}}.fa"

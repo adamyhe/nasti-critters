@@ -15,11 +15,18 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
+#: This script is BPNet-only; cherimoya attribution is blocked on
+#: DeepLIFT rescale rules for its LayerNorm (see CLAUDE.md).
+FAMILY = "bpnet"
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
 from experiments import (  # noqa: E402
-    IGNORE,
+    ATTR_DIR,
     Experiment,
+    attribution_path,
+    filtered_loci_path,
+    IGNORE,
+    load_model,
     load_params,
 )
 
@@ -36,6 +43,46 @@ def load_bed(path: str | Path) -> pd.DataFrame:
     )
 
 
+def nucleotide_frequency_references(X, n=1, random_state=None):
+    """Soft PFM references from each sequence's own observed base frequencies.
+
+    Ported from procap-atlas. One reference per input sequence: the sequence's
+    A/C/G/T frequencies repeated at every position, so the baseline is
+    composition-matched but carries no positional information at all.
+
+    Why this rather than dinucleotide shuffling, which is bpnet-lite's and
+    tangermeme's default: upstream's locus diagnostics found that **dinucleotide
+    shuffles sometimes produce ACTIVE references** -- sequences with cryptic
+    promoter-like signal, occasionally as active as or more active than the
+    genomic input. That makes the baseline reference-sensitive rather than
+    neutral, which is the one property a DeepLIFT reference has to have.
+
+    The argument is stronger in this repo than upstream, because it is
+    multi-species and several of these genomes are far denser than human. In
+    S. cerevisiae there are 1.2-4.1 peaks per 2114 bp training window, so almost
+    every window contains a promoter; a shuffle that preserves local
+    dinucleotide composition there is correspondingly more likely to reassemble
+    something initiation-competent. It is the same reasoning that made the
+    initiator PWM measure use relative entropy against LOCAL base composition
+    rather than a uniform background -- promoter context is not genome average.
+
+    Shape is (N, n, 4, L), which is what tangermeme's reference interface wants.
+    Passed as a CALLABLE, so references are built per batch and never go through
+    tangermeme's tensor-reference one-hot validator, which would reject a soft
+    (non-one-hot) tensor.
+    """
+    if n < 1:
+        raise ValueError("n must be at least 1")
+
+    frequencies = X.float().mean(dim=-1, keepdim=True)
+    return (
+        frequencies.expand(-1, -1, X.shape[-1])
+        .unsqueeze(1)
+        .expand(-1, n, -1, -1)
+        .clone()
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -47,9 +94,46 @@ def main():
         choices=["counts", "profile"],
         default="profile",
     )
+    parser.add_argument(
+        "--loci", type=str, default=None, metavar="BED",
+        help="attribute over this BED. DEFAULT is the experiment's non-ACGT "
+             "filtered set from launch_filter.py, which is mandatory rather "
+             "than a convenience: deep_lift_shap refuses a sequence containing "
+             "an unknown base, and extract_loci(ignore=...) blanks such a "
+             "position rather than dropping the locus, so attributing the raw "
+             "peaks fails wherever any window holds an N. Override only for a "
+             "genuinely different locus set -- its filename stem then goes into "
+             "the output name so it cannot overwrite the default run",
+    )
     parser.add_argument("--models-dir", type=str, default=None)
+    parser.add_argument(
+        "--reference-mode",
+        choices=("frequency", "dinucleotide"),
+        default="frequency",
+        help="DeepLIFT reference baseline (default: %(default)s). 'frequency' "
+             "uses one soft nucleotide-frequency reference per sequence; "
+             "'dinucleotide' uses bpnet-lite/tangermeme's dinucleotide "
+             "shuffles, which upstream found can be ACTIVE at some loci -- see "
+             "nucleotide_frequency_references()",
+    )
+    parser.add_argument(
+        "--n-shuffles", type=int, default=None,
+        help="number of dinucleotide shuffles; only used with "
+             "--reference-mode dinucleotide (default: from "
+             "config/bpnet_params.json, 20). Frequency mode forces 1, since "
+             "that reference is deterministic and repeats would be identical",
+    )
     parser.add_argument("--output-fname", type=str, default=None)
-    parser.add_argument("--save-ohe", type=str, default=None)
+    parser.add_argument(
+        "--no-progress", dest="progress", action="store_false",
+        help="suppress the tqdm progress bars. They are ON by default and go "
+             "to stderr. There are two: an outer bar over folds, since each is "
+             "a full deep_lift_shap pass, and tangermeme's own inner bars",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="verbose output beyond the progress bars",
+    )
     args = parser.parse_args()
 
     try:
@@ -62,9 +146,33 @@ def main():
             print(f"Error: missing {m}", file=sys.stderr)
         sys.exit(1)
 
+    # The filtered set is the DEFAULT, not an opt-in: see --loci's help. Fail
+    # here with the command that produces it rather than letting extract_loci
+    # succeed and deep_lift_shap raise something that names neither.
+    default_loci = filtered_loci_path(exp.id)
+    loci_path = Path(args.loci).resolve() if args.loci else default_loci
+    if not loci_path.exists():
+        print(
+            f"Error: loci not found: {loci_path}\n"
+            + ("" if args.loci else
+               f"  The non-ACGT filtered set is required before attribution. "
+               f"Build it with:\n"
+               f"    python src/bpnet/attribute/launch_filter.py -e {exp.id}"),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     params = load_params("bpnet", {})
+    if args.verbose:
+        params["verbose"] = True
+    # tangermeme's `verbose` IS the tqdm bar, so progress is wired to
+    # --no-progress rather than to -v: attribution is a long job and should show
+    # progress without turning on every other message. Same split as the
+    # benchmark scripts. This script had no -v whatsoever, so params["verbose"]
+    # was permanently false from bpnet_params.json and no bar could ever appear.
+    progress = args.progress or params["verbose"]
     params.update({
-        "loci": str(exp.peaks),
+        "loci": str(loci_path),
         "sequences": str(exp.sequences),
         "signals": [str(x) for x in exp.signals],
         "controls": [str(x) for x in exp.controls] if exp.controls else None,
@@ -81,18 +189,51 @@ def main():
 
     params["attribute_type"] = args.attribute_type
     params["model_fnames"] = [str(f["model"]) for f in folds]
-    chroms = [c for f in folds for c in f["test_chroms"]]
-    params["output_fname"] = str(
-        REPO_ROOT / (args.output_fname
-                     or f"attr/{exp.id}_attr_{args.attribute_type}.npz")
-    )
-    params["save_ohe"] = str(REPO_ROOT / args.save_ohe) if args.save_ohe else None
+    # Every chromosome that appears in the fold assignment, i.e. no restriction
+    # in practice -- attribution deliberately covers ALL loci and averages each
+    # one over every fold's model, matching procap-atlas. It is an ensemble
+    # attribution, NOT a held-out estimate, which is why it does not mirror the
+    # per-fold structure benchmark_predictions.py uses.
+    #
+    # `test_chroms` is None under peak-level splits (S. pombe, S. moellendorffii)
+    # because filtering happens on the peak table instead, so flattening it
+    # directly raised `TypeError: 'NoneType' object is not iterable` for those
+    # two species. None here means no chromosome filter, which is the right
+    # answer: their peaks are all in the fold table already.
+    chroms = [c for f in folds for c in (f["test_chroms"] or [])] or None
+    if args.n_shuffles is not None:
+        params["n_shuffles"] = args.n_shuffles
+    # The reference mode is in the default filename because it changes the
+    # numbers: without it, a frequency-mode run silently overwrites a
+    # dinucleotide-mode one and nothing on disk records which produced it.
+    # Upstream's path omits it; this is a deliberate small divergence.
+    if args.output_fname:
+        params["output_fname"] = str(REPO_ROOT / args.output_fname)
+    elif loci_path != default_loci:
+        # A custom locus set gets its own name for the same reason the reference
+        # mode does: different loci, different numbers, and nothing else on disk
+        # would record which set produced the file.
+        stem = loci_path.name.split(".")[0]
+        params["output_fname"] = str(
+            ATTR_DIR / FAMILY / f"{exp.id}_{stem}_attr_{args.attribute_type}"
+                                f"_{args.reference_mode}.npz")
+    else:
+        params["output_fname"] = str(
+            attribution_path(FAMILY, exp.id, args.attribute_type,
+                             args.reference_mode))
 
     import torch
     from bpnetlite.attribute import _ProfileLogitScaling
-    from bpnetlite.bpnet import BPNet, ControlWrapper, CountWrapper, ProfileWrapper
+    from bpnetlite.bpnet import ControlWrapper, CountWrapper, ProfileWrapper
     from tangermeme.deep_lift_shap import _nonlinear, deep_lift_shap
+    from tqdm import tqdm
     from tangermeme.io import extract_loci
+    from tangermeme_compat import patch_numeric_chroms
+
+    # Numeric chromosome names (A.thaliana 1-5, C.reinhardtii 1-17,
+    # P.patens 1-27) hit a dtype bug in tangermeme's BED reading. Self-retiring
+    # no-op once tangermeme is fixed -- see src/tangermeme_compat.py.
+    patch_numeric_chroms(verbose=params["verbose"])
 
     loci = load_bed(params["loci"])
     X = extract_loci(
@@ -102,36 +243,53 @@ def main():
         out_window=params["out_window"],
         chroms=chroms,
         max_jitter=0,
-        verbose=params["verbose"],
+        verbose=progress,
         min_counts=None,
         max_counts=None,
         ignore=IGNORE,
     ).to(torch.float32)
 
-    if params["save_ohe"] is not None:
-        Path(params["save_ohe"]).parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(params["save_ohe"], X.to(torch.uint8).numpy())
-
-    n_outputs = params["n_outputs"] or len(params["signals"])
-    n_control_tracks = (
-        params["n_control_tracks"]
-        if params["n_control_tracks"] is not None
-        else 0 if params["controls"] is None else len(params["controls"])
-    )
-    trimming = (params["in_window"] - params["out_window"]) // 2
+    # deep_lift_shap REFUSES a sequence with an unknown base -- `ValueError: X
+    # must be one-hot encoded. and cannot have unknown characters.` -- and
+    # `ignore=IGNORE` above is precisely what creates one: it keeps the locus and
+    # zeroes that column rather than dropping it (verified against tangermeme
+    # 1.4.1). Both reference modes fail; the frequency reference does not rescue
+    # it, since the check is in deep_lift_shap itself, not in the shuffle.
+    #
+    # Caught here because the library's message says nothing about which loci or
+    # what to do, and the remedy is a whole separate script.
+    blank = (X.sum(dim=1) == 0).any(dim=-1)
+    if blank.any():
+        n = int(blank.sum())
+        first = [int(i) for i in blank.nonzero()[:5, 0]]
+        print(
+            f"Error: {n:,} of {len(X):,} loci contain a non-ACGT base "
+            f"(rows {first}{'...' if n > 5 else ''}). deep_lift_shap cannot "
+            f"attribute these.\n"
+            f"  Filter them out first, then attribute the filtered set:\n"
+            f"    python src/bpnet/attribute/launch_filter.py -e {exp.id}\n"
+            f"    python src/bpnet/attribute/attribute.py -e {exp.id} "
+            f"--loci {filtered_loci_path(exp.id)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     attributions = []
-    for model_path in params["model_fnames"]:
-        model = BPNet(
-            n_filters=params["n_filters"],
-            n_outputs=n_outputs,
-            n_control_tracks=n_control_tracks,
-            count_loss_weight=params["count_loss_weight"],
-            n_layers=params["n_layers"],
-            trimming=trimming,
-            verbose=params["verbose"],
-        )
-        model.load_state_dict(torch.load(model_path, weights_only=True))
+    # Outer bar over folds: each iteration is a whole deep_lift_shap pass over
+    # every locus, so without it the only feedback for minutes at a time is
+    # tangermeme's inner bar restarting from zero with no indication of how many
+    # more times it will do that.
+    for model_path in tqdm(
+        params["model_fnames"], desc=f"{exp.id} {args.attribute_type} folds",
+        unit="fold", disable=not progress,
+    ):
+        # The checkpoint IS the model -- see load_model()'s docstring. The block
+        # this replaced also read params["n_outputs"] and
+        # params["n_control_tracks"], which are set NOWHERE: not in
+        # config/bpnet_params.json, not in the params.update() above, and behind
+        # no CLI flag. So this script raised KeyError before it ever reached the
+        # load.
+        model = load_model(model_path)
 
         model = ControlWrapper(model)
         additional_nonlinear_ops = None
@@ -141,20 +299,31 @@ def main():
             model = ProfileWrapper(model)
             additional_nonlinear_ops = {_ProfileLogitScaling: _nonlinear}
 
-        attributions.append(
-            deep_lift_shap(
-                model,
-                X,
-                hypothetical=True,
-                batch_size=params["batch_size"],
-                n_shuffles=params["n_shuffles"],
-                random_state=params["random_state"],
-                verbose=params["verbose"],
-                additional_nonlinear_ops=additional_nonlinear_ops,
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                warning_threshold=0.01,
-            ).numpy()
-        )
+        if args.reference_mode == "frequency":
+            # n_shuffles=1: the frequency reference is deterministic, so more
+            # would be byte-identical copies.
+            references, n_shuffles = nucleotide_frequency_references, 1
+        else:
+            references, n_shuffles = None, params["n_shuffles"]
+
+        attribution_kwargs = {
+            "model": model,
+            "X": X,
+            "hypothetical": True,
+            "batch_size": params["batch_size"],
+            "n_shuffles": n_shuffles,
+            "random_state": params["random_state"],
+            "verbose": progress,
+            "additional_nonlinear_ops": additional_nonlinear_ops,
+            "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "warning_threshold": 0.01,
+        }
+        # Only set `references` for frequency mode; omitting it entirely is what
+        # selects tangermeme's own dinucleotide shuffling.
+        if references is not None:
+            attribution_kwargs["references"] = references
+
+        attributions.append(deep_lift_shap(**attribution_kwargs).numpy())
 
         del model
         if torch.cuda.is_available():

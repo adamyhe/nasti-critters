@@ -31,7 +31,7 @@ model** — conditions and assay families are not multi-tasked into shared heads
 
 Dataset selection, accessions, and caveats come from the curated manifest in
 `planning/` (also exported as TSVs there). Human K562 PRO-cap configs from the
-csRNANet workspace are intentionally not included here.
+lab's other workspaces are intentionally not included here.
 
 ## Install
 
@@ -82,19 +82,21 @@ awk 'FNR>1 && $NF!="no UMI signature"' qc/umi/*.tsv
 Run just the QC against existing signal with `snakemake qc -c8`.
 
 The DAG stops at peak calls. **GC-matched negatives are not part of it** — they
-are a model-training input rather than a label, and are the only step that needs
-`bpnet-lite` (PyPI-only, so it can never live in `environment.yml`). Build them
-from the venv before training:
+are a model-training input rather than a label. What keeps them out of the DAG is
+`tangermeme`, which is PyPI-only and so can never live in `environment.yml`.
+Build them from the venv before training:
 
 ```bash
-uv run python src/make_negatives.py --tier include conditional
+uv run python src/make_negatives.py
 ```
 
 For model work, add the uv venv on top. Activate it **last** so its interpreter
 wins over anything conda pulled in:
 
 ```bash
-uv sync                      # creates .venv from pyproject.toml + uv.lock
+uv sync --extra torch        # creates .venv from pyproject.toml + uv.lock
+# or, on a CPU-only machine (Sherlock), the torch-free base set:
+uv sync                      # tfmodisco, analysis and the launchers only
 source .venv/bin/activate    # or run jobs with `uv run ...`
 ```
 
@@ -369,6 +371,13 @@ python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py
 ```
 
+Without SLURM, `--print-commands` emits the same job selection as bare shell
+commands, one per line, and submits nothing:
+
+```bash
+python src/bpnet/fit/launch.py --print-commands | bash
+```
+
 ### Open questions and resolved ones
 
 Every experiment now has a fold assignment — `launch.py` reports **214
@@ -380,7 +389,7 @@ worth knowing before trusting numbers:
 | Unexplained mapping residuals | *P. patens* 38 pts, *C. reinhardtii* 48 pts, *A. thaliana* ~50%, all **after** adjusting for rRNA. Not explained by adapter, assembly or rRNA content |
 | 18% of the cotton libraries in STAR's `unmapped: other` | not the match fraction, not the mismatch filter (0.00%), not multimapping — so no ENCODE parameter accounts for it. `--winAnchorMultimapNmax` is the untested guess |
 | `P.patens` / `C.griseus` rDNA unresolved | both `null`; no reference sequence exists to use as a sink. C. griseus is a rodent, so it is the one to watch |
-| `C.elegans` / `C.griseus` / both cottons folds originate here | push them to plant-design before using those species elsewhere, or a locus in test here becomes train there |
+| `C.elegans` / `C.griseus` / both cottons folds originate here | carry them across before using those species elsewhere, or a locus in test here becomes train there |
 | In-assembly rDNA in both yeasts | no published exclusion list and no outlier filter, so their rDNA arrays will be among the highest-signal PINTS calls. Real Pol I loci, not artifacts, and `log1p` compresses them — but check before publishing yeast numbers |
 
 Resolved since this list was written, kept here so they are not re-investigated:
@@ -399,7 +408,7 @@ Resolved since this list was written, kept here so they are not re-investigated:
 | `rdna_accession: null` for every species | mouse uses `BK000964.3`; the other five original species already carry their rDNA in-assembly, so they need none |
 | `Tome2018_mm_CoPRO` "paired-end" | curation error of the same kind as Liver: ENA reports both runs SINGLE (1 FASTQ, no `nominal_length`, 76.0 bp). The paired description is of CoPRO the assay, not of the deposit |
 | `Shamie2021_cg_5GRO` organism looked wrong | it is not: `BMDM/Brain/Kidney/Liver/Lung` read like Glass-lab mouse names, but ENA reports 72/72 runs as *Cricetulus griseus* — a Chinese hamster TSS atlas |
-| `C.reinhardtii` / `P.patens` folds | reused verbatim from csRNANet and plant-design, after verifying the two upstream copies are identical |
+| `C.reinhardtii` / `P.patens` folds | reused unchanged from earlier lab work, after checking the two copies we hold against each other |
 | `make_negatives.py` `CHROM_EXCLUDE` under-covered | replaced by `main_chromosomes` from `genomes.yaml`, applied to peaks, signal and chrom.sizes for every species. The old regexes were also actively wrong, not just sparse: matching `_` over the whole BED line dropped legitimate `chr2L` peaks whose name contained an underscore |
 | `biodatatools` subcommand unrecorded | immaterial — see below |
 | Booth2016 TAP+/TAP- "bundle" | curation error; the 2 runs per sample are technical replicates under one SRX, and no TAP- data was deposited. Both experiments now run |
@@ -503,6 +512,16 @@ Outputs land in `data/procap/`. Until the pipeline has run, `launch.py` and
 the expected state mid-re-map. The three original experiments retain their
 previous paths under `legacy_processed:` in `config/experiment_config.yaml`.
 
+**`make_negatives.py` runs entirely in-process, and must stay that way.** It is
+the one script here that runs from the **uv venv** rather than the mamba env, so
+any binary from `environment.yml` is off `PATH` for it. It used to shell out to
+three of them — `bigWigToBedGraph`/`bigWigMerge` to sum the strands, `bgzip` to
+write the filtered peaks, `samtools faidx` to build a missing index — and the
+first of those is what produced
+`ERROR ...: [Errno 2] No such file or directory: 'bigWigToBedGraph'`. All three
+are now `pybigtools`, the `gzip` module and `pyfaidx`. **Before adding a
+subprocess call here, check which environment provides it.**
+
 Generate GC-matched negatives from `config/experiment_config.yaml`:
 
 ```bash
@@ -514,6 +533,36 @@ To process only one dataset:
 ```bash
 uv run python src/make_negatives.py -e S.cerevisiae_PROcap
 ```
+
+**The two yeasts are sampled without the signal restriction, and that is a
+deliberate departure from bpnet-lite and procap-atlas.** S. cerevisiae and
+S. pombe are transcribed densely enough that the default threshold — window
+signal at or below `signal_beta x` the 1st percentile of peak signal — leaves
+only a few hundred candidate windows in the whole genome. Dropping it recovers
+3-4x more at the sparse end, with 0.0% peak overlap and median signal well
+under a random window, so there is no contamination traded for the gain. GC
+matching, the N-content filter and peak-tile masking all still apply.
+
+The species are recorded in `NO_SIGNAL_FILTER` in `src/make_negatives.py`, so
+the choice lives in the repo rather than in shell history, and every run prints
+which state it is in. Two flags override it for one run:
+
+```bash
+uv run python src/make_negatives.py --no-signal-filter     # off for every species
+uv run python src/make_negatives.py --force-signal-filter  # on for every species
+```
+
+It changes what a negative *means* for those two species — representative
+peak-free background rather than the silent tail of the genome — so treat yeast
+negatives-derived metrics as not strictly comparable with the other ten.
+
+**Training caps `negatives_ratio` at the pool that actually exists.** The
+configured ratio is 1/7 for BPNet and 1/4 for Cherimoya (negatives per peak, each
+following its own library's `PeakGenerator` default), and
+the dense yeast experiments have far fewer negatives than that implies, so both
+fit scripts lower it to `len(negatives) / len(peaks)` and say so. No negative is
+then drawn more than once per epoch. Pass `--no-ratio-cap` to keep the configured
+batch composition and accept the repeats instead.
 
 ### Cross-validation splits
 
@@ -538,12 +587,11 @@ For a species with **no** entry yet, the same flag reports peaks per
 verifies every fold member against the real contig names, because `extract_loci`
 matches literally and a readable-but-wrong name yields **zero loci in silence**.
 
-Fold assignments are copied verbatim from the canonical
-[adamyhe/plant-design](https://github.com/adamyhe/plant-design) `config/chrom_splits.yaml` wherever it has an
-entry (A. thaliana, D. melanogaster, M. musculus, S. cerevisiae, plus
-C. reinhardtii and P. patens via csRNAnet) so models stay comparable across
-repos. Four entries **originate here** and should be pushed upstream before
-those species are used elsewhere:
+There is **no public source for any of these fold assignments** — they are all
+the lab's own. Six are reused unchanged from earlier projects (A. thaliana,
+D. melanogaster, M. musculus, S. cerevisiae, C. reinhardtii, P. patens) so
+models stay comparable with our other work. Four **originate here** and should
+be carried across before those species are used elsewhere:
 
 | species | folds | note |
 | --- | --- | --- |
@@ -703,7 +751,53 @@ python src/bpnet/fit/fit_bpnet.py -e M.musculus-liver-young-female_ChROcap -f 0
 # Submit all (experiment x fold) jobs. --requeue helps on preemptible partitions.
 python src/bpnet/fit/launch.py --dry-run
 python src/bpnet/fit/launch.py --partition gpu --requeue
+
+# No SLURM: the same selection as bare commands, nothing submitted
+python src/bpnet/fit/launch.py --print-commands | bash
 ```
+
+`launch.py` has three emission modes over one selection rule — `--print-commands`
+(bare commands on stdout), `--dry-run` (full sbatch scripts) and the default
+(submit). The two flags are mutually exclusive. With `--print-commands`, skip
+messages and the summary go to **stderr**, so stdout stays pipeable; the env
+setup block is not included, so activate the mamba env and uv venv first. These
+are GPU jobs, so `| bash` runs them serially — use
+`| xargs -P N -I{} bash -c '{}'` only if N models are known to fit in VRAM.
+Cherimoya has the same launcher, over the same selection rule:
+
+```bash
+python src/cherimoya/fit/launch.py --dry-run
+python src/cherimoya/fit/launch.py --print-commands | bash
+```
+
+Attribution has one too, with a different job unit — `attribute.py` averages
+over every fold internally, so a job is (experiment × attribute type):
+
+```bash
+python src/bpnet/attribute/launch.py --dry-run
+python src/bpnet/attribute/launch.py --attribute-type profile --attribute-type counts
+```
+
+A fourth covers the non-ACGT locus filter, which attribution **requires** and
+therefore runs first — the attribution launcher skips any experiment it has not
+covered:
+`deep_lift_shap` rejects any window containing an unknown base, in both
+reference modes, and `extract_loci(ignore=...)` blanks such positions rather
+than dropping the locus. It also writes the one-hot array TF-MoDISco needs
+alongside the attributions. It requests **no GPU** —
+that step reads a FASTA and one-hot encodes, so a GPU reservation would queue it
+behind training and hold an idle card:
+
+```bash
+python src/bpnet/attribute/launch_filter.py --dry-run
+```
+
+All four are thin wrappers over `src/launcher.py`. The selection logic — which
+(experiment, fold) pairs exist, which finished, which lack inputs — is
+family-agnostic because `src/experiments.py` is keyed by family, so there is one
+implementation rather than two that can drift. The only family difference is
+`--controls`, which exists on the BPNet launcher and not the Cherimoya one,
+because `fit_cherimoya.py` has no such flag.
 
 A fold counts as done only when `{experiment}.fold{f}.final.torch` exists.
 bpnet-lite also writes `{experiment}.fold{f}.torch` whenever validation loss

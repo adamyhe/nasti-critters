@@ -36,9 +36,11 @@ dependencies:
   # --- peak merging, indexing, signal conversion ---
   - bedtools                 # genomecov -5, merge
   - htslib                   # bgzip, tabix
+  # bedGraphToBigWig only. ucsc-bigwigtobedgraph and ucsc-bigwigmerge were here
+  # for make_negatives.py, which now merges the strands in-process with
+  # pybigtools -- it runs from the uv venv, where a conda binary is not on PATH,
+  # so shelling out to them could never have worked there.
   - ucsc-bedgraphtobigwig
-  - ucsc-bigwigtobedgraph    # make_negatives.py
-  - ucsc-bigwigmerge         # make_negatives.py, legacy download scripts
   - wget
 
   # NO C/C++ toolchain is needed. Every Python dep now resolves to a wheel:
