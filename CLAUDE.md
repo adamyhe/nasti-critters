@@ -1028,6 +1028,17 @@ column.
 every job shows as pending and the totals are meaningless for judging what an edit invalidates. Reason
 about rerun-triggers from the rule definitions, or run the dry-run where the data is.
 
+**Editing `config/genomes.yaml` is invisible the same way, and worse.** It is read at parse time
+(`GENOMES = load_yaml(...)`) and is a declared input of nothing, so a rule only notices a change if the
+changed value happens to be interpolated into its own `params`. For rules whose script reads the config
+itself that is never true: `rrna_content`'s params are the script path and the FASTQ dir, so adding
+`rdna_regions` for C. reinhardtii changes **nothing** Snakemake can see — not under `mtime`, not under
+default triggers. Force it: `snakemake --forcerun rrna_content --config experiments=<exp>`.
+
+Declaring `genomes.yaml` as an input of every rule that reads it would fix the class, at the cost of
+re-running the whole corpus for any one species' edit. Until that trade is taken, treat a `genomes.yaml`
+change as needing an explicit `--forcerun` and work out which rules consume the field you touched.
+
 ## Editing the `trim` rule re-runs everything — know this before you do it
 
 `trim` has two PERSISTENT outputs (`fastp.json`, `fastp.html`) alongside its `temp()` FASTQs. So unlike
