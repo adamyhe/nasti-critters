@@ -1089,16 +1089,34 @@ experiment, so `--all --tsv` leaves one file describing only the last one. And c
 concurrent jobs on one species race for the same file, which is the whole reason the rule passes the
 path.
 
-**To make `snakemake` usable again afterwards, `--touch`** — but confirm first that the `.fai` are merely
-newer rather than different, and run it **after** regenerating by hand, since `--touch` marks the stale
-QC outputs current along with everything else:
+**The zero-risk way to run just the step you want is `--forcerun` PLUS `--allowed-rules`.** Forcing
+alone is not enough — the upstream jobs are genuinely out of date, so `--forcerun orientation_qc` still
+drags the whole chain. Restricting the rule set is what stops it, and it changes no DAG state at all:
 
-    snakemake orientation --touch --rerun-triggers mtime
-    snakemake orientation -n --rerun-triggers mtime      # expect ~nothing
+    snakemake orientation -j 48 --rerun-triggers mtime \
+        --forcerun orientation_qc --allowed-rules orientation_qc orientation
 
-`--touch` asserts the existing outputs are correct. If a `.fai` differs in *content* from what the
-bigWigs were built against, that assertion is false and a real rebuild is owed — which is the one case
-where paying for the 701 jobs is the right answer.
+Verified on a fixture reproducing the cascade (stale `.fai`, deleted `temp()` chain, absent FASTQ):
+7 jobs unrestricted, **1** with the two flags. The same shape works for the table —
+`--forcerun experiment_stats stats_table --allowed-rules experiment_stats stats_table stats`. It does
+**not** work for a rule whose inputs are genuinely missing: `rrna_content` reads the raw FASTQs, so if
+those are gone, forbidding `fetch_fastq` just moves the failure. Run that one from the script instead.
+
+**To settle the DAG so later runs stop cascading, `--touch` first and then force.** Order matters:
+`--touch` marks the stale QC outputs current along with everything else, so touching after regenerating
+would be harmless but touching *instead* of regenerating is not.
+
+    snakemake orientation --touch --rerun-triggers mtime   # then a plain -n says "Nothing to be done"
+    snakemake orientation -j 48 --rerun-triggers mtime --forcerun orientation_qc
+
+Two things measured on the fixture rather than assumed: `--touch` does **not** fabricate a missing
+input — the absent FASTQ stayed absent, so it cannot manufacture an empty file at a path the fetch
+convention treats as complete-and-verified — and the subsequent `--forcerun` genuinely re-executes the
+rule rather than touching it (the fixture's output picked up the edited script's content).
+
+`--touch` still asserts the existing outputs are correct. If a `.fai` differs in *content* from what the
+bigWigs were built against, that assertion is false and a real rebuild is owed — the one case where
+paying for the 701 jobs is the right answer, and the reason to check the `.fai` before touching.
 
 ## `--rerun-triggers mtime` CANNOT see a new input, so it cannot see a new decoy
 
