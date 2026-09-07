@@ -1018,8 +1018,16 @@ def run_modisco(family: str) -> None:
                 continue
 
             out.parent.mkdir(parents=True, exist_ok=True)
+            # Through run_modisco.py, NOT `modisco` directly: modisco-lite
+            # crashes on an attribution track with no negative windowed sums,
+            # which is what took out the counts head of S.cerevisiae_PROcap and
+            # S.pombe_PROcap. That front end patches the library and then hands
+            # argv to the real CLI unchanged. `report` is unaffected and still
+            # calls modisco directly. See src/modiscolite_compat.py.
+            runner = REPO_ROOT / f"src/{family}/modisco/run_modisco.py"
             cmd = (
-                f"modisco motifs -s {shlex.quote(str(ohe))} "
+                f"python {shlex.quote(str(runner))} motifs "
+                f"-s {shlex.quote(str(ohe))} "
                 f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(out))} "
                 f"-n {args.n_seqlets} -l {args.leiden} -w {args.window} -v"
             )
@@ -1057,8 +1065,8 @@ def run_modisco_report(family: str) -> None:
 
             Skips an experiment whose .h5 is missing (run launch.py first) or
             whose report directory already exists. The MEME motif database is
-            resolved per species from config/genomes.yaml's jaspar_collection;
-            nothing fetches those files, so download them into data/motifs/.
+            resolved per species from config/genomes.yaml's jaspar_collection.
+            Fetch the databases first: python src/bpnet/modisco/fetch_motif_dbs.py
 
             Usage:
                 python {launcher} --dry-run

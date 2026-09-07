@@ -330,6 +330,8 @@ python src/bpnet/attribute/launch_filter.py --dry-run     # one CPU job per expe
 python src/bpnet/attribute/launch.py --dry-run    # requires the filtered set
 
 # TF-MoDISco: motifs then report. Both CPU-only; motifs is long (allow days).
+# The report needs the JASPAR MEME databases; fetch them once (5 files, ~1.3 MB).
+python src/bpnet/modisco/fetch_motif_dbs.py
 python src/bpnet/modisco/launch.py --dry-run
 python src/bpnet/modisco/launch_report.py --dry-run
 ```
@@ -712,9 +714,33 @@ it:
 | fungi | S. cerevisiae, S. pombe |
 | plants | A. thaliana, C. reinhardtii, P. patens, S. moellendorffii, G. arboreum, G. hirsutum |
 
-**Nothing fetches those files** — download them from JASPAR into `data/motifs/` as
-`JASPAR2026_CORE_{collection}_non-redundant_pfms_meme.txt`. They are deliberately not a pipeline step:
-the report is a convenience layer and the database has no effect on which motifs modisco discovers.
+**Fetch them with `src/bpnet/modisco/fetch_motif_dbs.py`** — standalone, and deliberately **not** a
+Snakemake rule: the report is a convenience layer and the database has no effect on which motifs modisco
+discovers, so it must not become a network dependency of the pipeline. Same placement argument as
+`src/make_negatives.py`, for a different reason. Twelve species collapse to **5 files** (plants ×6,
+fungi ×2, vertebrates ×2, insects ×1, nematodes ×1), ~1.3 MB total; `data/` is gitignored, so they are
+not committed.
+
+    python src/bpnet/modisco/fetch_motif_dbs.py --dry-run
+    python src/bpnet/modisco/fetch_motif_dbs.py
+    python src/bpnet/modisco/fetch_motif_dbs.py --verify-only    # exits 1 if any is missing or invalid
+
+**WHICH files are needed comes from `experiments.motif_db_path()`, and the RELEASE is parsed back out of
+the filename it returns** rather than being a flag. The downloaded name has to be the name
+`launch_report.py` looks for, so a `--release` that disagreed with `motif_db_path()` would produce files
+nothing reads. If that format string ever changes, the script exits with a message saying so instead of
+guessing a URL.
+
+**It checks CONTENT, not just the status code, because a 200 is not evidence of a file here.** This is
+the bedbase trap from the exclusion-list section: `bedbase.org/api/*` serves an SPA catch-all as HTML
+with HTTP 200. Verified against the real thing — `https://jaspar.elixir.no/` returns
+`<!DOCTYPE html>` with status 200 and is rejected. A download must start with `MEME version` **and**
+carry at least one `MOTIF` record, and it stages through a `.incoming` file that is renamed only after
+that passes, matching `fetch_fastqs.py`'s convention: **a file at the final path always means complete
+and valid.** A rejected body is left at `.incoming` for inspection rather than at the destination; a
+genuine 404 cleans up after itself. An invalid file already on disk is reported as `BAD` and
+re-downloaded.
+
 `--motif-db` overrides with a single file for every experiment, which is rarely right here.
 
 `modisco` is declared directly in `pyproject.toml` even though bpnet-lite already pulls it
@@ -725,6 +751,115 @@ ships the entry point as an old-style `data/scripts/modisco`, not a `console_scr
 `link_hits_to_compendium.py`) and `modisco/relaunch_timeout.py`. The first depends on `finemo`, which is
 Linux-only and a further scope step; the second exists to resubmit jobs that hit a wall clock, which is
 a site policy rather than a pipeline stage.
+
+## `modisco motifs` goes through `run_modisco.py`, because it crashes on a ONE-SIGNED track
+
+Hit 2026-09-07 on the first full modisco run: 81 of 84 jobs finished, G. hirsutum was still running, and
+**exactly two failed — `S.cerevisiae_PROcap` and `S.pombe_PROcap`, both on the `counts` head** — with a
+message that names nothing about attributions:
+
+    ValueError: Found array with 0 sample(s) (shape=(0,)) while a minimum of 1 is required.
+
+**The cause is upstream and mechanical.** `extract_seqlets` splits the smoothed contribution track into
+`values[values >= 0]` and `values[values < 0]` and computes a threshold for **each side
+unconditionally**. When no windowed sum is negative, `_isotonic_thresholds` gets an empty `values`:
+
+    w = len(values) / len(null_values)                  # 0 / 10000 = 0.0
+    sample_weight = concat([ones(0), ones(n2) * w])     # ALL ZEROS
+    model.fit(X, y, sample_weight=sample_weight)
+
+sklearn's `IsotonicRegression._build_y` drops zero-weight rows (`mask = sample_weight > 0`), which
+empties `y`, so the error surfaces four frames deeper in sklearn with no mention of the real problem.
+**modiscolite already supports this outcome and simply cannot reach it**: `TFMoDISco` sets
+`neg_patterns = None` when there are too few negative seqlets, so a one-signed track is an anticipated
+result — it dies while thresholding a side that has no data.
+
+**Read the EXCEPTION TYPE to tell the three degenerate cases apart** — measured on fixtures, and worth
+keeping because they present as the same "modisco crashed":
+
+| track | negative windows | modisco raises |
+| --- | --- | --- |
+| signed (normal) | ~50% | — works |
+| **non-negative, mode ≈ 0** | **0** | **`ValueError: 0 sample(s)`** in sklearn |
+| all zero | 0 | `IndexError` in `_laplacian_null` |
+| signed + large positive offset | 0 | `ZeroDivisionError` at `w` |
+
+So the `ValueError` **rules out a blank or corrupt npz** on its own: an all-zero array fails differently.
+
+**It is a CONTINUUM, not two broken experiments — and the fragility is corpus-wide.** Measured over all
+83 finished attribution files, as the fraction of per-position contributions (`(ohe * hyp).sum(axis=2)`)
+that are negative:
+
+| counts head | negative per-position | windowed min |
+| --- | --- | --- |
+| `S.pombe_PROcap` | **0.0%** | **+0.037** (crashed) |
+| `S.cerevisiae_PROcap` | **0.7%** | **+0.025** (crashed) |
+| the other 5 S. cerevisiae | 4.4 – 5.4% | −0.13 to −0.34 |
+| C. griseus brain / lung | 7.6 / 8.7% | — |
+| mouse, hamster, A. thaliana, plants | 11 – 28% | — |
+| C. elegans L3, P. patens | 41 / 45% | — |
+| D. melanogaster | 52 – 66% | — |
+| G. hirsutum | **95.6%** | — |
+
+The five surviving yeast counts runs cleared zero by 0.13–0.34 against maxima of +1.4 to +2.1, i.e.
+**narrowly**. Every `profile` run is far from the boundary. So treat this as fragile for any
+low-variance counts head — a retrain, a reseed or a depth change could tip the others over — rather than
+as a property of those two libraries.
+
+**Hypothesis refuted, recorded so it is not re-proposed: it is NOT the starved yeast negative pools.**
+The prediction was exactly backwards. The two failures have the *largest* yeast pools and the *lowest*
+peak density, while `Spt5IAA4h` — 327 negatives for 23,640 peaks, 4.14 peaks/window, the worst in the
+corpus — passed:
+
+| | peaks/window | negative pool | counts modisco |
+| --- | --- | --- | --- |
+| `S.cerevisiae_PROcap` | 1.18 | **1,905** (largest) | **FAILED** |
+| `S.pombe_PROcap` | 1.56 | 947 | **FAILED** |
+| `Spt5EtOH` → `Spt5IAA4h` | 1.89 → 4.14 | 738 → **327** | all ok |
+
+`NO_SIGNAL_FILTER` is keyed by species and covers all seven, so it cannot discriminate either. What the
+two failures do share is being the **Booth2016 pair** (`PRJNA306424`), the least dense and most
+unidirectional yeast libraries — but why their counts heads are one-signed is **not established**, only
+that the track is positive-shifted with low dynamic range (both compressed into a narrow positive band,
+maxima 0.385 and 0.477, the smallest in the corpus).
+
+**The fix is `src/bpnet/modisco/run_modisco.py` + `src/modiscolite_compat.py`, and it had to be a CLI
+front end.** Nothing here imports modiscolite — `src/bpnet/modisco/` only shells out, like `umi_tools`
+and `pints_caller` — so unlike `tangermeme_compat.py` there is **no in-process call site to patch**, and
+a shim can only reach the library by owning the process. `run_modisco.py` patches, then hands `argv` to
+the real `modisco` script via `runpy`, so every subcommand, flag and default stays whatever the installed
+version provides and there is no argument parsing to drift.
+
+- **`launcher.py` emits `python .../run_modisco.py motifs …` for motifs only**; `modisco report` is
+  unaffected and still calls `modisco` directly. The `NUMBA_NUM_THREADS=N` prefix rides on it unchanged.
+- **The sentinel is ±inf, verified inert by reading every consumer** rather than assumed:
+  `idxs = (tracks >= pos) | (tracks <= neg)` selects nothing on the empty side,
+  `transformed_neg_threshold` becomes exactly −1.0 via `sign * searchsorted(distribution, inf) / len`,
+  and `weak_thresh` takes `min(transformed_pos, abs(−1.0)) − 0.0001` so the positive side still decides
+  it.
+- **Self-retiring**, same discipline as `tangermeme_compat.py`: it functionally probes the installed
+  version with an empty `values` and does nothing if the probe passes, and refuses to install a patch
+  that fails its own probe. **modisco 2.5.2 is the latest release** (checked 2026-09-07), so there is no
+  version to upgrade to; the real fix is an early return in `_isotonic_thresholds` and is worth a
+  modisco-lite issue.
+- Verified end to end on a 400-locus one-signed fixture: the **stock CLI reproduces the exact
+  `ValueError`** and writes no `.h5`, the wrapper completes and writes one containing **`pos_patterns`
+  only, with no `neg_patterns` group** — upstream's own supported path. The patch is inert on a
+  two-signed track (identical output patched and unpatched, and `_isotonic_thresholds` returns the same
+  value for non-empty input).
+
+**Diagnose a future instance by probing the arrays, not the log.** Reproduce modisco's own slicing
+(central `-w` window, transpose to `(N, L, 4)`, 20 bp rolling sums) and count negative windows; zero
+means it will crash. `neg hyp` near 50% with `neg pos` near 0 is the fingerprint — the *hypothetical*
+array is signed, and it is the value **at the observed base** that is one-signed.
+
+**One unrelated anomaly this survey turned up, still open: `G.hirsutum-ovule_GROcap` is the corpus
+outlier in the opposite direction.** It is the only file where `neg hyp` is *below* 50% (39.8% counts,
+38.7% profile) while `neg pos` is **95.6% for BOTH heads** — i.e. the observed base is almost always the
+negative one, and the two attribute types agree to three significant figures where every other
+experiment's differ substantially. Its profile range (−484 to +461) is also the widest here. It is the
+tetraploid with 171,449 loci, so a subgenome effect is plausible, but nothing about it is established.
+Worth a look once its job finishes.
 
 ## Where benchmark output goes
 
