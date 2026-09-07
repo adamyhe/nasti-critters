@@ -1102,19 +1102,31 @@ Verified on a fixture reproducing the cascade (stale `.fai`, deleted `temp()` ch
 **not** work for a rule whose inputs are genuinely missing: `rrna_content` reads the raw FASTQs, so if
 those are gone, forbidding `fetch_fastq` just moves the failure. Run that one from the script instead.
 
-**To settle the DAG so later runs stop cascading, `--touch` first and then force.** Order matters:
-`--touch` marks the stale QC outputs current along with everything else, so touching after regenerating
-would be harmless but touching *instead* of regenerating is not.
+**`--touch` DOES NOT WORK ON THIS PIPELINE once the FASTQs are deleted, and that is structural.**
+`fetch_fastq` declares `protected()`, and `--touch` runs each job's postprocess, which calls
+`handle_protected()` -> `IOFile.protect()` -> `os.lstat` on the output. On a deleted FASTQ that is:
 
-    snakemake orientation --touch --rerun-triggers mtime   # then a plain -n says "Nothing to be done"
-    snakemake orientation -j 48 --rerun-triggers mtime --forcerun orientation_qc
+    FileNotFoundError: [Errno 2] No such file or directory: '.../data/fastq/DRR991137_1.fastq.gz'
 
-**Do NOT add `-n` to the `--touch` line.** `--touch -n` is a dry run OF THE TOUCH: it prints the whole
-DAG it would touch, which is the same alarming several-hundred-job list you are trying to get rid of, and
-it looks exactly like the touch having failed. Measured on the fixture: `--touch -n` lists 6 jobs
-including `fetch_fastq`/`trim`/`align`, the real `--touch` completes without fabricating the missing
-input, and the plain dry-run afterwards reports "Nothing to be done". There is nothing to preview —
-`--touch` writes no content, so run it and check with a plain `-n` after.
+and it takes the whole invocation down. The repo's own lifecycle is fetch -> map -> **delete the FASTQs
+to save space** (~202 GiB), so any DAG that reaches `fetch_fastq` is in this state, which is most of
+them. Reproduced on a fixture by adding `protected()` to its fetch rule — without the decorator `--touch`
+completes and skips missing files, which is why an earlier version of this note recommended it. Three of
+this pipeline's five `protected()` uses are files that legitimately get cleaned up, so do not expect
+`--touch` to be available.
+
+**So the working answer is the `--forcerun` + `--allowed-rules` pair above.** It needs no DAG state, so
+it is repeatable, and the cost is having to pass both flags every time.
+
+If you genuinely want the DAG quiet, the lever that DID work is `--cleanup-metadata` on the offending
+outputs: deleting a record leaves nothing to compare, and Snakemake then reports the file as up to date
+(this is why `chrom_sizes` disappeared from the job list after its records were cleared, even though its
+`.fai` is still newer). Weigh it carefully — a file with no provenance also stops re-triggering on code
+and params changes, which is the silent-staleness failure this file warns about elsewhere.
+
+**And `--touch -n` tells you nothing either way**: it is a dry run OF THE TOUCH, so it prints the whole
+DAG it would touch — the same several-hundred-job list you are trying to eliminate — which reads exactly
+like the touch having failed.
 
 Two things measured on the fixture rather than assumed: `--touch` does **not** fabricate a missing
 input — the absent FASTQ stayed absent, so it cannot manufacture an empty file at a path the fetch
