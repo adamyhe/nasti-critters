@@ -113,7 +113,20 @@ def near_annotated(chrom, positions, starts, halfwidth):
     return d <= halfwidth
 
 
-def run(exp, tss, flank, shifts, halfwidth):
+def parse_region(spec):
+    """CHR:START-END (1-based inclusive, as printed everywhere else here)."""
+    chrom, _, span = spec.rpartition(":")
+    if not chrom or "-" not in span:
+        raise ValueError(f"bad region {spec!r}; expected CHR:START-END")
+    a, b = span.split("-", 1)
+    return chrom, int(a.replace(",", "")), int(b.replace(",", ""))
+
+
+def in_regions(chrom, pos, regions):
+    return any(c == chrom and a <= pos + 1 <= b for c, a, b in regions)
+
+
+def run(exp, tss, flank, shifts, halfwidth, exclude=()):
     """One pass over the bigWigs, accumulating everything both tests need."""
     import numpy as np
     import pandas as pd
@@ -143,8 +156,19 @@ def run(exp, tss, flank, shifts, halfwidth):
     n = {"paired": 0, "unpaired": 0, "paired_upstream": 0}
     attr = {"annot": 0.0, "total": 0.0, "null": [0.0] * len(shifts)}
 
+    n_excluded = 0
     for chrom, pos, strand in sites:
         if chrom not in sizes:
+            continue
+        # Region exclusion exists for the C. elegans L3 case and others like it.
+        # ~17% of that library's peaks are 21U-RNA (piRNA) loci in two blocks on
+        # chrIV -- Pol II-initiated, carrying NO refGene protein-coding
+        # annotation, and densely clustered in BOTH orientations. Every one of
+        # them therefore lands in "unpaired" while producing upstream antisense
+        # from a NEIGHBOURING locus, which is the very thing the unpaired class
+        # is supposed to be free of.
+        if exclude and in_regions(chrom, pos, exclude):
+            n_excluded += 1
             continue
         s, e = pos - flank, pos + flank
         if s < 0 or e > sizes[chrom]:
@@ -203,7 +227,8 @@ def run(exp, tss, flank, shifts, halfwidth):
     # wrong, so accumulate raw and report the partition metaplots as means --
     # acceptable here because the question is the SHAPE per class, and both
     # classes are large.
-    out = {"n_sites": len(sites), "n_paired": n["paired"],
+    out = {"n_sites": len(sites) - n_excluded, "n_excluded": n_excluded,
+           "n_paired": n["paired"],
            "n_unpaired": n["unpaired"],
            "n_paired_upstream": n["paired_upstream"]}
     for key in ("paired", "unpaired"):
@@ -291,6 +316,11 @@ def main():
                          "several are used and the median taken, because one "
                          "can alias against gene spacing")
     ap.add_argument("--annotation", type=Path, default=None)
+    ap.add_argument("--exclude-region", nargs="+", action="extend", default=[],
+                    metavar="CHR:START-END",
+                    help="drop summits inside these regions, e.g. the C. elegans "
+                         "L3 21U-RNA blocks chrIV:5000000-6000000 and "
+                         "chrIV:13000000-17000000")
     ap.add_argument("--all-biotypes", action="store_true",
                     help="do NOT restrict to protein-coding (dilutes worm ~47%%)")
     ap.add_argument("--tsv", type=Path, default=None)
@@ -324,6 +354,7 @@ def main():
     import numpy as np
     import yaml
     shifts = tuple(args.shift) or NULL_SHIFTS
+    exclude = tuple(parse_region(x) for x in args.exclude_region)
     with open(REPO_ROOT / "config" / "genomes.yaml") as f:
         genomes = yaml.safe_load(f)["species"]
     # No logomaker/matplotlib: this script draws nothing.
@@ -348,7 +379,7 @@ def main():
                                  coding_only=not args.all_biotypes)
         print(f"  annotated starts: {len(tss):,} "
               f"({'all biotypes' if args.all_biotypes else 'protein-coding only'})")
-        r = run(exp, tss, args.flank, shifts, args.halfwidth)
+        r = run(exp, tss, args.flank, shifts, args.halfwidth, exclude)
         a = r["attr"]
         tot = a["total"]
         share = a["annot"] / tot if tot else float("nan")
@@ -364,6 +395,8 @@ def main():
             ratio = float("inf")
         else:
             ratio = float("nan")
+        if r["n_excluded"]:
+            print(f"  excluded by region: {r['n_excluded']:,} summits")
         print(f"  sites used: {r['n_sites']:,}  "
               f"paired {r['n_paired']:,} / unpaired {r['n_unpaired']:,} "
               f"({100 * r['n_paired'] / max(r['n_sites'], 1):.1f}% paired; "
@@ -401,7 +434,8 @@ def main():
         print(f"  => {read_partition(r)}")
         rows.append({
             "experiment": exp_id, "species": exp.species,
-            "n_sites": r["n_sites"], "n_paired": r["n_paired"],
+            "n_sites": r["n_sites"], "n_excluded": r["n_excluded"],
+            "n_paired": r["n_paired"],
             "n_unpaired": r["n_unpaired"],
             "n_paired_upstream": r["n_paired_upstream"],
             "pct_paired": round(100 * r["n_paired"] / max(r["n_sites"], 1), 1),
