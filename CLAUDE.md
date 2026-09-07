@@ -1162,12 +1162,45 @@ what licenses that. **Pass ABSOLUTE paths**, exactly as the exception printed th
         /path/to/repo/data/procap_work/genome/{A.thaliana,C.elegans,C.griseus,\
         D.melanogaster,G.arboreum,G.hirsutum,M.musculus,S.moellendorffii}.chrom.sizes
 
-**Relative paths fail with a misleading error** — `Failed to clean up metadata ... because the metadata
-was not present. ... the reason might be file system latency or still running jobs` — which points at
-neither of the two real causes. Metadata is keyed by the LITERAL path string
-(`Persistence._get_key()` is `str(f)`, no normalization), and every path in this Snakefile is absolute
-because `REPO_ROOT = Path(workflow.basedir).parent`. So a relative argument looks up a key that was never
-written. Nothing is wrong with the tree when this happens.
+**That error is misleading in TWO ways, and the second one matters more.**
+
+First, metadata is keyed by the LITERAL path string — `Persistence._get_key()` is `str(f)` with no
+normalization — and every path in this Snakefile is absolute because
+`REPO_ROOT = Path(workflow.basedir).parent`. A relative argument therefore looks up a key that was never
+written, and reports `Failed to clean up metadata ... the reason might be file system latency or still
+running jobs`, which points at neither real cause.
+
+Second, and the reason to run the dry-run before believing the error: **with absolute paths it can fail
+while having already done the thing you wanted.** There are two separate stores,
+`.snakemake/incomplete/` for markers and `.snakemake/metadata/` for records, and
+`Persistence.cleanup_metadata()` is:
+
+    key = self._get_key(target)
+    self._unmark_incomplete(key)      # deletes the MARKER
+    return self._delete_record(key)   # deletes the RECORD -- only this is reported
+
+An interrupted job wrote a marker (`started()`) and never wrote a record (`finished()` never ran), so
+the marker is deleted and the record was never there — failure is reported for the half that was already
+absent. **Re-run the dry-run rather than trusting the exit status**; the `IncompleteFilesException` is
+usually gone. Confirm on disk if you want, markers being urlsafe-base64 of the absolute path:
+
+    python - <<'EOF'
+    from base64 import urlsafe_b64encode
+    from pathlib import Path
+    root = Path('/path/to/repo')
+    for store in (root/'.snakemake/incomplete', root/'workflow/.snakemake/incomplete'):
+        for sp in ('A.thaliana', 'M.musculus'):        # etc.
+            key = str(root/'data/procap_work/genome'/f'{sp}.chrom.sizes')
+            b = urlsafe_b64encode(key.encode()).decode()
+            print(store, sp, 'PRESENT' if (store/b).exists() else 'gone')
+    EOF
+
+Check **both** stores: `.snakemake` is resolved against the WORKING directory, so running from `workflow/`
+and from the repo root build two independent ones, and a marker cleared in one still blocks the other.
+
+Note `--cleanup-metadata` deletes the whole record, not just the marker, so those files end up with NO
+provenance and fall back to mtime comparisons — which is why the `--touch` step below is usually needed
+after it rather than instead of it.
 
 `--rerun-incomplete` is the trap, and it is the remedy the error message lists second. Regenerating
 `chrom_sizes` is trivially cheap in itself — a `cut` and a `grep` — but it gives those files a NEW mtime,
