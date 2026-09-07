@@ -1109,6 +1109,13 @@ would be harmless but touching *instead* of regenerating is not.
     snakemake orientation --touch --rerun-triggers mtime   # then a plain -n says "Nothing to be done"
     snakemake orientation -j 48 --rerun-triggers mtime --forcerun orientation_qc
 
+**Do NOT add `-n` to the `--touch` line.** `--touch -n` is a dry run OF THE TOUCH: it prints the whole
+DAG it would touch, which is the same alarming several-hundred-job list you are trying to get rid of, and
+it looks exactly like the touch having failed. Measured on the fixture: `--touch -n` lists 6 jobs
+including `fetch_fastq`/`trim`/`align`, the real `--touch` completes without fabricating the missing
+input, and the plain dry-run afterwards reports "Nothing to be done". There is nothing to preview —
+`--touch` writes no content, so run it and check with a plain `-n` after.
+
 Two things measured on the fixture rather than assumed: `--touch` does **not** fabricate a missing
 input — the absent FASTQ stayed absent, so it cannot manufacture an empty file at a path the fetch
 convention treats as complete-and-verified — and the subsequent `--forcerun` genuinely re-executes the
