@@ -361,11 +361,21 @@ def summit_metaplot(sites, pl_bw, mn_bw, flank):
 #: every summit statistic. The summit IS the sense maximum, so the first few
 #: tens of bp carry the peak's own signal on both strands.
 SUMMIT_ANTI_MIN_OFFSET = 20
-#: An argmax this close to the window edge is not a peak -- it is where the
-#: noise happened to be highest on a profile with no peak in it. Measured
+#: An argmax this close to the BAND's outer edge is not a peak -- it is where
+#: the noise happened to be highest on a profile with no peak in it. Measured
 #: across the corpus: fly, A. thaliana, P. patens, S. pombe and four
 #: S. cerevisiae experiments all reported an "antisense peak" at |offset|
 #: 360-500 against a 500 bp flank, which is this artefact, not a reading.
+#:
+#: MEASURED AGAINST SUMMIT_ANTI_MAX_OFFSET, NOT THE WINDOW FLANK. The first
+#: version compared against the flank (500), which was wrong once argmax was
+#: restricted to the band: the edge where noise piles up is then 300, not 500,
+#: so a "peak" at -257 or +243 passed a check meant to exclude exactly that.
+#: The corpus showed three -- MEF_CoPRO +243 and priB_PROcap +241, both with
+#: log2 ratios of +0.13 and +0.00 (i.e. no asymmetry at all, so no peak to
+#: report), and P.patens -257, which is separately too weak to interpret.
+#: Nothing real is near the bound: every genuine peak measured sits at
+#: -97 to -159.
 SUMMIT_EDGE_MARGIN = 60
 #: Outer edge of the band. Divergent initiation sits at -50 to -250 bp; the
 #: measured corpus puts every real antisense peak at -97 to -159. Past this,
@@ -436,7 +446,8 @@ def summit_notes(sense, anti, flank):
     at = int(x[j])
     baseline = float(np.median(anti[band]))
     prominent = baseline > 0 and float(anti[j]) >= SUMMIT_PROMINENCE * baseline
-    localized = prominent and (flank - abs(at)) > SUMMIT_EDGE_MARGIN
+    localized = (prominent
+                 and (SUMMIT_ANTI_MAX_OFFSET - abs(at)) > SUMMIT_EDGE_MARGIN)
 
     note = (f"summit metaplot: antisense {frac:.1%} of windowed signal, "
             f"upstream/downstream log2 ratio {lr:+.2f}")

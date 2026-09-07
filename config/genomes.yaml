@@ -538,8 +538,36 @@ species:
     # no organelles either. 8.6% of P.patens-plateculture_5GRO is organellar
     # (8.1 cp / 0.5 mt).
     organelle_accessions: [AP005672, AB251495]   # cp 122,890 bp; mt 105,340 bp
+    # NO SINK: three 35S arrays are localized to chromosomes in V7, so rDNA
+    # reads map to their true source and the sink rule does not apply.
     rdna_accession: null
-    rdna_regions: []
+    # MEASURED on V7 2026-09-06, for the same reason as C. reinhardtii: the swap
+    # took away the rRNA source. pct_rrna came from Phypa_V3's Ensembl GFF3
+    # `rRNA` features, and V7's GWH annotation has ZERO rRNA features -- checked
+    # by downloading it, the only types present are gene, mRNA, exon, CDS,
+    # five_prime_UTR, three_prime_UTR (33,075 genes). So rrna_content.py scored
+    # organelles only, reported `rrna_indexed: no`, and pct_rrna came back BLANK
+    # -- which correctly means NOT MEASURED but silently moved this experiment's
+    # FAIL flag onto the raw rate (14%) where the adjusted rate had been ~27.8%.
+    #
+    # Method: 26 30-mers tiled across an ITS1-spanning sequence (PV944233.1,
+    # which carries partial 18S and 5.8S) plus a 5.8S (XR_002967189.2), both
+    # strands. THREE arrays, one at the start of each of these chromosomes,
+    # each ~1.4 Mb and CONTINUOUS -- hit density is uniform at ~200 per 100 kb
+    # with no internal gap over 20 kb, tapering in the final 100 kb, so the unit
+    # is ~13 kb and each array holds ~110 copies. All three start at 6,431 and
+    # end within 400 bp of each other, i.e. they are near-identical repeats.
+    # Three minor dispersed copies are excluded (5-6 hits each):
+    # GWHFIHF00000017.1:~6,933,381, GWHFIHF00000024.1:~11,169,718 and
+    # GWHFIHF00000005.1:8,397,889.
+    #
+    # NOTE these 4.2 Mb sit INSIDE main_chromosomes, so P. patens now carries
+    # the same exposure the two yeasts do: rDNA is real Pol I signal in the
+    # peak-calling space, with no published exclusion list to remove it.
+    rdna_regions:
+      - GWHFIHF00000006.1:1-1405000
+      - GWHFIHF00000020.1:1-1405000
+      - GWHFIHF00000026.1:1-1405000
     blacklist: null
     blacklist_source: 'None published for this species.'
     jaspar_collection: plants

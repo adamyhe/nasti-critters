@@ -1861,7 +1861,7 @@ Checked per species — is the 45S/35S array actually in the assembly?
 | S. pombe | yes — `III:1-23130` and `III:2440994-2452883`, both ends | none |
 | A. thaliana | yes — `2:3706-5945` and `3:14197677-14199916` | none |
 | C. reinhardtii | yes — **re-derived on ASM4749649v1 2026-09-06**: subtelomeric arrays on `CM104926.1` (chr_08) and `CM104932.1` (chr_14), each running to its terminus | none |
-| P. patens | **unclear** — 80 rRNA genes but every SSU call is partial | none available |
+| P. patens | **yes, measured on V7 2026-09-06** — three ~1.4 Mb arrays at the start of `GWHFIHF00000006.1`, `…20.1`, `…26.1` | none |
 | S. moellendorffii | yes — 426 rRNA genes incl. a 4,408 bp LSU on `GL377567` | none |
 | C. griseus | **unchecked** — but no reference sequence exists to use | none available |
 
@@ -2637,6 +2637,17 @@ contig end. Two dispersed partial copies are deliberately excluded — `CM104926
 `CM104930.1:4,130,938-4,131,477` (539 bp) — as degenerate fragments whose flanks are not rRNA; they are
 also the reason an in-assembly array matters, since reads from them score better against the true array
 than against the fragment.
+
+**P. patens lost its rRNA source in the V7 swap too, and its FAIL flag silently changed basis.** Same
+shape as C. reinhardtii: `pct_rrna` came from Phypa_V3's Ensembl GFF3 `rRNA` features, and **V7's GWH
+annotation has ZERO rRNA features** — verified by downloading it, the only types present are `gene`,
+`mRNA`, `exon`, `CDS`, `five_prime_UTR`, `three_prime_UTR` over 33,075 genes. So `rrna_content.py` scored
+organelles only, wrote `rrna_indexed: no`, and `pct_rrna` came back blank. **The blank is correct
+behaviour** — that is exactly what `rrna_indexed` is for — but it moved this experiment's flag from
+`FAIL:very_low_mapping(28%,adj)`-class onto `FAIL:very_low_mapping(14%,raw)`, i.e. judged on a number
+whose ceiling is set by 8.6% organellar plus ~47% rRNA it can no longer see.
+`rdna_regions` is now measured for V7 as well (three arrays, see `config/genomes.yaml`), so both plants
+are back on an adjusted basis.
 
 **Note `chrI`, not `I`.** The rDNA table above writes C. elegans' array as `I:15062083-15071033`, which is
 the WormBase name; ce11 is chr-prefixed, so the bare form would have indexed **nothing** and reported 0%
