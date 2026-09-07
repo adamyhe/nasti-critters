@@ -1139,15 +1139,38 @@ paying for the 701 jobs is the right answer, and the reason to check before touc
 Run on the real tree 2026-09-06: **all 12 IDENTICAL**, so the entire 701-job plan would have rewritten
 byte-identical files.
 
-**The cause was two drivers writing the same files, and `--touch` fixes the cause rather than the
-symptom.** All 8 pre-existing `.chrom.sizes` carry the same second (`2026-09-03 02:45:43`) while every
-`.fai` is an hour or more later (`03:56`-`04:35`) — genome prep done outside the tracked DAG, which is
-exactly what Snakemake's "missing provenance/metadata: `chrom_sizes faidx fetch_genome`" reports, most
-likely `run_procap_pipeline.py --fetch-genomes`. With no metadata, only timestamps are available, and
-they say the input is newer forever. `--touch` **records metadata** for those outputs, so subsequent
-comparisons are provenance-based and a tree prepped by the serial driver stops re-triggering the pipeline
-on every invocation. Prefer one driver per tree for genome prep; if the serial one did the fetching, run
-`snakemake --touch` once afterwards to hand the DAG its provenance.
+**There are TWO independent causes here, and the second one is the blocker. Do not stop at the
+timestamps.** An earlier version of this note attributed the whole thing to genome prep done outside the
+DAG — all 8 `.chrom.sizes` share the second `2026-09-03 02:45:43` while every `.fai` is an hour or more
+later (`03:56`-`04:35`), and Snakemake does report "missing provenance/metadata" for `faidx`,
+`fetch_genome` and others. That inference was wrong about the `chrom_sizes` jobs specifically:
+
+    IncompleteFilesException:
+    Incomplete files:
+    .../genome/M.musculus.chrom.sizes   (+ 7 more)
+
+**Snakemake HAS metadata for those 8 and it says INCOMPLETE** — a `chrom_sizes` batch was interrupted
+mid-write, which is exactly what 8 files sharing one second looks like. An incomplete marker forces a
+rerun whatever the mtimes say, and once `--touch` is attempted it **aborts DAG construction entirely**,
+so nothing proceeds until it is cleared. The 8 incomplete files are precisely the `chrom_sizes 8` in the
+original 701-job plan.
+
+**Clear it with `--cleanup-metadata`, NOT with `--rerun-incomplete`** — and the content check above is
+what licenses that:
+
+    snakemake --cleanup-metadata data/procap_work/genome/{A.thaliana,C.elegans,C.griseus,\
+        D.melanogaster,G.arboreum,G.hirsutum,M.musculus,S.moellendorffii}.chrom.sizes
+
+`--rerun-incomplete` is the trap, and it is the remedy the error message lists second. Regenerating
+`chrom_sizes` is trivially cheap in itself — a `cut` and a `grep` — but it gives those files a NEW mtime,
+which makes them newer than every bigWig and triggers the full `bigwig -> bedgraph -> align -> trim ->
+fetch_fastq` cascade this section is about. The cheap fix causes the expensive one.
+`--cleanup-metadata` only clears the flag and leaves the timestamps alone.
+
+Then re-run the dry-run. If `chrom_sizes` still appears, the mtime reason is live as well and `--touch`
+handles that; if it does not, the incomplete marker was the whole story. Both are worth knowing because
+they present identically in the job counts and only the `Reasons:` block and the exception message tell
+them apart.
 
 ## `--rerun-triggers mtime` CANNOT see a new input, so it cannot see a new decoy
 
