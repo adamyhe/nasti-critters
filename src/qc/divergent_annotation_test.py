@@ -182,6 +182,23 @@ def run(exp, tss, flank, shifts, halfwidth, exclude=()):
             sense, anti = b[::-1], a[::-1]
             opp = "+"
 
+        # PER-SITE NORMALISATION, with ONE denominator for both strands --
+        # identical to orientation_qc.metaplot(), and required for two separate
+        # reasons. Accumulating raw profiles lets a single locus dominate: PRO-cap
+        # spans orders of magnitude and one snRNA or ribosomal-protein promoter
+        # can outweigh a thousand ordinary ones (measured elsewhere in this repo
+        # at 78.8% of a raw profile from 1 outlier site in 1001, enough to invert
+        # its argmax). And a raw-summed profile is not comparable to the panel's
+        # numbers, which are normalised -- so quoting a partition log2 against a
+        # whole-experiment log2 would have compared two different statistics.
+        # Sharing the denominator is also deliberate: separate ones would
+        # equalise the strands and destroy the comparison.
+        denom = sense.sum() + anti.sum()
+        if denom <= 0:
+            continue
+        sense = sense / denom
+        anti = anti / denom
+
         # (B) partition. Genomic coordinates of the band, which for a
         # minus-strand summit runs the other way -- hence the flip above and
         # the sign here.
@@ -222,11 +239,6 @@ def run(exp, tss, flank, shifts, halfwidth, exclude=()):
 
     pl.close(); mn.close()
 
-    # Same normalisation as the panel: each site by its own window total, so one
-    # deep locus cannot carry the average. Done after accumulation would be
-    # wrong, so accumulate raw and report the partition metaplots as means --
-    # acceptable here because the question is the SHAPE per class, and both
-    # classes are large.
     out = {"n_sites": len(sites) - n_excluded, "n_excluded": n_excluded,
            "n_paired": n["paired"],
            "n_unpaired": n["unpaired"],
@@ -234,12 +246,43 @@ def run(exp, tss, flank, shifts, halfwidth, exclude=()):
     for key in ("paired", "unpaired"):
         if n[key] == 0:
             out[key] = None
+            out[f"mag_{key}"] = None
             continue
         sense = acc[f"sense_{key}"] / n[key]
         anti = acc[f"anti_{key}"] / n[key]
         out[key] = oq.summit_notes(sense, anti, flank)
+        out[f"mag_{key}"] = magnitude(sense, anti, x, band_up)
     out["attr"] = attr
     return out
+
+
+def magnitude(sense, anti, x, band_up):
+    """AMPLITUDE of the upstream antisense peak, which the log2 ratio hides.
+
+    log2(upstream/downstream) is scale-free by construction, so a tiny bump and
+    a towering peak with the same asymmetry score identically -- and that is
+    exactly the distinction between "worm has a divergent peak" and "worm has a
+    divergent peak comparable to a tetrapod's". Reported three ways because no
+    single one is safe alone:
+
+      height     peak height in the panel's own units (mean fraction of site
+                 signal per bp). Comparable ACROSS experiments only because the
+                 profiles are per-site normalised.
+      prominence peak / median of the band. Scale-free, so it survives a
+                 difference in overall antisense level.
+      vs_sense   peak / the sense maximum at the anchor. The sense peak at 0 is
+                 guaranteed by the anchor, which makes it a stable internal
+                 reference: this is "how big is the divergent peak relative to
+                 the primary one".
+    """
+    import numpy as np
+    idx = np.where(band_up)[0]
+    j = int(idx[int(np.argmax(anti[idx]))])
+    med = float(np.median(anti[band_up]))
+    smax = float(sense.max())
+    return {"at": int(x[j]), "height": float(anti[j]),
+            "prominence": float(anti[j] / med) if med > 0 else float("nan"),
+            "vs_sense": float(anti[j] / smax) if smax > 0 else float("nan")}
 
 
 #: Below this share of summits, the unpaired class is too small to carry a
@@ -427,6 +470,11 @@ def main():
                   "so it is unstable here -- read (B), not this ratio")
         for key in ("paired", "unpaired"):
             print(f"  (B) {key}:")
+            m = r[f"mag_{key}"]
+            if m:
+                print(f"        AMPLITUDE at {m['at']:+d} bp: height {m['height']:.2e} "
+                      f"/bp, prominence {m['prominence']:.2f}x band median, "
+                      f"{m['vs_sense']:.1%} of the sense anchor")
             if r[key] is None:
                 print("        no sites in this class")
                 continue
@@ -450,6 +498,10 @@ def main():
             "attr_null_min": round(nulls[0], 4), "attr_null_max": round(nulls[-1], 4),
             "attr_enrichment": round(ratio, 3),
             "verdict": read_partition(r),
+            **{f"{k}_{key}": (round(r[f"mag_{key}"][k], 6)
+                              if r[f"mag_{key}"] else "")
+               for key in ("paired", "unpaired")
+               for k in ("at", "height", "prominence", "vs_sense")},
             "notes_paired": " | ".join(r["paired"] or []),
             "notes_unpaired": " | ".join(r["unpaired"] or []),
         })
