@@ -1156,10 +1156,18 @@ so nothing proceeds until it is cleared. The 8 incomplete files are precisely th
 original 701-job plan.
 
 **Clear it with `--cleanup-metadata`, NOT with `--rerun-incomplete`** — and the content check above is
-what licenses that:
+what licenses that. **Pass ABSOLUTE paths**, exactly as the exception printed them:
 
-    snakemake --cleanup-metadata data/procap_work/genome/{A.thaliana,C.elegans,C.griseus,\
+    snakemake --cleanup-metadata \
+        /path/to/repo/data/procap_work/genome/{A.thaliana,C.elegans,C.griseus,\
         D.melanogaster,G.arboreum,G.hirsutum,M.musculus,S.moellendorffii}.chrom.sizes
+
+**Relative paths fail with a misleading error** — `Failed to clean up metadata ... because the metadata
+was not present. ... the reason might be file system latency or still running jobs` — which points at
+neither of the two real causes. Metadata is keyed by the LITERAL path string
+(`Persistence._get_key()` is `str(f)`, no normalization), and every path in this Snakefile is absolute
+because `REPO_ROOT = Path(workflow.basedir).parent`. So a relative argument looks up a key that was never
+written. Nothing is wrong with the tree when this happens.
 
 `--rerun-incomplete` is the trap, and it is the remedy the error message lists second. Regenerating
 `chrom_sizes` is trivially cheap in itself — a `cut` and a `grep` — but it gives those files a NEW mtime,
