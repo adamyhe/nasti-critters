@@ -415,7 +415,14 @@ def main():
         print(f"      shift null: median {null:.1%} "
               f"(range {nulls[0]:.1%}-{nulls[-1]:.1%} over {len(nulls)} shifts)"
               f"   ENRICHMENT {enrich}")
-        if null and (nulls[-1] - nulls[0]) > 0.5 * null:
+        # Gated on the ENRICHMENT too, because a near-zero null is unstable in
+        # RELATIVE terms almost by definition -- mouse and hamster came back
+        # with null medians of 0.1% and enrichments of 171x and 56x, where the
+        # spread cannot change the conclusion. Warning there is noise in the one
+        # place the answer is clearest, and a warning that fires when nothing is
+        # wrong is worse than none.
+        if null and ratio == ratio and ratio < 5.0 \
+                and (nulls[-1] - nulls[0]) > 0.5 * null:
             print("      WARNING: the null spans more than half its own median, "
                   "so it is unstable here -- read (B), not this ratio")
         for key in ("paired", "unpaired"):
