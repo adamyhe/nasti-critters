@@ -207,6 +207,10 @@ MIN_UNPAIRED_FRAC = 0.10
 #: surviving. Half the SUMMIT_SWAP_LOG2 magnitude, i.e. deliberately lenient --
 #: the question is whether the feature is still THERE, not how strong it is.
 SURVIVES_LOG2 = 0.5
+#: A "peak" nearer the anchor than this is not upstream in any useful sense --
+#: it is the summit's own footprint. Matches SUMMIT_ANTI_MIN_OFFSET, the band's
+#: inner bound, so the two cannot drift.
+SUMMIT_UPSTREAM_MIN = oq.SUMMIT_ANTI_MIN_OFFSET
 
 
 def read_partition(r):
@@ -224,19 +228,32 @@ def read_partition(r):
                 "annotation explains the feature.")
     note = r["unpaired"][0]
     lr = re.search(r"log2 ratio ([+-][\d.]+)", note)
-    pk = re.search(r"peak at (-?\d+) bp", note)
+    # `[+-]?`, NOT `-?`: summit_notes formats the offset with `{at:+d}`, so a
+    # POSITIVE position always carries a leading '+' and `-?\d+` never matches
+    # it. That silently reported "no localized peak" for a peak at +27 bp, and
+    # would have let a downstream peak be announced as "the upstream peak
+    # SURVIVES at +200 bp" -- hence the sign test below, which was also absent.
+    pk = re.search(r"peak at ([+-]?\d+) bp", note)
     lr = float(lr.group(1)) if lr else 0.0
-    if pk and lr >= SURVIVES_LOG2:
-        return (f"SHARED-NFR IS LIVE: the upstream peak SURVIVES at {pk.group(1)} bp "
+    at = int(pk.group(1)) if pk else None
+
+    if at is not None and at <= -SUMMIT_UPSTREAM_MIN and lr >= SURVIVES_LOG2:
+        return (f"SHARED-NFR IS LIVE: the upstream peak SURVIVES at {at:+d} bp "
                 f"(log2 {lr:+.2f}) across the {un:,} summits with NO annotated "
                 "opposite-strand start in the band, so annotation does not "
                 "explain it.")
+    if at is not None and at > -SUMMIT_UPSTREAM_MIN:
+        return (f"NOT A DIVERGENT NFR: the unpaired class DOES have a localized "
+                f"antisense peak, but at {at:+d} bp -- on or downstream of the "
+                f"summit, not upstream (log2 {lr:+.2f} over the band). Antisense "
+                "sitting on the anchor is the peak's own footprint or an "
+                f"unresolved close pair, not divergent initiation. {un:,} summits.")
     if lr >= SURVIVES_LOG2:
         return (f"PARTLY SURVIVES: upstream weight holds (log2 {lr:+.2f}) in the "
                 f"{un:,} unannotated summits but with no localized peak -- "
                 "diffuse upstream antisense, not a divergent NFR.")
     return (f"GENE PAIRS: the upstream feature COLLAPSES (log2 {lr:+.2f}, "
-            f"{'no peak' if not pk else 'peak ' + pk.group(1) + ' bp'}) once the "
+            "no peak) once the "
             f"{un:,} summits with no annotated partner are taken alone, so the "
             "signal was tracking annotated divergent genes.")
 
@@ -244,8 +261,7 @@ def read_partition(r):
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-e", "--experiments", nargs="+", action="extend",
-                    default=[], required=True)
+    ap.add_argument("-e", "--experiments", nargs="+", action="extend", default=[])
     ap.add_argument("--flank", type=int, default=500)
     ap.add_argument("--halfwidth", type=int, default=ANNOT_HALFWIDTH)
     ap.add_argument("--shift", type=int, nargs="+", action="extend",
@@ -258,8 +274,32 @@ def main():
     ap.add_argument("--all-biotypes", action="store_true",
                     help="do NOT restrict to protein-coding (dilutes worm ~47%%)")
     ap.add_argument("--tsv", type=Path, default=None)
+    ap.add_argument("--reverdict", type=Path, default=None, metavar="TSV",
+                    help="recompute the verdict column from an existing TSV and "
+                         "exit. Every input to read_partition() is stored there, "
+                         "so a corrected reading costs no second bigWig pass.")
     args = ap.parse_args()
 
+    if args.reverdict:
+        with open(args.reverdict) as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+        for row in rows:
+            r = {"n_sites": int(row["n_sites"]),
+                 "n_unpaired": int(row["n_unpaired"]),
+                 "unpaired": [row["notes_unpaired"]] if row["notes_unpaired"] else None,
+                 "paired": [row["notes_paired"]] if row["notes_paired"] else None}
+            new = read_partition(r)
+            flag = "" if new == row.get("verdict", "") else "   [CHANGED]"
+            print(f"\n{row['experiment']} ({row['species']}){flag}\n  => {new}")
+            row["verdict"] = new
+        with open(args.reverdict, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter="\t")
+            w.writeheader(); w.writerows(rows)
+        print(f"\nrewrote {args.reverdict}")
+        return
+
+    if not args.experiments:
+        ap.error("pass -e EXPERIMENT ... (or --reverdict TSV)")
     from experiments import Experiment
     import numpy as np
     import yaml
