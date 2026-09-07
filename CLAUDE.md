@@ -1772,6 +1772,23 @@ twelve are already alt-free.** Do not add a contig-filtering step; there is noth
 | v1.0 (S. moellendorffii) | 759 = 0 chromosomes + Pt + 757 scaffolds | 0 |
 | CriGri-PICRH-1.0 | 647 = 10 chromosomes + 637 unplaced | 0 |
 
+**The two plant assembly swaps were REVIEWED AND KEPT, 2026-09-06, against measured numbers.** Both are
+break-even on mapping once their organelle decoys are back — C. reinhardtii 12.4% against v5.5's 12.6%,
+P. patens 14.4% against Phypa_V3's 14.6%, with `signal_reads` flat (6.15 M vs 6.25 M; 2.40 M vs 2.41 M)
+and slightly more peaks (8,419 vs 8,116; 9,619 vs 9,579). Break-even mapping for a near-gapless assembly
+is a win *for this project specifically*, since gaps near TSSs corrupt training windows directly: 17 gaps
+against 1,512 and contig N50 6.29 Mb against 215 kb for C. reinhardtii, gap-free at N50 17.7 Mb for
+P. patens, which additionally **removes a spurious 27th chromosome** whose peaks sat on a mis-assembled
+fragment. The costs are paid: decoys re-declared, `rdna_regions` measured on both, and C. reinhardtii's
+annotation loss is QC-only with both annotation-free read-outs working.
+**The only argument for reverting would be comparability with existing lab models trained on v5.5 /
+Phypa_V3**, which cuts against the uniform re-map this repo exists to do. Do not revisit without a new
+measurement.
+**And note an assembly change does not by itself break fold reuse.** What reuse protects is which
+CHROMOSOME is held out, so a chromosome-to-chromosome mapping preserves it — exact for C. reinhardtii,
+where the assembly report gives `chr_NN` = `CM(104918+NN).1` and Chlamydomonas numbering is standard
+across strains. P. patens is the one real exception, because its old fold 0 contained the spurious `27`.
+
 **The two swapped plant references were re-audited 2026-09-06** and are trivially alt-free, from their
 assembly reports rather than by contig-list diff: ASM4749649v1 is 17 assembled molecules and *nothing
 else*, and V7 is 26 chromosomes / 26 component sequences (via its NCBI mirror `GCA_059467195.1`). Both
