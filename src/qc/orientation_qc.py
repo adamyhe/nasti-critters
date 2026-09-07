@@ -131,10 +131,18 @@ REQUIRED = {
 }
 
 
-def require_deps() -> None:
-    """Fail early, with the fix, if the environment predates the QC deps."""
+def require_deps(mods=None) -> None:
+    """Fail early, with the fix, if the environment predates the QC deps.
+
+    `mods` narrows the check to the modules the caller actually imports. The
+    default is everything this script needs. It matters because the set is not
+    uniform: divergent_annotation_test.py reuses peak_maxima() and
+    load_annotation() but draws nothing, so demanding logomaker/matplotlib of
+    it would refuse to run on an environment that can run it perfectly well.
+    """
     import importlib.util
-    absent = sorted({pkg for mod, pkg in REQUIRED.items()
+    wanted = REQUIRED if mods is None else {m: REQUIRED[m] for m in mods}
+    absent = sorted({pkg for mod, pkg in wanted.items()
                      if importlib.util.find_spec(mod) is None})
     if not absent:
         return
@@ -149,12 +157,24 @@ def require_deps() -> None:
 
 
 def load_annotation(species: str, genome: dict, cache: Path,
-                    local: Path | None = None) -> list[tuple]:
+                    local: Path | None = None,
+                    coding_only: bool = False) -> list[tuple]:
     """(chrom, tss, strand) per gene, in the assembly's own chromosome naming.
 
     `local` is the path to an already-fetched annotation. The Snakemake rule
     passes it, so the DAG owns the download and parallel jobs for the same
     species cannot race for the same file.
+
+    `coding_only` restricts to protein-coding: `NM_` transcripts for the UCSC
+    GTF branch, `biotype=protein_coding` for the Ensembl GFF3 branch. It
+    defaults to FALSE so the DAG's metaplot is unchanged -- the two branches
+    already select different things (per-transcript all-biotypes for GTF,
+    per-gene protein-coding-only for GFF3), and flipping that for every
+    experiment would move every published `n_tss`. Pass it where the dilution
+    matters: C. elegans refGene is ~47% non-coding (25,200 NR_ of 54,144
+    transcripts), largely snoRNA/snRNA/misc_RNA with no Pol II initiation, so
+    any test that asks whether a feature sits on an annotated GENE start needs
+    them gone or the answer is diluted by loci that were never promoters.
     """
     url, fmt = genome["annotation_url"], genome["annotation_format"]
     # No annotation for this assembly at all -- C. reinhardtii under
@@ -186,6 +206,17 @@ def load_annotation(species: str, genome: dict, cache: Path,
             if not keep:
                 continue
             chrom, start, end, strand, attrs = p[0], int(p[3]), int(p[4]), p[6], p[8]
+            if coding_only:
+                # UCSC refGene has no gene_biotype; NM_ vs NR_ is the only
+                # coding/non-coding signal it carries. Ensembl GFF3's `gene`
+                # type is already protein-coding (non-coding genes are
+                # `ncRNA_gene` and never reach here), so the biotype test is
+                # belt-and-braces there rather than the load-bearing filter.
+                if fmt == "gtf":
+                    if 'transcript_id "NM_' not in attrs:
+                        continue
+                elif "protein_coding" not in attrs:
+                    continue
             tss = start if strand == "+" else end
             key = (chrom, tss, strand)
             if key in seen:
