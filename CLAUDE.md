@@ -337,6 +337,21 @@ python src/bpnet/modisco/launch_report.py --dry-run
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
 `--dry-run` (preprocessing/launcher) or a single `-f 0` fold as the cheap smoke test.
 
+**Syntax-check against the OLDEST interpreter you can find, not the newest.** The env is **Python 3.11**
+(`uv.lock` resolves torch 2.13 on 3.11), and a dev machine may be newer — mine is 3.12, where **PEP 701**
+legalised multi-line f-string expressions and nested same-type quotes. A local `ast.parse` therefore
+passed a file that was a hard `SyntaxError: unterminated string literal` on the cluster, and it failed at
+*import*, so it took the whole run down before any work happened. There is no CI to catch this. Sweep with
+whatever old interpreter is on the box — macOS ships one at `/usr/bin/python3`:
+
+    for f in $(git ls-files '*.py'); do
+      /usr/bin/python3 -c "import sys,ast;ast.parse(open(sys.argv[1]).read())" "$f" \
+        || echo "FAILS: $f"
+    done
+
+All 34 tracked files pass under 3.9.6 as of 2026-09-06. Keep it that way: precompute a conditional into a
+variable rather than inlining it across lines inside an f-string.
+
 ## Architecture: one convention, via src/experiments.py
 
 Everything resolves through **`src/experiments.py`**. Scripts add `REPO_ROOT/src` to

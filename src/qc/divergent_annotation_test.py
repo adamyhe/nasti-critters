@@ -309,10 +309,17 @@ def main():
               f"({100 * r['n_paired'] / max(r['n_sites'], 1):.1f}% paired)")
         print(f"  (A) upstream antisense within {args.halfwidth} bp of an "
               f"annotated opposite-strand start: {share:.1%}")
+        # Precomputed, NOT inlined into the f-string: a multi-line f-string
+        # expression is PEP 701, i.e. Python 3.12+, and this repo's env is
+        # 3.11. It parsed locally on 3.12 and was a SyntaxError on the cluster.
+        # Compile-check with `/usr/bin/python3 -c "import ast,sys;
+        # ast.parse(open(sys.argv[1]).read())" <file>` against an OLDER
+        # interpreter, not the newest one available.
+        enrich = ("undefined (no signal attributable either way)"
+                  if ratio != ratio else f"{ratio:.2f}x")
         print(f"      shift null: median {null:.1%} "
               f"(range {nulls[0]:.1%}-{nulls[-1]:.1%} over {len(nulls)} shifts)"
-              f"   ENRICHMENT {'undefined (no signal attributable either way)'
-                                 if ratio != ratio else f'{ratio:.2f}x'}")
+              f"   ENRICHMENT {enrich}")
         if null and (nulls[-1] - nulls[0]) > 0.5 * null:
             print("      WARNING: the null spans more than half its own median, "
                   "so it is unstable here -- read (B), not this ratio")
