@@ -140,7 +140,7 @@ def run(exp, tss, flank, shifts, halfwidth):
     sizes = pl.chroms()
     acc = {k: np.zeros(2 * flank) for k in
            ("sense_paired", "anti_paired", "sense_unpaired", "anti_unpaired")}
-    n = {"paired": 0, "unpaired": 0}
+    n = {"paired": 0, "unpaired": 0, "paired_upstream": 0}
     attr = {"annot": 0.0, "total": 0.0, "null": [0.0] * len(shifts)}
 
     for chrom, pos, strand in sites:
@@ -158,24 +158,43 @@ def run(exp, tss, flank, shifts, halfwidth):
             sense, anti = b[::-1], a[::-1]
             opp = "+"
 
-        # (B) partition. Genomic coordinates of the UPSTREAM band, which for a
+        # (B) partition. Genomic coordinates of the band, which for a
         # minus-strand summit runs the other way -- hence the flip above and
         # the sign here.
-        off = x[band_up]
-        gpos = pos + (off if strand == "+" else -off)
-        mask = near_annotated(chrom, gpos, starts[opp], halfwidth)
-        key = "paired" if mask.any() else "unpaired"
+        off_up = x[band_up]
+        gpos_up = pos + (off_up if strand == "+" else -off_up)
+        mask_up = near_annotated(chrom, gpos_up, starts[opp], halfwidth)
+        off_dn = x[band_dn]
+        gpos_dn = pos + (off_dn if strand == "+" else -off_dn)
+        mask_dn = near_annotated(chrom, gpos_dn, starts[opp], halfwidth)
+
+        # THE PARTITION MUST BE SYMMETRIC. Defining "paired" on the UPSTREAM
+        # side alone selects the complement to be downstream-biased: a summit
+        # whose opposite-strand neighbour sits DOWNSTREAM fails the upstream
+        # test, lands in "unpaired", and carries its downstream antisense in
+        # with it. Measured on the real corpus, that drove one experiment's
+        # unpaired class to log2 -2.54 with a peak at +164 bp -- enough to trip
+        # the strand-swap flag -- where its whole-set value was about -0.4. The
+        # artefact was entirely this asymmetry. So "unpaired" now means NO
+        # annotated opposite-strand start anywhere in the band, which is
+        # direction-neutral and is the only complement the two hypotheses can
+        # be compared across.
+        key = "paired" if (mask_up.any() or mask_dn.any()) else "unpaired"
         n[key] += 1
+        if mask_up.any():
+            n["paired_upstream"] += 1
         acc[f"sense_{key}"] += sense
         acc[f"anti_{key}"] += anti
 
-        # (A) attribution, over the same band, weighted by antisense signal.
+        # (A) attribution stays UPSTREAM-only: the quantity being explained is
+        # upstream antisense signal, so the upstream mask is the right one here
+        # even though the partition above is symmetric.
         w = anti[band_up]
         attr["total"] += float(w.sum())
-        attr["annot"] += float(w[mask].sum())
+        attr["annot"] += float(w[mask_up].sum())
         for i, sh in enumerate(shifted):
             attr["null"][i] += float(
-                w[near_annotated(chrom, gpos, sh[opp], halfwidth)].sum())
+                w[near_annotated(chrom, gpos_up, sh[opp], halfwidth)].sum())
 
     pl.close(); mn.close()
 
@@ -185,7 +204,8 @@ def run(exp, tss, flank, shifts, halfwidth):
     # acceptable here because the question is the SHAPE per class, and both
     # classes are large.
     out = {"n_sites": len(sites), "n_paired": n["paired"],
-           "n_unpaired": n["unpaired"], "band_dn_unused": int(band_dn.sum())}
+           "n_unpaired": n["unpaired"],
+           "n_paired_upstream": n["paired_upstream"]}
     for key in ("paired", "unpaired"):
         if n[key] == 0:
             out[key] = None
@@ -346,7 +366,9 @@ def main():
             ratio = float("nan")
         print(f"  sites used: {r['n_sites']:,}  "
               f"paired {r['n_paired']:,} / unpaired {r['n_unpaired']:,} "
-              f"({100 * r['n_paired'] / max(r['n_sites'], 1):.1f}% paired)")
+              f"({100 * r['n_paired'] / max(r['n_sites'], 1):.1f}% paired; "
+              f"{r['n_paired_upstream']:,} of the paired have the partner "
+              "UPSTREAM)")
         print(f"  (A) upstream antisense within {args.halfwidth} bp of an "
               f"annotated opposite-strand start: {share:.1%}")
         # Precomputed, NOT inlined into the f-string: a multi-line f-string
@@ -370,11 +392,18 @@ def main():
                 continue
             for line in r[key]:
                 print(f"        {line}")
+            if "<--" in " ".join(r[key]):
+                print("        NOTE: that flag came from summit_notes, which is "
+                      "written for a WHOLE experiment. On a partition subset it "
+                      "is not an experiment-level verdict -- read it as a "
+                      "property of this class only, never as a reason to "
+                      "re-map.")
         print(f"  => {read_partition(r)}")
         rows.append({
             "experiment": exp_id, "species": exp.species,
             "n_sites": r["n_sites"], "n_paired": r["n_paired"],
             "n_unpaired": r["n_unpaired"],
+            "n_paired_upstream": r["n_paired_upstream"],
             "pct_paired": round(100 * r["n_paired"] / max(r["n_sites"], 1), 1),
             "attr_share": round(share, 4), "attr_null": round(null, 4),
             "attr_null_min": round(nulls[0], 4), "attr_null_max": round(nulls[-1], 4),
