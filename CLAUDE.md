@@ -1116,7 +1116,38 @@ rule rather than touching it (the fixture's output picked up the edited script's
 
 `--touch` still asserts the existing outputs are correct. If a `.fai` differs in *content* from what the
 bigWigs were built against, that assertion is false and a real rebuild is owed — the one case where
-paying for the 701 jobs is the right answer, and the reason to check the `.fai` before touching.
+paying for the 701 jobs is the right answer, and the reason to check before touching.
+
+**Check it by CONTENT, not by reasoning about the timestamps** — `chrom_sizes` is
+`cut -f1,2 {fai} | grep -E '^<chrom>\t|…'`, so its output is a pure function of the `.fai` and
+`main_chromosomes` and can be reproduced in a few lines:
+
+    python - <<'EOF'
+    import yaml, pathlib
+    G = yaml.safe_load(open('config/genomes.yaml'))['species']
+    R = pathlib.Path('.')
+    for sp, d in sorted(G.items()):
+        fai, cs = R/(d['fasta']+'.fai'), R/'data/procap_work/genome'/f'{sp}.chrom.sizes'
+        if not (fai.exists() and cs.exists()):
+            print(f'{sp:18} SKIP'); continue
+        keep = {str(c) for c in d['main_chromosomes']}
+        want = ''.join(f'{p[0]}\t{p[1]}\n' for p in
+                       (l.split('\t') for l in fai.read_text().splitlines()) if p[0] in keep)
+        print(f'{sp:18} {"IDENTICAL" if want == cs.read_text() else "DIFFERS"}')
+    EOF
+
+Run on the real tree 2026-09-06: **all 12 IDENTICAL**, so the entire 701-job plan would have rewritten
+byte-identical files.
+
+**The cause was two drivers writing the same files, and `--touch` fixes the cause rather than the
+symptom.** All 8 pre-existing `.chrom.sizes` carry the same second (`2026-09-03 02:45:43`) while every
+`.fai` is an hour or more later (`03:56`-`04:35`) — genome prep done outside the tracked DAG, which is
+exactly what Snakemake's "missing provenance/metadata: `chrom_sizes faidx fetch_genome`" reports, most
+likely `run_procap_pipeline.py --fetch-genomes`. With no metadata, only timestamps are available, and
+they say the input is newer forever. `--touch` **records metadata** for those outputs, so subsequent
+comparisons are provenance-based and a tree prepped by the serial driver stops re-triggering the pipeline
+on every invocation. Prefer one driver per tree for genome prep; if the serial one did the fetching, run
+`snakemake --touch` once afterwards to hand the DAG its provenance.
 
 ## `--rerun-triggers mtime` CANNOT see a new input, so it cannot see a new decoy
 
