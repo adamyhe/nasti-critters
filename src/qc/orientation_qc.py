@@ -28,10 +28,28 @@ read-outs that catch it.
    READ THE ANTISENSE CHANNEL, NOT THE SENSE ONE. Centring on the maximum makes
    a sense peak at 0 tautological; it is guaranteed by construction and is
    evidence of nothing. The informative signal is where the ANTISENSE weight
-   sits: divergent initiation puts it UPSTREAM (negative offset, order -50 to
-   -250 bp depending on species). If the two strand tracks are swapped it moves
-   DOWNSTREAM, and the sign flip is unambiguous in a way the annotation-anchored
-   version never was.
+   sits: if the two strand tracks are swapped it moves DOWNSTREAM, and the sign
+   flip is unambiguous in a way the annotation-anchored version never was.
+
+   ONLY THE DOWNSTREAM READING IS A FAULT. An UPSTREAM peak at ~-100 bp is a
+   TETRAPOD expectation, NOT a corpus-wide one: divergent initiation sharing one
+   NFR with the main TSS is a vertebrate promoter architecture, and most taxa
+   here do not have it. So absence of an upstream peak is the NULL for
+   everything outside mouse and hamster -- it is not a deficiency, and it must
+   never be read as one. Measured over this corpus: 18 of 20 mouse/hamster
+   experiments report a localized peak at median log2 +1.39, against 10 of 22
+   for every other taxon at median +0.09.
+
+   C. ELEGANS IS THE ONE NON-TETRAPOD THAT SHOWS THE TETRAPOD PATTERN and it is
+   UNEXPLAINED -- all four worm libraries peak at -97 to -124 bp with log2 +0.81
+   to +1.21. It is not a peak-calling artefact (see the antisense-fraction
+   caveat below): worm sits at 26-59% bidirectional, the same range as fly at
+   22-52%, and fly runs -0.13 to -0.54. The likeliest benign explanation is
+   DIVERGENT GENE PAIRS rather than shared-NFR initiation -- a 100 Mb genome
+   with ~20,000 genes has many head-to-head pairs whose separate minus-strand
+   promoter sits ~100-200 bp away. That is distinguishable: shared-NFR divergent
+   transcription is largely UNANNOTATED, a divergent gene pair is an annotated
+   minus-strand gene start. Do not resolve it from this panel alone.
 
    THE STATISTIC IS log2(upstream / downstream) ANTISENSE, not an argmax, over a
    band that excludes the anchor's own footprint and stops before neighbouring
@@ -449,7 +467,17 @@ def summit_notes(sense, anti, flank):
     localized = (prominent
                  and (SUMMIT_ANTI_MAX_OFFSET - abs(at)) > SUMMIT_EDGE_MARGIN)
 
-    note = (f"summit metaplot: antisense {frac:.1%} of windowed signal, "
+    # The FRACTION is nearly circular and is printed for context only, never as
+    # evidence: across this corpus it correlates with the share of peaks PINTS
+    # called BIDIRECTIONAL at Pearson +0.94. A bidirectional call means an
+    # opposite-strand peak was already found nearby, so anchoring on those
+    # summits puts antisense in the window by construction. The log2 ratio is
+    # the independent quantity (r = -0.29 with the same share), and
+    # S. cerevisiae is the proof they are different: 92.8% bidirectional and
+    # 40.4% antisense, yet log2 -0.03 -- bidirectional calls fill the window
+    # SYMMETRICALLY and do not manufacture an upstream peak.
+    note = (f"summit metaplot: antisense {frac:.1%} of windowed signal "
+            "(tracks the bidirectional peak fraction; context only), "
             f"upstream/downstream log2 ratio {lr:+.2f}")
     if localized:
         note += f", peak at {at:+d} bp"
@@ -552,7 +580,8 @@ def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir
         # The title says what to look at, because the obvious feature is the
         # uninformative one: sense peaks at 0 by construction.
         axes[2].set_title(f"summit-anchored, {n_summit:,} peaks (annotation-free)\n"
-                          "read the ANTISENSE trace: upstream = OK, downstream = strands swapped")
+                          "ANTISENSE trace: downstream = strands swapped\n"
+                          "upstream peak: tetrapod expectation; absence is the null")
     else:
         axes[2].text(.5, .5, "no summit metaplot", ha="center"); axes[2].axis("off")
 

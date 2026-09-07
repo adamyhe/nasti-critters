@@ -2292,12 +2292,50 @@ TSV) and `qc/umi/`. They stay inside the DAG only because `pybigwig`, `pyfastx`,
 
   | antisense argmax | experiments |
   | --- | --- |
-  | **−97 to −159 bp** — canonical divergent distance | all M. musculus, all C. elegans, all C. griseus, C. reinhardtii |
+  | **−97 to −159 bp** — an upstream peak | all M. musculus, all C. griseus, all C. elegans, C. reinhardtii |
   | **\|offset\| 360–500** — at the ±500 window edge, i.e. NO localized peak | all D. melanogaster, A. thaliana, P. patens, S. pombe, 4 of 6 S. cerevisiae |
   | **−1 to +39** — on the summit | S. moellendorffii, both cottons, fly LacZ-KD, Spt5EtOH |
 
-  The middle group is the expected reading for the species this file already documents as heavily
-  unidirectional, plus fly, whose divergent transcription is weaker than mammals'.
+  **AN UPSTREAM PEAK AT ~−100 bp IS A TETRAPOD EXPECTATION, NOT A CORPUS-WIDE ONE — and an earlier
+  version of this table called that row "canonical divergent distance", which was wrong.** Divergent
+  initiation from the SAME NFR as the main TSS is a vertebrate promoter architecture; most taxa here do
+  not have it, so for them the absence of an upstream peak is the **null**, not a deficiency, and the
+  middle row above is the *expected* result rather than a weaker version of the first. Only the
+  DOWNSTREAM reading is ever a fault. Measured over the corpus (2026-09-06):
+
+  | | n | localized peak reported | median log2 |
+  | --- | --- | --- | --- |
+  | mouse + hamster | 20 | **18** | **+1.39** |
+  | every other taxon | 22 | 10 | +0.09 |
+
+  This also removes a contradiction with the annotated-TSS section below, which already said divergent
+  upstream antisense "is NOT an expectation at all" for C. elegans while this table listed worm in the
+  canonical group.
+
+  **THE ANTISENSE *FRACTION* IS NEARLY CIRCULAR — it is close to a restatement of PINTS' bidirectional
+  class.** `peaks_bidirectional / peaks_total` against `antisense % of windowed signal` is **Pearson
+  +0.939** across all 42 experiments. A bidirectional call means PINTS already found an opposite-strand
+  peak nearby, so anchoring on those summits puts antisense in the window by construction. Print it for
+  context; never read it as independent evidence.
+  **The log2 ratio is NOT confounded that way** (r = **−0.287** with the same share), and S. cerevisiae
+  is the proof the two are different quantities: **92.8% bidirectional, 40.4% antisense, log2 −0.03.**
+  Maximal bidirectional calling with zero upstream asymmetry — so bidirectional calls fill the window
+  SYMMETRICALLY rather than manufacturing an upstream peak. The taxonomic signal lives in the ratio and
+  the position, not in the fraction.
+
+  **C. ELEGANS IS THE ONE NON-TETRAPOD SHOWING THE TETRAPOD PATTERN, and it is OPEN.** All four worm
+  libraries peak at −97 to −124 bp with log2 +0.81 to +1.21, squarely in the mammalian range, and the
+  L3 panel shows a broad clean upstream peak with a sharp dip at 0 — it does not look like noise. The
+  bidirectional confound does not explain it: worm is 26–59% bidirectional, the **same range as fly**
+  (22–52%), and fly runs −0.13 to −0.54. Same fraction, opposite asymmetry.
+  **The benign explanation to test first is DIVERGENT GENE PAIRS, not shared-NFR initiation.** C. elegans
+  is 100 Mb with ~20,000 genes, so head-to-head pairs whose separate minus-strand promoter sits
+  ~100–200 bp away are common, and PINTS would call those bidirectional. The two are distinguishable
+  because shared-NFR divergent transcription is largely **unannotated** whereas a divergent gene pair is
+  an **annotated minus-strand gene start**: for the antisense signal contributing to the −100 feature,
+  measure the share falling within ~100 bp of an annotated minus-strand gene start. Use the
+  protein-coding subset — ce11 refGene is 47% non-coding (see the `n_tss` note below). If most of it is
+  annotated, worm belongs with fly on this read-out and nothing here is unusual.
   **So `argmax` was the wrong readout**: on a channel with no peak it lands wherever noise is highest,
   and the third group above then tripped a naive `argmax > 0` swap test. Most of the flags on the first
   run were that artefact. It is now `log2(upstream / downstream)` antisense summed over
