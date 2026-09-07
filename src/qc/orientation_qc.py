@@ -27,11 +27,28 @@ read-outs that catch it.
 
    READ THE ANTISENSE CHANNEL, NOT THE SENSE ONE. Centring on the maximum makes
    a sense peak at 0 tautological; it is guaranteed by construction and is
-   evidence of nothing. The informative signal is where the ANTISENSE peak
-   falls: divergent initiation puts it UPSTREAM (negative offset, order -50 to
-   -250 bp depending on species). If the two strand tracks are swapped, that
-   peak moves DOWNSTREAM, and the sign flip is unambiguous in a way the
-   annotation-anchored version never was.
+   evidence of nothing. The informative signal is where the ANTISENSE weight
+   sits: divergent initiation puts it UPSTREAM (negative offset, order -50 to
+   -250 bp depending on species). If the two strand tracks are swapped it moves
+   DOWNSTREAM, and the sign flip is unambiguous in a way the annotation-anchored
+   version never was.
+
+   THE STATISTIC IS log2(upstream / downstream) ANTISENSE, not an argmax, over a
+   band that excludes the anchor's own footprint and stops before neighbouring
+   promoters dominate. Argmax was tried first and is fragile in precisely the
+   case this panel exists for: on a channel with no localized peak it lands
+   wherever noise is highest, which across the corpus meant |offset| 360-500 for
+   fly, A. thaliana, P. patens, S. pombe and four S. cerevisiae experiments, and
+   a few bp off the anchor for cotton and others -- and that second group then
+   tripped a naive `argmax > 0` swap test. A position is reported only when the
+   peak is prominent and away from the edge; otherwise the verdict says there is
+   no localized antisense peak, which for a unidirectional species is the
+   correct answer rather than a fault.
+
+   The panel gives antisense ITS OWN Y-AXIS for the same reason. Sharing one
+   scale with the anchor spike compressed it onto the axis line and made every
+   species look identical -- M.musculus-GCB (peak at -137) and
+   S.cerevisiae-Ino80ctl (no localized peak) were indistinguishable by eye.
 
 3. STRANDED METAPLOT around annotated gene TSSs.
    Plus-strand genes should show plus-track signal peaking just downstream of
@@ -340,6 +357,46 @@ def summit_metaplot(sites, pl_bw, mn_bw, flank):
     return metaplot(sites, pl_bw, mn_bw, flank)
 
 
+#: Offsets inside this are the anchor's own footprint and are excluded from
+#: every summit statistic. The summit IS the sense maximum, so the first few
+#: tens of bp carry the peak's own signal on both strands.
+SUMMIT_ANTI_MIN_OFFSET = 20
+#: An argmax this close to the window edge is not a peak -- it is where the
+#: noise happened to be highest on a profile with no peak in it. Measured
+#: across the corpus: fly, A. thaliana, P. patens, S. pombe and four
+#: S. cerevisiae experiments all reported an "antisense peak" at |offset|
+#: 360-500 against a 500 bp flank, which is this artefact, not a reading.
+SUMMIT_EDGE_MARGIN = 60
+#: Outer edge of the band. Divergent initiation sits at -50 to -250 bp; the
+#: measured corpus puts every real antisense peak at -97 to -159. Past this,
+#: what the window contains is NEIGHBOURING PROMOTERS, not divergence -- which
+#: is the dominant effect in the dense genomes (S. cerevisiae runs 1.2-4.1
+#: peaks per 2114 bp, so a +-500 window usually holds another peak, and yeast
+#: accordingly shows the corpus's highest antisense fraction, 35-43%, with a
+#: monotone rise to the edge). PROVISIONAL, like FLAT_BITS: calibrated from
+#: this corpus, not from anything principled.
+SUMMIT_ANTI_MAX_OFFSET = 300
+#: A peak must exceed this multiple of the band's own median to count as
+#: localized rather than as a ripple on a flat channel.
+SUMMIT_PROMINENCE = 1.5
+#: Antisense mean inside the excluded anchor footprint, over the band MAXIMUM,
+#: above which the two strands look collapsed onto one point. Against the band
+#: median this fired on a broad genuine upstream peak, which still carries real
+#: signal at offset 0 while the median is dragged down by the quiet downstream
+#: half. Against the maximum it asks the right question: is the summit itself
+#: the largest antisense feature anywhere in the window? Measured this way
+#: rather than by argmax because the footprint is outside the band, so an
+#: on-summit peak would otherwise surface only as an argmax pinned to the band
+#: edge -- which is what the first version of this check did.
+SUMMIT_ONSUMMIT_FACTOR = 2.0
+#: log2(upstream / downstream antisense) at or below this, with enough
+#: antisense to be real, is the strand-swap signature.
+SUMMIT_SWAP_LOG2 = -1.0
+#: Below this share of windowed signal the antisense channel is too weak to
+#: interpret either way.
+SUMMIT_MIN_ANTI_FRAC = 0.05
+
+
 def summit_notes(sense, anti, flank):
     """Read of the summit-anchored panel. NEVER gated on annotation quality --
     it uses none.
@@ -352,18 +409,66 @@ def summit_notes(sense, anti, flank):
         return ["summit metaplot: no antisense signal (unidirectional promoters "
                 "are normal in some species; not a flag)"]
     x = np.arange(-flank, flank)
-    at = int(x[int(np.argmax(anti))])
     frac = anti.sum() / max(sense.sum() + anti.sum(), 1e-9)
-    note = f"summit metaplot: antisense peak at {at:+d} bp, {frac:.1%} of windowed signal"
-    # Downstream antisense is the strand-swap signature. A weak/plateaued
-    # antisense channel can put argmax anywhere, so require it to be a real
-    # fraction of signal before calling it.
-    if at > 0 and frac > 0.05:
-        note += "  <-- antisense is DOWNSTREAM; expected upstream. Suspect the "
-        note += "two strand tracks are swapped (reverse_strand)"
-    elif abs(at) < 5 and frac > 0.05:
-        note += "  <-- antisense peaks ON the summit rather than upstream; "
-        note += "suspect an unextracted UMI or a 5' offset collapsing the two strands"
+
+    # THE STATISTIC IS A RATIO, NOT AN ARGMAX. Reporting argmax was fragile in
+    # exactly the case this panel is for: on a channel with no localized peak,
+    # argmax lands wherever noise is highest -- at the window edge (|offset|
+    # 360-500 for fly, A. thaliana, P. patens, S. pombe and four
+    # S. cerevisiae experiments) or a few bp off the anchor -- and the second
+    # of those then tripped the `at > 0` strand-swap test. Most of the flags
+    # raised on the first full run were that artefact.
+    #
+    # Total antisense weight upstream vs downstream degrades to 0 on a flat
+    # channel instead, has no edge behaviour, and is the quantity the
+    # strand-swap question actually asks.
+    band = ((np.abs(x) >= SUMMIT_ANTI_MIN_OFFSET)
+            & (np.abs(x) <= SUMMIT_ANTI_MAX_OFFSET))
+    up = float(anti[band & (x < 0)].sum())
+    dn = float(anti[band & (x > 0)].sum())
+    eps = 1e-12
+    lr = float(np.log2((up + eps) / (dn + eps)))
+
+    # Is there a peak at all? Judged inside the same band, and required to be
+    # both prominent against the band's own median and away from the edge.
+    idx = np.where(band)[0]
+    j = int(idx[int(np.argmax(anti[idx]))])
+    at = int(x[j])
+    baseline = float(np.median(anti[band]))
+    prominent = baseline > 0 and float(anti[j]) >= SUMMIT_PROMINENCE * baseline
+    localized = prominent and (flank - abs(at)) > SUMMIT_EDGE_MARGIN
+
+    note = (f"summit metaplot: antisense {frac:.1%} of windowed signal, "
+            f"upstream/downstream log2 ratio {lr:+.2f}")
+    if localized:
+        note += f", peak at {at:+d} bp"
+    else:
+        note += (f", NO localized antisense peak (argmax {at:+d} bp is at the "
+                 "window edge or not prominent) -- unidirectional promoters, "
+                 "or neighbouring peaks inside the window; not a fault")
+
+    if frac <= SUMMIT_MIN_ANTI_FRAC:
+        note += "  (antisense too weak to interpret)"
+        return [note]
+
+    # Severity depends on whether a PEAK backs the asymmetry. A real strand
+    # swap puts a localized antisense peak downstream; a dense genome's
+    # neighbouring promoters produce the same sign with no peak at all, which
+    # is a reading to look at rather than a fault to assert. The REVIEW marker
+    # is counted separately from flags for exactly this distinction.
+    inner = float(anti[np.abs(x) < SUMMIT_ANTI_MIN_OFFSET].mean())
+    if lr <= SUMMIT_SWAP_LOG2 and localized:
+        note += ("  <-- antisense weight is DOWNSTREAM of the summit and peaks "
+                 f"at {at:+d} bp; expected upstream. Suspect the two strand "
+                 "tracks are swapped (reverse_strand)")
+    elif lr <= SUMMIT_SWAP_LOG2:
+        note += ("  <-- REVIEW: antisense weight is downstream but with no "
+                 "localized peak -- in a dense genome this is neighbouring "
+                 "promoters inside the window, not necessarily a strand swap")
+    elif float(anti[j]) > 0 and inner >= SUMMIT_ONSUMMIT_FACTOR * float(anti[j]):
+        note += ("  <-- antisense is concentrated ON the summit rather than "
+                 "upstream; suspect an unextracted UMI or a 5' offset "
+                 "collapsing the two strands")
     return [note]
 
 
@@ -407,16 +512,36 @@ def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir
 
     if s_sense is not None:
         x = np.arange(-flank_meta, flank_meta)
-        axes[2].plot(x, s_sense, label="sense", lw=1)
-        axes[2].plot(x, -s_anti, label="antisense", lw=1)
-        axes[2].axhline(0, color="k", lw=0.6)
+        # ANTISENSE OWNS THE Y-AXIS, and this is the whole reason the panel is
+        # worth looking at. Sharing one scale with sense made it useless: the
+        # sense spike at 0 is guaranteed by the anchor and set the scale, so the
+        # antisense channel was compressed onto the axis line and EVERY species
+        # looked like a single spike. Checked on the first full run --
+        # M.musculus-GCB (antisense peak at -137) and S.cerevisiae-Ino80ctl (no
+        # localized peak at all) were indistinguishable by eye.
+        #
+        # Sense is kept as faint context on a twin axis, unlabelled, because it
+        # confirms the anchor worked and nothing more.
+        axes[2].plot(x, s_anti, color="tab:orange", lw=1, label="antisense")
+        # Shade the band the statistic uses, so the printed ratio and the
+        # picture cannot disagree about what was measured.
+        for sign in (-1, 1):
+            axes[2].axvspan(sign * SUMMIT_ANTI_MIN_OFFSET, sign * flank_meta,
+                            color="grey", alpha=0.07)
         axes[2].axvline(0, color="k", lw=0.8, ls="--")
         axes[2].set_xlabel("offset from peak summit (bp)")
-        axes[2].legend(fontsize=8)
+        axes[2].set_ylabel("mean fraction of site signal (antisense)")
+        ctx = axes[2].twinx()
+        ctx.plot(x, s_sense, color="tab:blue", lw=0.8, alpha=0.3,
+                 label="sense (anchor, own scale)")
+        ctx.set_yticks([])
+        h1, l1 = axes[2].get_legend_handles_labels()
+        h2, l2 = ctx.get_legend_handles_labels()
+        axes[2].legend(h1 + h2, l1 + l2, fontsize=8)
         # The title says what to look at, because the obvious feature is the
         # uninformative one: sense peaks at 0 by construction.
         axes[2].set_title(f"summit-anchored, {n_summit:,} peaks (annotation-free)\n"
-                          "read the ANTISENSE peak: upstream = OK, downstream = strands swapped")
+                          "read the ANTISENSE trace: upstream = OK, downstream = strands swapped")
     else:
         axes[2].text(.5, .5, "no summit metaplot", ha="center"); axes[2].axis("off")
 

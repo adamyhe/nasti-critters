@@ -2130,6 +2130,44 @@ TSV) and `qc/umi/`. They stay inside the DAG only because `pybigwig`, `pyfastx`,
   correctly placed and low, it prints an explicit dilution note instead. Verified on synthetic PWMs across
   four regimes: flat → flagged, strong Inr at 0 → clean, *weak* Inr at 0 → clean with the note, weak
   signal displaced to +7 → flagged. This is still a position check, not a score — do not grow it into one.
+- **Summit-anchored metaplot: the statistic is a RATIO, and antisense owns the y-axis.** Both of those
+  are corrections made after the first full run, which showed the panel looking **basically identical
+  across all 42 experiments** — the observation that prompted them.
+  **Why it looked identical: sense and antisense shared one y-scale, and the sense spike at 0 is
+  guaranteed by the anchor.** It set the scale, so the antisense channel was compressed onto the axis
+  line. `M.musculus-GCB_PROcap` (antisense peak at −137 bp) and `S.cerevisiae-Ino80ctl_PROcap` (no
+  localized antisense peak at all) were indistinguishable by eye. Antisense is now the primary trace on
+  its own axis, sense is faint context on a twin axis, and the band the statistic uses is shaded so the
+  printed number and the picture cannot disagree.
+  **The numbers were discriminative all along, and they split along known biology:**
+
+  | antisense argmax | experiments |
+  | --- | --- |
+  | **−97 to −159 bp** — canonical divergent distance | all M. musculus, all C. elegans, all C. griseus, C. reinhardtii |
+  | **\|offset\| 360–500** — at the ±500 window edge, i.e. NO localized peak | all D. melanogaster, A. thaliana, P. patens, S. pombe, 4 of 6 S. cerevisiae |
+  | **−1 to +39** — on the summit | S. moellendorffii, both cottons, fly LacZ-KD, Spt5EtOH |
+
+  The middle group is the expected reading for the species this file already documents as heavily
+  unidirectional, plus fly, whose divergent transcription is weaker than mammals'.
+  **So `argmax` was the wrong readout**: on a channel with no peak it lands wherever noise is highest,
+  and the third group above then tripped a naive `argmax > 0` swap test. Most of the flags on the first
+  run were that artefact. It is now `log2(upstream / downstream)` antisense summed over
+  `|offset| ∈ [20, 300]`, which degrades to 0 on a flat channel and has no edge behaviour, with a
+  position reported only when the peak is prominent against the band median and away from the edge.
+  **The band's outer bound is what keeps dense genomes out of it.** S. cerevisiae runs 1.2–4.1 peaks per
+  2114 bp, so a ±500 window usually contains another promoter — which is why yeast shows the corpus's
+  highest antisense fraction (35–43%) *with* a monotone rise to the edge. Unbounded, that pattern scored
+  log2 −1.51 and was flagged as a strand swap; bounded at 300 it scores −0.88 and is not. Both 300 and
+  the −1.0 threshold are **provisional**, calibrated from this corpus like `FLAT_BITS`.
+  **Severity is split by whether a PEAK backs the asymmetry**: downstream weight *with* a localized peak
+  is a flag, downstream weight *without* one is a `REVIEW`, because in a dense genome that is
+  neighbouring promoters rather than a swap. Verified on eight synthetic regimes — divergent broad and
+  narrow, swapped, flat, on-summit, weak, edge-rising, and zero antisense — each landing on its intended
+  verdict.
+  **And the on-summit check has to be measured against the band MAXIMUM, not its median.** Against the
+  median it fired on a genuine broad upstream peak, which still carries real signal at offset 0 while the
+  median is pulled down by the quiet downstream half. Against the maximum it asks the right question: is
+  the summit itself the largest antisense feature in the window?
 - **Stranded metaplot around annotated TSSs. THE PLOT IS THE CHECK — look at it.** The purpose is to
   see, by eye, whether 5' signal sits where it should relative to the annotated TSS. It is not a
   measurement of antisense or divergent transcription, and it is deliberately not a scoring system.
