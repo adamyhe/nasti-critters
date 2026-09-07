@@ -27,7 +27,13 @@ Column notes, because several are easy to misread:
                        is below archive_reads by whatever fastp dropped.
 * `unique_reads`    -- STAR "Uniquely mapped reads number", summed. The ENCODE
                        MAPQ 255 filter keeps exactly these.
-* `signal_reads`    -- reads in the merged BAM ON main_chromosomes, i.e. what
+* `signal_reads`    -- BLANK means NOT MEASURED, never 0: a BAM holding none of
+                       the configured main_chromosomes is a BAM from another
+                       assembly, not an empty library, and reporting its 0 hid
+                       exactly that after two assembly swaps. Counted from the
+                       SAMPLE-keyed BAMs, falling back to run-keyed ones only
+                       for a tree predating the per-sample alignment refactor.
+                       Reads in the merged BAM ON main_chromosomes, i.e. what
                        actually reaches a bigWig. Below unique_reads by dedup
                        (UMI libraries only), by the one-mate filter (paired
                        libraries only), and by the main_chromosomes restriction.
@@ -59,6 +65,14 @@ pipeline columns are blank, and blank is not the same as good.
 `peaks_below_species` needs the whole table, so it is computed in the --all and
 --combine paths and is always empty in a single-experiment TSV. --combine
 recomputes every flag rather than trusting what the per-experiment jobs wrote.
+
+--combine's ROW SET IS config/experiment_config.yaml, not the directory it
+globs. A TSV naming no configured experiment is skipped with a warning, because
+it can never contribute a row: after an experiment is renamed or split nothing
+has the wildcards to rewrite its file, so it is frozen at whatever schema it had
+and will either fail the header check or silently add a stale row. A configured
+experiment with a wrong header is the opposite case and still exits nonzero --
+that is stale output to rebuild, not a file to ignore.
 
 `--flagged-only` writes just the flagged rows, for a short worklist.
 
@@ -295,13 +309,29 @@ def mapped_reads(bam: Path, keep: set | None = None) -> int | None:
         ).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
-    total = 0
+    total, matched = 0, False
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) >= 3 and parts[0] != "*":
             if keep is not None and parts[0] not in keep:
                 continue
+            matched = True
             total += int(parts[2])
+    # NOT-MEASURED, NOT ZERO. A BAM holding none of the current
+    # main_chromosomes is a BAM from a different naming regime -- almost always
+    # an older assembly left on disk -- and returning its 0 makes that
+    # indistinguishable from a library with no usable reads. That is exactly the
+    # distinction pct_rrna already draws (blank means NOT measured, which is not
+    # 0), and it bit here: after the C. reinhardtii and P. patens assembly
+    # swaps, both reported `signal_reads 0` beside 9,216 and 9,833 called peaks,
+    # which cannot both be true. A real library legitimately having zero reads on
+    # its main chromosomes would also have no peaks, so blank is the honest cell
+    # either way.
+    if keep is not None and not matched:
+        print(f"WARNING: {bam} holds none of the configured main_chromosomes "
+              "-- wrong assembly for this config? Reporting signal_reads as "
+              "NOT MEASURED rather than 0.")
+        return None
     return total
 
 
@@ -382,9 +412,20 @@ def collect(exp_id: str, entry: dict, work: Path, peaks: Path,
 
     signal = mapped_reads(work / "exp" / exp_id / "merged.bam", keep)
     if signal is None:                      # merged.bam is temp(); fall back
-        per_run = [mapped_reads(work / "runs" / r / "final.bam", keep) for r in runs]
-        if any(v is not None for v in per_run):
-            signal = sum(v for v in per_run if v is not None)
+        # SAMPLE-keyed first, RUN-keyed only for a tree that predates the
+        # per-sample alignment refactor. This fallback was still run-keyed after
+        # that move, which is worse than merely finding nothing: the old
+        # `runs/{run}/final.bam` files are NOT temp() and survive on disk, so on
+        # a re-mapped tree it silently read BAMs aligned to the PREVIOUS
+        # assembly. Combined with the zero above, that is how C. reinhardtii and
+        # P. patens came out at `signal_reads 0`. star_logs() was taught both
+        # layouts for the same reason; this is the counterpart it missed.
+        bams = [work / "samples" / s / "final.bam" for s in grouping]
+        if not any(b.exists() for b in bams):
+            bams = [work / "runs" / r / "final.bam" for r in runs]
+        per_bam = [mapped_reads(b, keep) for b in bams]
+        if any(v is not None for v in per_bam):
+            signal = sum(v for v in per_bam if v is not None)
 
     cls = peak_classes(pints_dir)
     total_peaks = count_bed(peaks)
@@ -647,7 +688,16 @@ def report_flags(rows: list[dict], qc_reads: Path | None = None) -> None:
         # hardest on the corpus-wide read_structure.tsv, which read_survey_flags
         # falls back to when a per-experiment file is absent: a stale one there
         # satisfies the fallback and silently answers for every experiment.
+        # Only files that ANSWER for something. read_survey_flags reads
+        # qc/reads/{exp}.tsv and falls back to the corpus-wide
+        # read_structure.tsv, so those are the only files whose schema can
+        # disable a check. An orphaned survey for a removed experiment is
+        # consulted by nothing, and warning about it was pure noise in the one
+        # place whose value is that a warning means something.
+        consulted = {r.get("experiment", "") for r in rows} | {"read_structure"}
         for path in sorted(qc_reads.glob("*.tsv")):
+            if path.stem not in consulted:
+                continue
             with path.open() as f:
                 cols = (csv.reader(f, delimiter="\t").__next__()
                         if path.stat().st_size else [])
@@ -724,28 +774,74 @@ def main():
     if args.combine is not None:
         paths = [Path(x) for pat in args.combine for x in sorted(glob.glob(pat))] \
             if any("*" in x for x in args.combine) else [Path(x) for x in args.combine]
+        # THE ROW SET IS THE CURRENT CONFIG, not whatever is on disk. The
+        # Snakefile globs the whole per_experiment/ directory so that a
+        # subsetting --config cannot narrow this global table, which means the
+        # glob also picks up files for experiments that NO LONGER EXIST --
+        # M.musculus-liver-{old,young}_ChROcap after the 2026-09-01 sex split.
+        # Nothing can ever rewrite those: no rule has their wildcards to fill,
+        # so each is frozen at whatever schema it was written under. Both
+        # failure modes were observed from that one pair. One froze at 18
+        # columns and hard-failed the header check below, killing a
+        # two-experiment run that had nothing to do with it; its twin froze at
+        # the current 21 and was accepted, giving a 44-row table over 42
+        # experiments -- the worse outcome, because it reads as complete.
+        # Skipping by name fixes both, and it is the honest rule: a file naming
+        # no configured experiment cannot contribute a row whatever its header.
+        configured = set(load_config())
         rows = []
         for path in paths:
             if not path.exists():
                 continue
+            if path.stem not in configured:
+                # Deliberately not phrased as "delete it": this also catches
+                # a too-broad glob that swept in something which is not a
+                # stats TSV at all, and telling someone to delete their source
+                # tree is worse advice than the bug.
+                print(f"WARNING: ignoring {path} -- names no configured "
+                      "experiment, so it cannot contribute a row. If it is a "
+                      "stats TSV for an experiment that no longer exists, "
+                      "delete it; nothing can regenerate it.")
+                continue
             with path.open() as f:
                 reader = csv.DictReader(f, delimiter="\t")
-                # Refuse anything that is not a per-experiment stats TSV. A
-                # too-broad --combine used to be silently absorbed: DictReader
-                # takes whatever the first line offers as fieldnames, so
-                # qc/rrna/*.tsv contributed duplicate rows carrying only
-                # pct_rrna and this script's own source contributed one blank
-                # row per line of Python. `--combine {input}` in the Snakefile
-                # did exactly that, for a 685-row table over 42 experiments.
+                # A CONFIGURED experiment with the wrong header is stale output
+                # that must be regenerated, not ignored -- so this stays a hard
+                # failure. It is also what still catches a too-broad --combine:
+                # DictReader takes whatever the first line offers as
+                # fieldnames, so `--combine {input}` in the Snakefile once swept
+                # in qc/rrna/*.tsv and qc/reads/*.tsv, which ARE named by
+                # experiment, for a 685-row table with every pipeline column
+                # blank.
                 if reader.fieldnames != COLUMNS:
                     sys.exit(
-                        f"{path}: not a per-experiment stats TSV "
-                        f"(header has {len(reader.fieldnames or [])} column(s), "
-                        f"expected {len(COLUMNS)}). --combine takes only "
+                        f"{path}: header has "
+                        f"{len(reader.fieldnames or [])} column(s), expected "
+                        f"{len(COLUMNS)}. {path.stem} IS a configured "
+                        f"experiment, so this is stale output and must be "
+                        f"rebuilt rather than skipped:\n"
+                        f"    python {Path(__file__).name} -e {path.stem} "
+                        f"-o {path}\n"
+                        f"or `snakemake --forcerun experiment_stats --config "
+                        f"experiments={path.stem}`. If instead this is not a "
+                        f"stats TSV at all, --combine takes only "
                         f"qc/stats/per_experiment/*.tsv; qc/rrna and qc/reads "
                         f"are found automatically via --qc-rrna/--qc-reads."
                     )
                 rows.extend(reader)
+        # Zero rows is always a mistake and must not be written. The rule's
+        # inputs guarantee the per-experiment TSVs for TARGETS exist before
+        # this runs, so an empty result means the glob matched nothing that
+        # counts -- and an empty global table reads as complete, which is the
+        # same trap the whole-directory glob and the header check exist to
+        # avoid. This is also what still fails a --combine pointed somewhere
+        # entirely wrong, now that a name mismatch alone only warns.
+        if not rows:
+            sys.exit(
+                f"--combine matched no per-experiment stats TSV "
+                f"({len(paths)} file(s) examined). Expected "
+                f"qc/stats/per_experiment/*.tsv."
+            )
         rows.sort(key=lambda r: (str(r.get(args.sort_by, "")), r.get("experiment", "")))
         # Recomputed here rather than trusted from the per-experiment TSVs:
         # peaks_below_species needs the whole table, which a single-experiment

@@ -160,14 +160,39 @@ A.thaliana:
   4: ["5"]
 
 # ---------------------------------------------------------------------------
-# Species added with the McDonald2024 manifest update. Both entries below are
-# Reused UNCHANGED from earlier lab work, after cross-checking the two copies of
-# it we hold against each other -- same peak-matched assignment. Names are quoted strings, like A.thaliana above:
-# bare-numeric YAML keys would parse as ints and extract_loci compares
-# chromosome names literally against the FASTA.
+# Species added with the McDonald2024 manifest update.
 #
-# NOTE Chlamydomonas is in Ensembl **plants**, not protists, as of release-63;
-# the assembly (v5.5) is unchanged, so this assignment still applies.
+# BOTH ARE THE REUSED LAB ASSIGNMENT AGAIN, as of the 2026-09-07 assembly
+# reverts. They were reused unchanged from earlier lab work -- cross-checked
+# against the two copies we hold, same peak-matched assignment -- until the
+# 2026-09-06 swap (C. reinhardtii v5.5 -> ASM4749649v1, P. patens Phypa_V3 ->
+# V7) rewrote them onto the new chromosome names as a mechanical ROUND-ROBIN
+# over chromosome index (i % 5), moving 13 of 17 and 24 of 26 chromosomes into a
+# different fold. That broke the only thing reuse buys -- a locus held out here
+# is held out everywhere else the lab trains -- and was not this project's
+# method either, which matches PEAK COUNTS and never index or length.
+#
+# Reverting the assemblies restored the bare `1`-`17` and `1`-`27` names and
+# with them both assignments, verified byte-for-byte against 80b266e^. This
+# closed the repo's last open fold item. Reasons for each revert are in
+# config/genomes.yaml: C. reinhardtii because the library is not
+# ASM4749649v1's CC-1690 strain and models already exist on v5.5; P. patens
+# because Phypa_V3 is the only version the UCSC browser supports.
+#
+# DO NOT "IMPROVE" EITHER. The fold sizes are uneven -- 2/3/3/3/6 and 4/5/5/6/7
+# -- and are not balanced by peak count in this repo's sense. That is what reuse
+# means; rebalancing them silently decouples these models from our other work.
+#
+# ONE KNOWN WART, deliberately kept: P. patens fold 0 contains `27`, which V7
+# resolved away as a MIS-ASSEMBLED FRAGMENT. So fold 0 holds peaks on an
+# artifact. Dropping `27` would itself be a divergence from the reused
+# assignment, so it stays; weigh it when reading P. patens fold-0 metrics.
+#
+# Names are bare numbers for both, so the numeric-name warning above applies:
+# they parse as ints and extract_loci compares names literally against the
+# FASTA.
+#
+# NOTE Chlamydomonas is in Ensembl **plants**, not protists, as of release-63.
 # ---------------------------------------------------------------------------
 C.reinhardtii:
   0: ["3", "12"]

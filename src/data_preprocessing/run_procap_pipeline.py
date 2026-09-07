@@ -511,7 +511,13 @@ def call_peaks(pl_bw: Path, mn_bw: Path, exp_id: str, pipeline: dict,
     # PINTS defaults --chromosome-start-with to "chr", which matches NOTHING for
     # the Ensembl-named species and would silently return zero peaks.
     # Keep in step with PINTS_CHROM_PREFIX in workflow/Snakefile.
-    prefixes = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": ""}
+    # "ncbi" is GenBank-accession naming (CM...), which C. reinhardtii's
+    # ASM4749649v1 uses; "gwh" is CNCB's Genome Warehouse, which P. patens V7
+    # uses. Both were added to workflow/Snakefile with those assemblies and NOT
+    # here, so this driver raised SystemExit for both species -- the exact drift
+    # the comment above warns about. Both take the empty prefix, as ensembl does.
+    prefixes = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": "",
+                "ncbi": "", "gwh": ""}
     style = genome["chrom_style"]
     if style not in prefixes:
         raise SystemExit(

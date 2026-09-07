@@ -269,6 +269,10 @@ python src/data_preprocessing/run_procap_pipeline.py --index-only --species S.ce
 python src/data_preprocessing/run_procap_pipeline.py -e S.cerevisiae-Ino80ctl_PROcap --dry-run
 python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
 
+# Just the initiator logos + metaplots, for every experiment. Narrow on
+# purpose: `qc` also builds the three reports that read the RAW FASTQs.
+snakemake orientation -c8 --rerun-triggers mtime        # target BEFORE --config
+
 # Mapped reads + peak counts per experiment, for exclude/merge decisions
 snakemake stats -c8 --config tier=include,conditional   # target BEFORE --config
 python src/qc/experiment_stats.py --all \
@@ -332,6 +336,21 @@ python src/bpnet/modisco/launch_report.py --dry-run
 
 There is no linter config, no formatter config, and no tests. Verification means running a script — use
 `--dry-run` (preprocessing/launcher) or a single `-f 0` fold as the cheap smoke test.
+
+**Syntax-check against the OLDEST interpreter you can find, not the newest.** The env is **Python 3.11**
+(`uv.lock` resolves torch 2.13 on 3.11), and a dev machine may be newer — mine is 3.12, where **PEP 701**
+legalised multi-line f-string expressions and nested same-type quotes. A local `ast.parse` therefore
+passed a file that was a hard `SyntaxError: unterminated string literal` on the cluster, and it failed at
+*import*, so it took the whole run down before any work happened. There is no CI to catch this. Sweep with
+whatever old interpreter is on the box — macOS ships one at `/usr/bin/python3`:
+
+    for f in $(git ls-files '*.py'); do
+      /usr/bin/python3 -c "import sys,ast;ast.parse(open(sys.argv[1]).read())" "$f" \
+        || echo "FAILS: $f"
+    done
+
+All 34 tracked files pass under 3.9.6 as of 2026-09-06. Keep it that way: precompute a conditional into a
+variable rather than inlining it across lines inside an f-string.
 
 ## Architecture: one convention, via src/experiments.py
 
@@ -1024,6 +1043,17 @@ column.
 every job shows as pending and the totals are meaningless for judging what an edit invalidates. Reason
 about rerun-triggers from the rule definitions, or run the dry-run where the data is.
 
+**Editing `config/genomes.yaml` is invisible the same way, and worse.** It is read at parse time
+(`GENOMES = load_yaml(...)`) and is a declared input of nothing, so a rule only notices a change if the
+changed value happens to be interpolated into its own `params`. For rules whose script reads the config
+itself that is never true: `rrna_content`'s params are the script path and the FASTQ dir, so adding
+`rdna_regions` for C. reinhardtii changes **nothing** Snakemake can see — not under `mtime`, not under
+default triggers. Force it: `snakemake --forcerun rrna_content --config experiments=<exp>`.
+
+Declaring `genomes.yaml` as an input of every rule that reads it would fix the class, at the cost of
+re-running the whole corpus for any one species' edit. Until that trade is taken, treat a `genomes.yaml`
+change as needing an explicit `--forcerun` and work out which rules consume the field you touched.
+
 ## Editing the `trim` rule re-runs everything — know this before you do it
 
 `trim` has two PERSISTENT outputs (`fastp.json`, `fastp.html`) alongside its `temp()` FASTQs. So unlike
@@ -1039,6 +1069,209 @@ down instead, run with `--rerun-triggers mtime` and delete only the affected exp
 The reverse is also worth knowing: a change *below* trim usually will NOT be picked up automatically,
 because the intermediate chain is `temp()` and already deleted, so the params/code comparison has no
 output file to compare and the persistent files downstream look up to date. Force those explicitly.
+
+## One timestamp on a `.fai` re-fetches 74 FASTQs — use the standalone scripts
+
+Observed 2026-09-06 on the real tree: `snakemake orientation -n --rerun-triggers mtime`, asking for
+nothing but 42 plots, planned **701 jobs** — 74 `fetch_fastq`, 56 `trim`/`align`/`filter_unique`/
+`final_bam`, 10 `star_index`, 80 `bedgraph`/`bigwig`, 40 `pints`/`combine_peaks`. `snakemake stats` does
+the same. Nothing was wrong with the tree; the script edit was not the cause.
+
+**The chain is short and worth memorising, because any invalidation near the top of it rebuilds from
+FASTQ.** `chrom_sizes`' output is a **declared input of `bigwig`** (`sizes=`). So one `.fai` newer than
+one `.chrom.sizes` re-runs `chrom_sizes`, whose output is then newer than every bigWig ->
+`bigwig` -> needs `{strand}.bg`, `temp()` and deleted -> `bedgraph` -> needs `merged.bam`, `temp()` and
+deleted -> `merge_runs` -> `final_bam` -> `align` -> `trim` -> the FASTQs, deleted after mapping ->
+`fetch_fastq`. **The `temp()` design that makes the pipeline cheap to store is exactly what makes a
+top-of-chain mtime expensive to satisfy**, and on a tree whose STAR indices have been cleaned up it
+rebuilds those too. Read the `Reasons:` block to find the roots: "updated input files" lists the rules
+mtime actually triggered, and anything else is downstream of them.
+
+**The escape hatch is that every QC script runs standalone against what is already on disk**, which is
+why they take `-e`/`--all` at all. None of these touch the DAG:
+
+    python src/qc/experiment_stats.py --all -o qc/stats/experiment_stats.tsv \
+        --markdown qc/stats/experiment_stats.md
+    python src/qc/rrna_content.py -e <exp> --fastq-dir data/fastq -o qc/rrna/<exp>.tsv
+    xargs -P 8 -I{} python src/qc/orientation_qc.py -e {} --outdir qc/orientation \
+        --tsv qc/orientation/{}.tsv < experiments.txt
+
+Three traps in doing it that way. Run `rrna_content` **before** `experiment_stats --all`, which reads
+`qc/rrna/` opportunistically, or the adjusted mapping rate is computed from a stale rRNA figure. Loop
+`orientation_qc` per experiment rather than using `--all`: `--tsv` is a single path reopened per
+experiment, so `--all --tsv` leaves one file describing only the last one. And check
+`ls data/annotation/` before parallelising it — without `--annotation` the script fetches its own, and
+concurrent jobs on one species race for the same file, which is the whole reason the rule passes the
+path.
+
+**The zero-risk way to run just the step you want is `--forcerun` PLUS `--allowed-rules`.** Forcing
+alone is not enough — the upstream jobs are genuinely out of date, so `--forcerun orientation_qc` still
+drags the whole chain. Restricting the rule set is what stops it, and it changes no DAG state at all:
+
+    snakemake orientation -j 48 --rerun-triggers mtime \
+        --forcerun orientation_qc --allowed-rules orientation_qc orientation
+
+Verified on a fixture reproducing the cascade (stale `.fai`, deleted `temp()` chain, absent FASTQ):
+7 jobs unrestricted, **1** with the two flags. The same shape works for the table —
+`--forcerun experiment_stats stats_table --allowed-rules experiment_stats stats_table stats`. It does
+**not** work for a rule whose inputs are genuinely missing: `rrna_content` reads the raw FASTQs, so if
+those are gone, forbidding `fetch_fastq` just moves the failure. Run that one from the script instead.
+
+**`--touch` DOES NOT WORK ON THIS PIPELINE once the FASTQs are deleted, and that is structural.**
+`fetch_fastq` declares `protected()`, and `--touch` runs each job's postprocess, which calls
+`handle_protected()` -> `IOFile.protect()` -> `os.lstat` on the output. On a deleted FASTQ that is:
+
+    FileNotFoundError: [Errno 2] No such file or directory: '.../data/fastq/DRR991137_1.fastq.gz'
+
+and it takes the whole invocation down. The repo's own lifecycle is fetch -> map -> **delete the FASTQs
+to save space** (~202 GiB), so any DAG that reaches `fetch_fastq` is in this state, which is most of
+them. Reproduced on a fixture by adding `protected()` to its fetch rule — without the decorator `--touch`
+completes and skips missing files, which is why an earlier version of this note recommended it. Three of
+this pipeline's five `protected()` uses are files that legitimately get cleaned up, so do not expect
+`--touch` to be available.
+
+**So the working answer is the `--forcerun` + `--allowed-rules` pair above.** It needs no DAG state, so
+it is repeatable, and the cost is having to pass both flags every time.
+
+If you genuinely want the DAG quiet, the lever that DID work is `--cleanup-metadata` on the offending
+outputs: deleting a record leaves nothing to compare, and Snakemake then reports the file as up to date
+(this is why `chrom_sizes` disappeared from the job list after its records were cleared, even though its
+`.fai` is still newer). Weigh it carefully — a file with no provenance also stops re-triggering on code
+and params changes, which is the silent-staleness failure this file warns about elsewhere.
+
+**And `--touch -n` tells you nothing either way**: it is a dry run OF THE TOUCH, so it prints the whole
+DAG it would touch — the same several-hundred-job list you are trying to eliminate — which reads exactly
+like the touch having failed.
+
+Two things measured on the fixture rather than assumed: `--touch` does **not** fabricate a missing
+input — the absent FASTQ stayed absent, so it cannot manufacture an empty file at a path the fetch
+convention treats as complete-and-verified — and the subsequent `--forcerun` genuinely re-executes the
+rule rather than touching it (the fixture's output picked up the edited script's content).
+
+`--touch` still asserts the existing outputs are correct. If a `.fai` differs in *content* from what the
+bigWigs were built against, that assertion is false and a real rebuild is owed — the one case where
+paying for the 701 jobs is the right answer, and the reason to check before touching.
+
+**Check it by CONTENT, not by reasoning about the timestamps** — `chrom_sizes` is
+`cut -f1,2 {fai} | grep -E '^<chrom>\t|…'`, so its output is a pure function of the `.fai` and
+`main_chromosomes` and can be reproduced in a few lines:
+
+    python - <<'EOF'
+    import yaml, pathlib
+    G = yaml.safe_load(open('config/genomes.yaml'))['species']
+    R = pathlib.Path('.')
+    for sp, d in sorted(G.items()):
+        fai, cs = R/(d['fasta']+'.fai'), R/'data/procap_work/genome'/f'{sp}.chrom.sizes'
+        if not (fai.exists() and cs.exists()):
+            print(f'{sp:18} SKIP'); continue
+        keep = {str(c) for c in d['main_chromosomes']}
+        want = ''.join(f'{p[0]}\t{p[1]}\n' for p in
+                       (l.split('\t') for l in fai.read_text().splitlines()) if p[0] in keep)
+        print(f'{sp:18} {"IDENTICAL" if want == cs.read_text() else "DIFFERS"}')
+    EOF
+
+Run on the real tree 2026-09-06: **all 12 IDENTICAL**, so the entire 701-job plan would have rewritten
+byte-identical files.
+
+**There are TWO independent causes here, and the second one is the blocker. Do not stop at the
+timestamps.** An earlier version of this note attributed the whole thing to genome prep done outside the
+DAG — all 8 `.chrom.sizes` share the second `2026-09-03 02:45:43` while every `.fai` is an hour or more
+later (`03:56`-`04:35`), and Snakemake does report "missing provenance/metadata" for `faidx`,
+`fetch_genome` and others. That inference was wrong about the `chrom_sizes` jobs specifically:
+
+    IncompleteFilesException:
+    Incomplete files:
+    .../genome/M.musculus.chrom.sizes   (+ 7 more)
+
+**Snakemake HAS metadata for those 8 and it says INCOMPLETE** — a `chrom_sizes` batch was interrupted
+mid-write, which is exactly what 8 files sharing one second looks like. An incomplete marker forces a
+rerun whatever the mtimes say, and once `--touch` is attempted it **aborts DAG construction entirely**,
+so nothing proceeds until it is cleared. The 8 incomplete files are precisely the `chrom_sizes 8` in the
+original 701-job plan.
+
+**Clear it with `--cleanup-metadata`, NOT with `--rerun-incomplete`** — and the content check above is
+what licenses that. **Pass ABSOLUTE paths**, exactly as the exception printed them:
+
+    snakemake --cleanup-metadata \
+        /path/to/repo/data/procap_work/genome/{A.thaliana,C.elegans,C.griseus,\
+        D.melanogaster,G.arboreum,G.hirsutum,M.musculus,S.moellendorffii}.chrom.sizes
+
+**That error is misleading in TWO ways, and the second one matters more.**
+
+First, metadata is keyed by the LITERAL path string — `Persistence._get_key()` is `str(f)` with no
+normalization — and every path in this Snakefile is absolute because
+`REPO_ROOT = Path(workflow.basedir).parent`. A relative argument therefore looks up a key that was never
+written, and reports `Failed to clean up metadata ... the reason might be file system latency or still
+running jobs`, which points at neither real cause.
+
+Second, and the reason to run the dry-run before believing the error: **with absolute paths it can fail
+while having already done the thing you wanted.** There are two separate stores,
+`.snakemake/incomplete/` for markers and `.snakemake/metadata/` for records, and
+`Persistence.cleanup_metadata()` is:
+
+    key = self._get_key(target)
+    self._unmark_incomplete(key)      # deletes the MARKER
+    return self._delete_record(key)   # deletes the RECORD -- only this is reported
+
+An interrupted job wrote a marker (`started()`) and never wrote a record (`finished()` never ran), so
+the marker is deleted and the record was never there — failure is reported for the half that was already
+absent. **Re-run the dry-run rather than trusting the exit status**; the `IncompleteFilesException` is
+usually gone. Confirm on disk if you want, markers being urlsafe-base64 of the absolute path:
+
+    python - <<'EOF'
+    from base64 import urlsafe_b64encode
+    from pathlib import Path
+    root = Path('/path/to/repo')
+    for store in (root/'.snakemake/incomplete', root/'workflow/.snakemake/incomplete'):
+        for sp in ('A.thaliana', 'M.musculus'):        # etc.
+            key = str(root/'data/procap_work/genome'/f'{sp}.chrom.sizes')
+            b = urlsafe_b64encode(key.encode()).decode()
+            print(store, sp, 'PRESENT' if (store/b).exists() else 'gone')
+    EOF
+
+Check **both** stores: `.snakemake` is resolved against the WORKING directory, so running from `workflow/`
+and from the repo root build two independent ones, and a marker cleared in one still blocks the other.
+
+Note `--cleanup-metadata` deletes the whole record, not just the marker, so those files end up with NO
+provenance and fall back to mtime comparisons — which is why the `--touch` step below is usually needed
+after it rather than instead of it.
+
+`--rerun-incomplete` is the trap, and it is the remedy the error message lists second. Regenerating
+`chrom_sizes` is trivially cheap in itself — a `cut` and a `grep` — but it gives those files a NEW mtime,
+which makes them newer than every bigWig and triggers the full `bigwig -> bedgraph -> align -> trim ->
+fetch_fastq` cascade this section is about. The cheap fix causes the expensive one.
+`--cleanup-metadata` only clears the flag and leaves the timestamps alone.
+
+Then re-run the dry-run. If `chrom_sizes` still appears, the mtime reason is live as well and `--touch`
+handles that; if it does not, the incomplete marker was the whole story. Both are worth knowing because
+they present identically in the job counts and only the `Reasons:` block and the exception message tell
+them apart.
+
+## `--rerun-triggers mtime` CANNOT see a new input, so it cannot see a new decoy
+
+Measured on a fixture 2026-09-06, after
+`snakemake --rerun-triggers mtime --config experiments=...` reported **"Nothing to be done"** for a
+re-map that had just gained two organelle decoys.
+
+`mtime` compares the timestamps of a job's **existing** inputs against its outputs. A decoy that has
+never been fetched has no timestamp, and Snakemake does not schedule a missing input's rule when the
+downstream output already exists -- the same behaviour that makes a deleted `temp()` chain fail to
+retrigger. So adding an `organelle_accessions` or `rdna_accession` entry is **invisible** under `mtime`:
+no `fetch_decoy`, no `star_index`, no `align`. The `input` trigger, which is ON by default, is the one
+that notices a rule's input *set* changed.
+
+| invocation | result on the fixture |
+| --- | --- |
+| `--rerun-triggers mtime` | **Nothing to be done** |
+| default triggers | `fetch_decoy` -> `index` -> `align` |
+| `--rerun-triggers mtime --forcerun index` | `fetch_decoy` -> `index` -> `align` |
+
+**So use DEFAULT triggers for a config change and scope it with `--config experiments=`**, which is what
+bounds the cascade -- the reason to reach for `mtime` in the first place was avoiding a corpus-wide
+re-run, and a subset achieves that without disabling the trigger you need. It is also the more correct
+choice for a `genomes.yaml` edit generally, since those values reach `bedgraph` and `pints` as `params`,
+which `mtime` equally cannot see. Keep `mtime` for an edited SCRIPT, where the trigger is an existing
+input with a fresh timestamp.
 
 ## Data provenance and the re-mapping transition
 
@@ -1478,8 +1711,8 @@ Two consequences already applied:
 | A. thaliana | TAIR10 | Klasfeld 20-inputs, **Boyle-Lab software**, versioned in-repo | 83 |
 | S. cerevisiae | R64-1-1 | none published | — |
 | S. pombe | ASM294v2 | none published | — |
-| C. reinhardtii | Chlamydomonas_reinhardtii_v5.5 | none published | — |
-| P. patens | Phypa_V3 | none published | — |
+| C. reinhardtii | Chlamydomonas_reinhardtii_v5.5 (**reverted 2026-09-07** from ASM4749649v1) | none published | — |
+| P. patens | Phypa_V3 (**reverted 2026-09-07** from Physcomitrium_patens_V7) | none published | — |
 | S. moellendorffii | v1.0 | none published | — |
 | C. griseus | CriGri-PICRH-1.0 | none published | — |
 
@@ -1549,10 +1782,270 @@ twelve are already alt-free.** Do not add a contig-filtering step; there is noth
 | R64-1-1 | 17 = 16 chromosomes + Mito | 0 |
 | TAIR10 | 7 = 5 chromosomes + Mt + Pt | 0 |
 | ASM294v2 | 6 = I, II, III, MT, MTR, AB325691 | 0 |
-| Chlamydomonas_reinhardtii_v5.5 | 53 = 17 chromosomes + 36 scaffolds, **NO organelles** | 0 |
-| Phypa_V3 | 357 = 27 chromosomes + 330 scaffolds, **NO organelles** | 0 |
+| Chlamydomonas_reinhardtii_v5.5 | 53 = 17 chromosomes + 36 unplaced scaffolds, **NO organelles** | 0 |
+| Phypa_V3 | 357 = 27 chromosomes + 330 unplaced scaffolds, **NO organelles** | 0 |
 | v1.0 (S. moellendorffii) | 759 = 0 chromosomes + Pt + 757 scaffolds | 0 |
 | CriGri-PICRH-1.0 | 647 = 10 chromosomes + 637 unplaced | 0 |
+
+## Assembly survey, 2026-09-07: all 12 checked against NCBI, one candidate pair, two closed
+
+Run once so it is not re-derived. Method: NCBI datasets v2 `dataset_report` per taxon, chromosome- and
+complete-level only, plus `sequence_reports` for the candidates. **Re-run it the same way and record the
+date and counts**, as with the mm10-vs-mm39 check.
+
+**Nothing to do for eight of twelve, for two different reasons.** dm6 / mm10 / ce11 are locked by
+ENCODE/modENCODE convention *and* by being the only assemblies with published exclusion lists; their
+newer options are all strain panels with no reference status (fly GUM/A4/SAM, mouse T2T ESC lines).
+R64-1-1 and ASM294v2 are the references, with 300 and 15 newer chromosome-level assemblies that are
+likewise strain panels. C. reinhardtii and P. patens were just settled (below). A. thaliana has a real
+successor in **TAIR12** (`GCA_978657495.1`, contig N50 27.78 Mb against TAIR10.1's 11.19 Mb, annotated)
+and it is still **not worth taking**: TAIR10.1 remains `refseq_category: reference genome`, and TAIR10
+holds **the only published exclusion list among the plants**, versioned in-repo at TAIR10 coordinates and
+deliberately stripped to bare `1`-`5`. A 2.5x contiguity gain does not pay for a liftover of that.
+
+**Two species have NOTHING BETTER, which closes two standing open items.**
+
+- **S. moellendorffii: ZERO chromosome- or complete-level assemblies exist for the taxon.** Current
+  RefSeq `GCF_000143415.4` is still Scaffold — contig N50 **0.12 Mb**, 757 scaffolds, 5,152 components.
+  So peak-level folds are **permanent, not a stopgap**, and the `>= 500 kb` scaffold cutoff in
+  `genomes.yaml` is the only lever available. Do not go looking again without re-running the survey.
+- **C. griseus: `CriGri-PICRH-1.0` is the only chromosome-level assembly and is the reference.** Its
+  unassembled chromosome 1 — the reason `RAZU02000001.1` and `RAZU02000002.1` share a fold — is
+  inherent and not fixable by an update.
+
+**The cotton pair is the one real candidate, and it is PARKED as not worth its cost alone.**
+
+| | contig N50 | scaffolds | organelles | annotation |
+| --- | --- | --- | --- | --- |
+| G. hirsutum `GCF_007990345.1` v2.1 *(in use)* | **0.78 Mb** | 1,031 | MT + Pltd **present** | RefSeq RS_2024_08 |
+| G. hirsutum `GCA_007990345.2` **TM1 v3.0** | **39.95 Mb** (51x) | 249 | **NONE** | **none** (GFF 404) |
+| G. arboreum `GCF_025698485.1` v2 *(in use)* | 11.69 Mb | 946 | MT + Pltd **present** | RefSeq RS_2022_12 |
+| G. arboreum `GCA_036320975.1` **ZSTU_Garb** | **112.12 Mb** (9.6x) | 52 | **NONE** | submitter (GFF 200) |
+
+**The 51x is much less than it sounds.** G. hirsutum's ~5,700 gaps are ~0.01% of 2.28 Gb, so at 30-50 bp
+inserts the MAPPING RATE barely moves. What gaps cost is TRAINING WINDOWS: a 2,114 bp window overlapping
+one carries an N and is dropped by `filter_nonACGT_regions.py`, so ~5,700 x 4.2 kb is **~1.1% of loci**,
+about 1,900 of its 171,640 peaks.
+
+**The better argument is that the diploid-vs-tetraploid pair is ALREADY badly mismatched, with the
+tetraploid the worse assembly** — 0.78 against 11.69 Mb contig N50, **15x apart**. So the ~1% gap penalty
+currently falls asymmetrically on AD1, and **the measured "AD1's A subgenome is 62.0 peaks/Mb against the
+diploid's 60.1" — a 3% difference — has a ~1% assembly artifact inside it.** That caveat belongs next to
+that result whether or not the swap ever happens; it does not flip the sign, which is what the argument
+there rests on. Upgrading both narrows the mismatch to 2.8x, G. hirsutum alone to 3.4x.
+
+**Costs, in the order they bite:**
+
+- **82.5 GiB of FASTQ must be re-fetched** — cotton is ~41% of the corpus's 202 GiB and the lifecycle
+  deletes FASTQs after mapping. Check `ls data/fastq/DRR9911{37,38,39,40}_*.fastq.gz` first; if they
+  survived, this cost disappears and the trade changes completely.
+- The corpus's most expensive re-map: two 40 GB STAR indices and **949.5 M post-trim reads** over 4
+  alignments, `DRR991138` alone being 375.6 M pairs.
+- **BOTH candidates DROP THE ORGANELLES**, verified from their sequence reports (role `Chromosome` only)
+  against v2.1/ASM2569848v2 which carry MT + Pltd. That is precisely the regression that cost
+  C. reinhardtii and P. patens ~2 mapping points each when their decoys were dropped. The replacements
+  are known and identity-matched to what is in-assembly today — G. hirsutum `JX944505.1` / `DQ345959.1`,
+  G. arboreum `KR736342.1` / `HQ325740.1`, all four satisfying the `[A-Z]{1,4}[0-9]{5,8}` wildcard
+  constraint — and `organelle_contigs` must be emptied in the same edit or `rrna_content.py` scores
+  contigs that no longer exist.
+- **G. hirsutum loses its rRNA source**, reproducing the P. patens failure exactly: `pct_rrna` (22.4%)
+  comes from RefSeq GFF3 `rRNA` features with `rdna_regions: []`, so it would blank,
+  `rrna_indexed` would go `no`, and `WARN:low_mapping(38%,adj)` would silently change basis to raw.
+  `rdna_regions` needs k-mer measurement for **both**, since G. arboreum keeps a GFF and a split basis
+  would poison the very comparison these two libraries exist to support.
+
+**What is cheaper than expected: no code change, and the folds carry over EXACTLY.** `chrom_style: ncbi`
+(GenBank `CM` accessions) is already in both drivers' PINTS prefix maps. G. hirsutum keeps its chromosome
+names and accession lineage (`CM017662.1` -> `CM017662.2`), with A01-A13 = `CM017662.2`-`CM017674.2` and
+D01-D13 = `CM017675.2`-`CM017687.2`, so **homoeolog *i* still pairs with *i*+13** and the paired
+constraint plus its 19.0% spread survive unchanged; G. arboreum's `CM070044.1`-`CM070056.1` are
+chromosomes 1-13 in order. Remaining work is `main_chromosomes`, regenerating
+`experiment_config.yaml`/`datasets.tsv` (skipping that is what silently excluded both plants from the DAG),
+and the `chrom_splits.yaml` comment.
+
+**Residual risks:** every AA-vs-AD headline becomes non-comparable and must be re-derived (the 4.5-point
+mapping gap, the peaks/Mb result, and "143.5 M unique against the paper's 124 M"); and provenance is
+asymmetric — v3.0 is reference-tagged on the SAME biosample (`1008001.06`) while ZSTU_Garb is not
+reference-tagged, is cultivar ZB1, and carries submitter annotation whose `annotation_tss_anchored` would
+have to be judged from provenance rather than fitted.
+
+**Verdict: park it, and take it opportunistically.** ~1% of loci plus a better-balanced comparison does
+not pay for that on its own — but the moment cotton needs re-mapping for any other reason, the marginal
+cost is only the config work and the rDNA measurement, and then it is clearly worth doing.
+
+## BOTH PLANT ASSEMBLY SWAPS WERE REVERTED ON 2026-09-07
+
+The section below is the 2026-09-06 review that kept both. **It is superseded for C. reinhardtii** and
+retained because its reasoning is what the revert had to overturn. Two grounds, one measured and one
+strategic:
+
+- **The library is NOT ASM4749649v1's CC-1690 strain** — measured, see the strain block below: same reads
+  against both references give 0.27% -> 0.32% mismatch per base and 21.75% -> 21.38% unique, i.e. the
+  newer assembly is the *poorer* match to these reads.
+- **Models already exist on v5.5**, so reverting restores comparability with them. This file had recorded
+  that as the only argument for reverting; it is no longer standing alone.
+
+**P. PATENS WAS REVERTED THE SAME DAY, for a different and simpler reason: PHYPA_V3 IS THE ONLY VERSION
+THE UCSC GENOME BROWSER SUPPORTS.** V7 tracks cannot be inspected there at all, and for a repo whose QC
+rests on looking at signal — the metaplot section says outright "THE PLOT IS THE CHECK" — losing the
+browser is a substantive cost rather than a cosmetic one. It also restored P. patens' reused fold
+assignment and its Ensembl GFF3 `rRNA` source, retiring the suspect 76.3% figure.
+**Its costs are real and are not to be papered over.** Gap closure goes back: 2,149 components against
+26, ~1.9% of loci. The **spurious 27th chromosome returns**, and it is a member of fold 0, so that fold
+carries peaks on a mis-assembled fragment — do not silently drop `27` to fix that, since removing it is
+itself a divergence from the reused assignment. And `FAIL:very_low_mapping` should be expected back on
+the 47.4% rRNA basis.
+
+**Between them the two reverts closed the repo's LAST OPEN FOLD ITEM.** Both `chrom_splits.yaml` blocks
+are the reused peak-matched lab assignment again, verified byte-for-byte against `80b266e^`, so the
+round-robin that the swaps introduced is gone without anyone having to re-derive folds from peak counts.
+
+**What the revert gives back, beyond those two:** the ANNOTATION (TSS metaplot panel, and the GFF3 `rRNA`
+source, so `rdna_regions` returns to `[]` and `pct_rrna` to its 39.1% basis) and the **REUSED LAB FOLD
+ASSIGNMENT** — the swap had replaced it with a mechanical round-robin, moving 13 of 17 chromosomes and
+breaking the one thing reuse buys. Restoring the assembly restores the bare `1`-`17` names and with them
+the original assignment, verified byte-for-byte against `80b266e^`.
+
+**What it costs, stated plainly: the gap closure, which was the best of any swap in the corpus.** v5.5 is
+1,512 components against 17, ~5.6% of loci lost to gap-adjacent N. That is accepted deliberately —
+comparability with existing models and a reference matching the library's own strain outweigh it.
+
+**Do not re-swap without a strain-matched assembly.** `ASM4749650v1` is the sister CC-1690 assembly and
+has the same problem; `GCA_026108075.1` is not CC-503 either. A v5.5-strain chromosome-level assembly
+would change this, and none exists today.
+
+**Everything that had to change with it, because the swap's cascade runs in reverse too:**
+`genomes.yaml` (assembly, accession, fasta/fasta_url back to Ensembl Plants release-63, `chrom_style`
+back to `ensembl`, `main_chromosomes` to bare `1`-`17`, `annotation_url`/`format` restored,
+`rdna_regions` back to `[]`, `annotation_tss_anchored` back to `true`); `chrom_splits.yaml`;
+**`experiment_config.yaml` and `datasets.tsv` REGENERATED** — `processed.sequences` is baked in, and
+skipping this is what silently excluded the experiment from the DAG when the swap was made;
+`config/splits/C.reinhardtii_data_fold_assignments.csv` rewritten. `organelle_accessions`
+(`BK000554`, `U03843`) are unchanged and still required — v5.5 lacks its organelles exactly as
+ASM4749649v1 did.
+
+**The two plant assembly swaps were REVIEWED AND KEPT, 2026-09-06, against measured numbers.** Both are
+break-even on mapping once their organelle decoys are back — C. reinhardtii 12.4% against v5.5's 12.6%,
+P. patens 14.4% against Phypa_V3's 14.6%, with `signal_reads` flat (6.15 M vs 6.25 M; 2.40 M vs 2.41 M)
+and slightly more peaks (8,419 vs 8,116; 9,619 vs 9,579). Break-even mapping for a near-gapless assembly
+is a win *for this project specifically*, since gaps near TSSs corrupt training windows directly: 17 gaps
+against 1,512 and contig N50 6.29 Mb against 215 kb for C. reinhardtii, gap-free at N50 17.7 Mb for
+P. patens, which additionally **removes a spurious 27th chromosome** whose peaks sat on a mis-assembled
+fragment. The costs are paid: decoys re-declared, `rdna_regions` measured on both, and C. reinhardtii's
+annotation loss is QC-only with both annotation-free read-outs working.
+**The only argument for reverting would be comparability with existing lab models trained on v5.5 /
+Phypa_V3**, which cuts against the uniform re-map this repo exists to do. Do not revisit without a new
+measurement.
+
+**Re-asked 2026-09-07 with the gap arithmetic the cotton survey introduced, and the two swaps are NOT
+equally good. Both are kept; the reasons differ.** Gap counts are measured from NCBI
+`assembly_stats.number_of_component_sequences`, and the quantity that matters is training-window loss:
+a 2,114 bp window overlapping a gap carries an N and is dropped by `filter_nonACGT_regions.py`, so the
+cost is roughly `gaps x 4.2 kb / genome`.
+
+| | contig N50, old -> new | components | window loss recovered | peaks |
+| --- | --- | --- | --- | --- |
+| C. reinhardtii v5.5 -> ASM4749649v1 | 0.215 -> **6.289 Mb** (29x) | 1,512 -> **17** | **~5.6%** (~470 of 8,419 peaks) | 8,116 -> 8,419 |
+| P. patens Phypa_V3 -> V7 | 0.590 -> **17.707 Mb** (30x) | 2,149 -> **26**, gap-free | ~1.9% (~183 of 9,619 peaks) | 9,579 -> 9,619 |
+| *(G. hirsutum, for scale)* | *0.78 -> 39.95 Mb* | *~5,700 -> ~223* | *~1.1%* | *—* |
+
+So **C. reinhardtii's is the largest window recovery of any species in the corpus, 5x cotton's** — which
+is the strongest single argument for either swap and was not stated when the decision was made.
+
+**P. patens: clearly worth it.** Gap-free against 2,149 gaps, it keeps its annotation, and it deletes the
+**spurious 27th chromosome** whose peaks sat on a mis-assembled fragment — which was a member of old
+fold 0, so that fold was training on an artifact. The only real cost is the fold rebuild, which is owed
+anyway.
+**But do NOT credit it with clearing the `FAIL:very_low_mapping` flag.** `pct_unique_adj` went 27.8% ->
+60.7% because `rdna_regions` was MEASURED (76.3% rRNA) where V3 used Ensembl GFF3 `rRNA` gene spans
+(47.4%) — the same measurement could have been done on V3. That is a measurement change, not an assembly
+win, and the 76.3% is itself suspect: the three spans are round 1.4 Mb blocks, and 4.2 Mb of a 472 Mb
+genome capturing 67.6% of reads means most of it is genuinely rDNA but the ends are probably over-broad.
+Narrow them before quoting that figure.
+
+**C. reinhardtii: genuinely marginal, and weaker than the original write-up implied.** The 5.6% window
+recovery is real and is the best in the corpus. Against it: mapping is slightly WORSE (12.6% -> 12.4%
+`pct_unique`, signal 6.25 -> 6.15 M), the **entire annotation is gone** (costing the TSS metaplot panel
+and the rRNA source, which then needed k-mer measurement), and the **STRAIN CHANGED** — v5.5 is CC-503,
+ASM4749649v1 is CC-1690, across which Gallaher 2015 reports 524,640 SNVs at ~2% relative divergence.
+That matters mechanically here rather than academically: at `--outFilterMismatchNmax 1`, a 2% divergence
+over a 40 bp insert expects ~0.8 mismatches, i.e. right at the filter's budget.
+
+**Provenance supplied 2026-09-07: the samples came from the MAYFIELD LAB, which has previously used
+CR25, CR125 and CC-1690.** The exact strain is not identifiable — the deposit records none of them — but
+the candidate set is. Curated provenance with no archive backing, exactly like `umi_len`/`assay_label`;
+do not expect to re-derive it from ENA or GEO.
+
+**MEASURED 2026-09-07, and the library is NOT CC-1690: it matches v5.5's CC-503 better.** This is the
+third position this file has taken, so be clear which is which. It first said the strain was unknowable;
+then, on the provenance above, that CC-1690 being in the candidate set favoured the new assembly. That
+second reading was a PRIOR. This is a MEASUREMENT and supersedes it. Same reads, different reference —
+`input_reads` is byte-identical at 9,020,748, so nothing about trimming differs:
+
+| `SRR24798065` | v5.5 (CC-503) | ASM4749649v1 (CC-1690) |
+| --- | --- | --- |
+| uniquely mapped | 21.75% | **21.38%** |
+| average mapped length | 44.99 | 44.83 |
+| **mismatch rate per base** | **0.27%** | **0.32%** |
+
+Inverting the `--outFilterMismatchNmax 1` truncation (survivors carry 0 or 1, so observed mean is
+λ/(1+λ)) gives λ 0.138 -> 0.168 per ~45 bp: **~0.065% per base MORE divergent from CC-1690 than from
+CC-503**. At ~1-2% divergence inside a mosaic block that implies **~4% of the mapped genome sits in a
+block where the library matches CC-503 and not CC-1690**. Same direction on the deep run (10.91% ->
+10.72% unique). So the sample is most likely CR25 or CR125, and whichever it is, it is closer to CC-503.
+**The reason this is a real signal rather than a structural artifact** is that the new assembly carries
+2.1 Mb MORE sequence and 1,459 FEWER gaps, so a structural gain would map MORE reads; getting fewer reads
+*with* more mismatches is what a poorer-matching reference does.
+**It does not change the decision** — 0.2-0.4 mapping points against the ~5.6% training-window recovery
+above, and reverting costs a full re-map — but do not repeat the claim that the swap moved toward the
+library's genome. It moved slightly away.
+
+**And do NOT read Gallaher's ~2% as per-base divergence, which an earlier version of this note effectively
+did.** It is RELATIVE divergence structured as mosaic haplotype BLOCKS: lab strains all descend from one
+1945 isolate, differ sharply inside a minority of the genome, and are near-identical elsewhere. A
+genome-wide average mismatch rate therefore dilutes the signal by roughly the block fraction, which is why
+0.27% vs 0.32% is the size of the effect rather than 2%. Resolving strain identity properly would need a
+WINDOWED mismatch scan looking for elevated blocks, not a genome-wide mean; that was judged past the point
+of value here.
+
+**`data/procap_work/runs/{run}/Log.final.out` IS THE LEGACY LAYOUT AND HOLDS PREVIOUS-ASSEMBLY NUMBERS.**
+`align` writes `{WORK}/samples/{sample}/Log.final.out`; the run-keyed path is pre-refactor and, exactly
+like the `runs/{run}/final.bam` hazard documented under `signal_reads`, is **not `temp()`** — so it
+survives every re-map. `star_logs()` handles this correctly by preferring the sample-keyed file, but
+anyone grepping `runs/` BY HAND gets stale numbers with nothing to indicate it. That happened while
+testing the strain question: the run-keyed logs were read on two machines, agreed to the digit, and were
+mistaken for a synced copy when they were simply both stale. **The file mtimes are the tell.**
+
+**Which makes them accidentally valuable: they are the ONLY surviving record of the v5.5 mapping**, since
+the re-map overwrote nothing under `runs/`. Verify the identification by summing rather than trusting the
+path — the legacy logs sum to `qc_round0`'s 7,387,380 unique reads and the sample-keyed ones to the
+current 7,258,684. `qc_round0/stats/experiment_stats.tsv` holds the matching experiment-level summary.
+
+Read `Mismatch rate per base, %` rather than `Uniquely mapped reads %` when comparing references, since
+mapping rate is confounded if trimming differed (the cotton adapter case is the precedent) whereas
+mismatch rate is computed over MAPPED bases and adapter is soft-clipped. Here `input_reads` is
+byte-identical across the two mappings, so trimming did not differ and both fields are usable.
+**`% of reads unmapped: too many mismatches` is NOT the check on whether the mismatch cap is biting** —
+it reads 0.00% for these runs as it does for both cottons, because STAR routes mismatch-driven failures
+to `too short` (extension stops, matched length then fails `outFilterMatchNminOverLread`). Do not take
+that 0.00% as evidence the cap discards nothing.
+
+**And the decision is sunk either way: reverting costs exactly what the swap cost** — a re-map of both
+experiments, re-derived folds, re-measured `rdna_regions`, and a regenerated `experiment_config.yaml`.
+So the live question is not "was it right" but "is it worth reverting", and absent evidence the new
+assemblies are WRONG (there is none), the answer is no. Keep both.
+**And note an assembly change does not by itself break fold reuse.** What reuse protects is which
+CHROMOSOME is held out, so a chromosome-to-chromosome mapping preserves it — exact for C. reinhardtii,
+where the assembly report gives `chr_NN` = `CM(104918+NN).1` and Chlamydomonas numbering is standard
+across strains. P. patens is the one real exception, because its old fold 0 contained the spurious `27`.
+
+**NEITHER swapped plant reference is in use any more — both were REVERTED on 2026-09-07** (see below).
+The audit of them stands and is kept because it would apply again to any re-swap: ASM4749649v1 was 17
+assembled molecules and nothing else, and V7 was 26 chromosomes / 26 component sequences (via its NCBI
+mirror `GCA_059467195.1`), so both were trivially alt-free and both had dropped the unplaced scaffolds
+their predecessors carried — 36 and 330. **What is back in use is v5.5 (53 contigs) and Phypa_V3 (357,
+including a spurious 27th chromosome V7 resolved away)**, so `main_chromosomes` for both is again the
+numbered chromosomes only rather than the whole assembly.
 
 **mm10 already *is* ENCODE's analysis set** — contig names and lengths diff clean against ENCODE's own
 `mm10_no_alt.chrom.sizes` (file `mm10_no_alt_analysis_set_ENCODE`).
@@ -1575,7 +2068,11 @@ gene families — and is never fixed by deleting a copy from the reference.
 **Ensembl `dna.toplevel` is correct, not an oversight.** Ensembl only emits `dna.primary_assembly` when
 toplevel contains haplotypes or patches; no such file exists for any of the three Ensembl species here.
 
-**The two plant references have NO organelle contigs, and that costs ~10% of those libraries.** An earlier
+**The two plant references have NO organelle contigs, and that costs ~10% of those libraries.** The
+k-mer test below was run on v5.5 and Phypa_V3; **the conclusion carries to their 2026-09 replacements and
+was re-verified for them the cheap way**, from assembly reports showing 17 and 26 sequences with no
+organelle among them. The decoys are therefore still required — see the note on both being dropped and
+restored. An earlier
 version of this table claimed Chlamydomonas carried `MT/cpDNA` and Phypa_V3 carried "organelles"; both were
 wrong. Checked from the FASTAs themselves: 15 random 30-mers from each organelle genome fetched from ENA,
 searched against the assembly on both strands —
@@ -1630,8 +2127,8 @@ Checked per species — is the 45S/35S array actually in the assembly?
 | S. cerevisiae | yes — `XII:451786-489469` (RDN37-1/2 plus RDN5-1..6) | none |
 | S. pombe | yes — `III:1-23130` and `III:2440994-2452883`, both ends | none |
 | A. thaliana | yes — `2:3706-5945` and `3:14197677-14199916` | none |
-| C. reinhardtii | yes — subtelomeric `1:~1100-19100` and `14:~4145334-4154986` | none |
-| P. patens | **unclear** — 80 rRNA genes but every SSU call is partial | none available |
+| C. reinhardtii | yes — subtelomeric arrays, from release-63 GFF3's 34 `rRNA` genes: LSU copies at the start of chromosome `1` and an SSU/5.8S cluster on `14` (~4,145,334-4,154,986). Independently confirmed by k-mer on ASM4749649v1 before the revert (chr_08 and chr_14) | none |
+| P. patens | yes — from Phypa_V3's Ensembl GFF3 `rRNA` features. Independently confirmed by k-mer on V7 before the revert: three ~1.4 Mb subtelomeric arrays | none |
 | S. moellendorffii | yes — 426 rRNA genes incl. a 4,408 bp LSU on `GL377567` | none |
 | C. griseus | **unchecked** — but no reference sequence exists to use | none available |
 
@@ -2032,6 +2529,103 @@ TSV) and `qc/umi/`. They stay inside the DAG only because `pybigwig`, `pyfastx`,
   correctly placed and low, it prints an explicit dilution note instead. Verified on synthetic PWMs across
   four regimes: flat → flagged, strong Inr at 0 → clean, *weak* Inr at 0 → clean with the note, weak
   signal displaced to +7 → flagged. This is still a position check, not a score — do not grow it into one.
+- **Summit-anchored metaplot: the statistic is a RATIO, and antisense owns the y-axis.** Both of those
+  are corrections made after the first full run, which showed the panel looking **basically identical
+  across all 42 experiments** — the observation that prompted them.
+  **Why it looked identical: sense and antisense shared one y-scale, and the sense spike at 0 is
+  guaranteed by the anchor.** It set the scale, so the antisense channel was compressed onto the axis
+  line. `M.musculus-GCB_PROcap` (antisense peak at −137 bp) and `S.cerevisiae-Ino80ctl_PROcap` (no
+  localized antisense peak at all) were indistinguishable by eye. Antisense is now the primary trace on
+  its own axis, sense is faint context on a twin axis, and the band the statistic uses is shaded so the
+  printed number and the picture cannot disagree.
+  **The numbers were discriminative all along, and they split along known biology:**
+
+  | antisense argmax | experiments |
+  | --- | --- |
+  | **−97 to −159 bp** — an upstream peak | all M. musculus, all C. griseus, all C. elegans, C. reinhardtii |
+  | **\|offset\| 360–500** — at the ±500 window edge, i.e. NO localized peak | all D. melanogaster, A. thaliana, P. patens, S. pombe, 4 of 6 S. cerevisiae |
+  | **−1 to +39** — on the summit | S. moellendorffii, both cottons, fly LacZ-KD, Spt5EtOH |
+
+  **AN UPSTREAM PEAK AT ~−100 bp IS A TETRAPOD EXPECTATION, NOT A CORPUS-WIDE ONE — and an earlier
+  version of this table called that row "canonical divergent distance", which was wrong.** Divergent
+  initiation from the SAME NFR as the main TSS is a vertebrate promoter architecture; most taxa here do
+  not have it, so for them the absence of an upstream peak is the **null**, not a deficiency, and the
+  middle row above is the *expected* result rather than a weaker version of the first. Only the
+  DOWNSTREAM reading is ever a fault. Measured over the corpus (2026-09-06):
+
+  | | n | localized peak reported | median log2 |
+  | --- | --- | --- | --- |
+  | mouse + hamster | 20 | **18** | **+1.39** |
+  | every other taxon | 22 | 10 | +0.09 |
+
+  This also removes a contradiction with the annotated-TSS section below, which already said divergent
+  upstream antisense "is NOT an expectation at all" for C. elegans while this table listed worm in the
+  canonical group.
+
+  **THE ANTISENSE *FRACTION* IS NEARLY CIRCULAR — it is close to a restatement of PINTS' bidirectional
+  class.** `peaks_bidirectional / peaks_total` against `antisense % of windowed signal` is **Pearson
+  +0.939** across all 42 experiments. A bidirectional call means PINTS already found an opposite-strand
+  peak nearby, so anchoring on those summits puts antisense in the window by construction. Print it for
+  context; never read it as independent evidence.
+  **The log2 ratio is NOT confounded that way** (r = **−0.287** with the same share), and S. cerevisiae
+  is the proof the two are different quantities: **92.8% bidirectional, 40.4% antisense, log2 −0.03.**
+  Maximal bidirectional calling with zero upstream asymmetry — so bidirectional calls fill the window
+  SYMMETRICALLY rather than manufacturing an upstream peak. The taxonomic signal lives in the ratio and
+  the position, not in the fraction.
+
+  **C. ELEGANS IS THE ONE NON-TETRAPOD SHOWING THE TETRAPOD PATTERN. Tested 2026-09-06; DIVERGENT GENE
+  PAIRS ARE REFUTED, and the question is PARKED as answered well enough for a QC read-out.**
+  `src/qc/divergent_annotation_test.py` partitions summits by whether an annotated opposite-strand
+  protein-coding start sits in the band and recomputes the statistic per class. Shared-NFR divergent
+  transcription is largely *unannotated*; a divergent gene pair is an annotated minus-strand gene start.
+  Over four worm libraries plus three tetrapod positive and two fly negative controls:
+
+  | | log2 | peak | prominence | vs sense anchor |
+  | --- | --- | --- | --- | --- |
+  | tetrapod (hamster, 2× mouse) | **+1.38 to +2.25** | −101 to −129 | 2.08–2.28 | 0.43–0.69% |
+  | C. elegans (all 4) | **+0.73 to +1.14** | −97 to −124 | 1.80–2.11 | 0.38–0.81% |
+  | D. melanogaster (both) | **−0.18, −0.38** | *band max ON the summit*, +37/+58 | 1.33–1.45 | 0.20–0.21% |
+
+  All four worm libraries keep the upstream peak among the ~92% of summits with **no** annotated
+  opposite-strand partner, so annotation does not explain it — and annotation explains **least** in worm
+  (3.5–4.7% of upstream-band antisense) against 17.3% for mouse BMDM. Fly is the clean negative: no
+  localized upstream peak at all, in two libraries from different labs.
+  **The amplitude does NOT separate worm from tetrapod; the RATIO does.** Worm's prominence overlaps
+  theirs and its peak is as large relative to the sense anchor (embryo is the highest of all nine), while
+  its absolute height is ~1.6× lower. So the honest statement is that worm's divergent peak is comparable
+  in size but **less directional** — it sits on more downstream antisense — not that it is small. Do not
+  restate this as "worm looks tetrapod-like"; the log2 ranges do not overlap.
+  **The one caveat left untested** is that ce11 refGene 5′ ends are SL trans-splice acceptor positions,
+  not TSSs (`annotation_tss_anchored: false`), so a genuine partner whose annotated start is displaced
+  beyond the 50 bp pairing halfwidth is scored unpaired, biasing toward the result obtained.
+  `--halfwidth 300` probes it; the paired fraction climbing steeply with halfwidth would mean the ~8% is
+  a displacement artifact. Not run — the question was closed first.
+  **Four artefacts were found and fixed while getting here, all of which had produced confident wrong
+  readings**, and they are the reason to distrust a first number from this script: an asymmetric
+  partition (defining "paired" upstream-only makes the complement downstream-biased, which drove one
+  unpaired class to log2 −2.54 and tripped the strand-swap flag); raw-summed rather than per-site
+  normalised profiles (one locus in 995 inverted a profile's sign — the failure this file documents
+  elsewhere at 78.8% from 1 site in 1001); a single shift null aliasing against gene spacing; and a
+  regex that could not match a positive peak offset because `summit_notes` formats with `{at:+d}`.
+  **So `argmax` was the wrong readout**: on a channel with no peak it lands wherever noise is highest,
+  and the third group above then tripped a naive `argmax > 0` swap test. Most of the flags on the first
+  run were that artefact. It is now `log2(upstream / downstream)` antisense summed over
+  `|offset| ∈ [20, 300]`, which degrades to 0 on a flat channel and has no edge behaviour, with a
+  position reported only when the peak is prominent against the band median and away from the edge.
+  **The band's outer bound is what keeps dense genomes out of it.** S. cerevisiae runs 1.2–4.1 peaks per
+  2114 bp, so a ±500 window usually contains another promoter — which is why yeast shows the corpus's
+  highest antisense fraction (35–43%) *with* a monotone rise to the edge. Unbounded, that pattern scored
+  log2 −1.51 and was flagged as a strand swap; bounded at 300 it scores −0.88 and is not. Both 300 and
+  the −1.0 threshold are **provisional**, calibrated from this corpus like `FLAT_BITS`.
+  **Severity is split by whether a PEAK backs the asymmetry**: downstream weight *with* a localized peak
+  is a flag, downstream weight *without* one is a `REVIEW`, because in a dense genome that is
+  neighbouring promoters rather than a swap. Verified on eight synthetic regimes — divergent broad and
+  narrow, swapped, flat, on-summit, weak, edge-rising, and zero antisense — each landing on its intended
+  verdict.
+  **And the on-summit check has to be measured against the band MAXIMUM, not its median.** Against the
+  median it fired on a genuine broad upstream peak, which still carries real signal at offset 0 while the
+  median is pulled down by the quiet downstream half. Against the maximum it asks the right question: is
+  the summit itself the largest antisense feature in the window?
 - **Stranded metaplot around annotated TSSs. THE PLOT IS THE CHECK — look at it.** The purpose is to
   see, by eye, whether 5' signal sits where it should relative to the annotated TSS. It is not a
   measurement of antisense or divergent transcription, and it is deliberately not a scoring system.
@@ -2079,6 +2673,49 @@ caught by the PWM going flat.
 Annotation (`annotation_url` in `config/genomes.yaml`, UCSC GTF for the chr-prefixed assemblies and
 Ensembl GFF3 for the bare-named ones, so naming always matches the FASTA) is used **for QC only** —
 never for training, peak calling or fold assignment, so no circularity reaches the model.
+
+**A null `annotation_url` is a SUPPORTED state rather than a DAG failure — and as of the 2026-09-07
+C. reinhardtii revert, NO species exercises it.** Keep the handling: it was earned by a real failure, and
+it is what makes an annotation-free assembly adoptable at all. C. reinhardtii under ASM4749649v1 was the
+case that forced it, and the notes below describe that state.
+**Under ASM4749649v1 C. reinhardtii had NO annotation, which is one of the reasons the swap was
+reverted.** `annotation_path()` interpolated
+`annotation_format` into the filename, so a null pair produced `data/annotation/C.reinhardtii.None.gz`
+— a path no rule can produce. Both consumers declare it as an input (`orientation_qc` and
+`rrna_content`), so `snakemake qc` died at **DAG construction** for that experiment instead of skipping
+a panel, and the exclusion was invisible from the totals: a whole-corpus dry-run simply reported 40
+`orientation_qc` jobs where 42 were expected. It now returns **no dependency**, `orientation_qc` omits
+`--annotation` (an empty value would be read as the next flag), and `load_annotation()` returns no TSSs.
+Degrading is right rather than convenient — annotation is QC-only, never labels/folds/peaks;
+`rrna_content` already reports a missing annotation as NOT MEASURED (blank `pct_rrna`, distinct from 0);
+and the two read-outs that carry the orientation verdict, the initiator logo and the **summit-anchored
+metaplot**, are annotation-free. Only the TSS-anchored panel is lost — which the `notes` field of that
+`genomes.yaml` entry already recorded as a known cost of the move, taken for a near-gapless assembly
+(contig N50 6.29 Mb and 17 gaps against v5.5's 215 kb and 1,512 gaps).
+
+**Do not go looking for that annotation again — checked 2026-09-06 and it does not exist.** Four
+independent confirmations for `GCA_047496495.1` (strain **CC-1690**, University of Georgia, 2025-02-06):
+the NCBI FTP directory carries no `*_genomic.gff.gz` at all; `feature_count.txt` reports
+**0 unique ids and 0 placements** for `gene protein_coding`; the features/locations hashes in
+`annotation_hashes.txt` are `d41d8cd98f00b204e9800998ecf8427e`, the MD5 of the **empty string**; and
+`RefSeq-Accn` is `na` for every chromosome in the assembly report, so there is no paired RefSeq record
+to annotate it. Across all 19 *C. reinhardtii* assemblies at NCBI the only annotated chromosome-level
+one is **v5.5** itself (`GCA_000002595.3` / `GCF_000002595.2`, JGI) — the assembly this entry moved away
+from — plus a contig-level CCAP 11-32A; even `GCA_026108075.1`, the reference-guided assembly this one
+was built against, carries none there.
+
+**And borrowing v5.5's (or v6.1's) annotation is not the fallback it looks like.** Different assembly,
+different strain, and different chromosome naming — v5.5 is `1`-`17` where this FASTA is CM accessions
+(`CM104919.1`…). `extract_loci` and the QC loader match literally, so it would yield **zero TSSs in
+silence**, which is exactly the failure `chrom_style` exists to prevent; making it real would take a
+liftover, not a URL. Leave `annotation_url` null.
+
+**And `experiment_config.yaml` must be REGENERATED after a genome swap — `genomes.yaml` alone is not
+enough.** `processed.sequences` is baked into the config by `build_experiment_config.py`, so updating
+P. patens to V7 and C. reinhardtii to ASM4749649v1 left both experiments naming the *old* FASTA, which
+no `fetch_genome` produces: same silent-exclusion symptom as above, two more missing jobs. Run
+`python src/data_preprocessing/build_experiment_config.py` and commit the result with the
+`genomes.yaml` change.
 
 **GTF exists for all 12 species, but the source split is not free to change.** Ensembl ships a parallel
 `gtf/` tree at the same release for all seven Ensembl species (probed 2026-08-30, all HTTP 200). Switching
@@ -2139,6 +2776,29 @@ Regenerating would silently revert all of it. Do it the same way next time.
 
 All 14 runs were resolved against ENA and all report `SINGLE`. Findings worth keeping:
 
+- **GSE233927 holds csRNA-seq AND 5'GRO-seq for the same tissues, and this repo pulls the 5'GRO-seq —
+  verified per sample 2026-09-06.** The series is five assays deep (csRNA-seq, 5'GRO-seq, plain GRO-seq,
+  sRNA-seq "input", total RNA-seq), so picking the wrong sample would silently substitute a *steady-state*
+  capped short-RNA library for a nascent run-on one. All four rows are correct: `GSM7439223`/`GSM7439224`,
+  `GSM7439241` and `GSM7439248` carry per-sample descriptions
+  `5'GRO-seq; nascent TSS mapping in {species} cells; Experiment SD102/SD103/SD150/SD180`,
+  `Library strategy: 5'GRO-seq` in `data_processing`, and supplementary files named
+  `*_5GRO-seq_r*.bed.gz`. The csRNA-seq counterparts (`GSM7439225`-`7439227`, `GSM7439243`,
+  `GSM7439249`/`GSM7439250`) are **not** in the manifest.
+  **Two traps in that metadata, both of which mislead if read alone:**
+  GEO's `library_strategy` is **`OTHER` for csRNA-seq and 5'GRO-seq alike**, so it cannot separate them —
+  only the title/description can (same class as cotton's `miRNA-Seq` mislabel). And
+  `!Sample_extract_protocol_ch1` is a **series-wide concatenated blob** describing csRNA-seq, sRNA-seq and
+  total RNA-seq, attached to every sample *including* the 5'GRO ones — read it on its own and these look
+  like csRNA-seq libraries. Use `!Sample_description`.
+  **Only three species in that series have 5'GRO-seq at all**: C. reinhardtii, P. patens,
+  S. moellendorffii. `A.thaliana-seedling_5GRO` is a different project — `Hetzel2016_at_5GRO`,
+  `GSM2193123`, "5'GRO-seq in 6 day seedlings" — because GSE233927's Arabidopsis samples are csRNA-seq
+  only. **So extending this project to its other species (papaya, barley, maize, fly S2) means taking
+  csRNA-seq, which is a DIFFERENT RNA POPULATION** — capped short RNAs from total RNA, no nuclear run-on —
+  and belongs in its own assay family with its own models, not folded into `GRO-cap-equivalent`. The
+  plain GRO-seq samples (`GSM7439228`, `GSM7439251`) are the paper's peak-calling input/control and are
+  correctly excluded as targets by the Field Guide rule.
 - **`Shamie2021_cg_5GRO` really is all Chinese hamster.** `BMDM…KLA`, `Brain`, `Kidney`, `Liver`, `Lung`
   look like Glass-lab *mouse* sample names (and Lam2013/Link2018 in this same manifest *are* Glass-lab
   mouse BMDM), so this was checked rather than assumed: ENA reports **72/72 runs as
@@ -2283,6 +2943,51 @@ and their coordinates are already in the rDNA table above, so they are now confi
 `chrUn_CP007120v1` for dm6 and `chrI:15062083-15071033` for ce11. M. musculus needs none — its sink
 already serves — and the seven Ensembl species are covered by their GFF3.
 
+**C. reinhardtii's rRNA is measured from its GFF3 `rRNA` features again, following the 2026-09-07
+revert to v5.5; `rdna_regions` is back to `[]` and `pct_rrna` back to the 39.1% basis.** The paragraph
+below describes why the coordinates had to be measured while ASM4749649v1 was in use, and is kept because
+the failure mode it documents is general.
+**Under ASM4749649v1 the annotation-derived measurement was unavailable.** Its `pct_rrna` came from v5.5's **GFF3 `rRNA` features**, and
+ASM4749649v1 has no annotation at all — so with `rdna_regions: []` the only thing left to score against
+was `data/decoy/`, i.e. the two organelles, giving an **organellar-only ~12%** where the previous figure
+was **39.1% rRNA + organellar**. That is exactly the false negative `rdna_regions` exists to prevent for
+dm6 and ce11: a number that looks measured while nuclear rRNA is silently absent, which `rrna_indexed`
+cannot catch because the entry *is* indexed. And it is load-bearing here, because `pct_unique_adj`
+**20.7%** — the corpus's one `FAIL:very_low_mapping` — was computed from that 39.1%.
+
+**The array is LOCALIZED TO CHROMOSOMES in BOTH assemblies, so no sink is needed either way** (the rule
+is sink only where the array is missing). v5.5, which is back in use, shows it via its GFF3 `rRNA`
+features; ASM4749649v1 was measured 2026-09-06 with the repo's usual k-mer method and agreed: 29 30-mers tiled
+across an 18S sequence (`JN903984.1`) plus a 5.8S sequence (`PX737393.1`), both strands, against the
+assembly.
+
+| contig | chromosome | array | hits |
+| --- | --- | --- | --- |
+| `CM104932.1` | chr_14 | 4,123,744-4,155,420, to the terminus at 4,156,167 | 79 18S + 84 5.8S |
+| `CM104926.1` | chr_08 | 4,583,746-4,602,203, to the terminus at 4,602,485 | 45 18S + 50 5.8S |
+
+Both subtelomeric, reproducing v5.5's picture. `rdna_regions` is set to those two spans extended to each
+contig end. Two dispersed partial copies are deliberately excluded — `CM104926.1:~2,937,548` and
+`CM104930.1:4,130,938-4,131,477` (539 bp) — as degenerate fragments whose flanks are not rRNA; they are
+also the reason an in-assembly array matters, since reads from them score better against the true array
+than against the fragment.
+
+**P. patens is back on its Ensembl GFF3 `rRNA` features following the 2026-09-07 revert, so
+`rdna_regions` is `[]` and `pct_rrna` returns to the 47.4% basis — EXPECT THE `FAIL:very_low_mapping`
+FLAG BACK.** That flag had cleared (adj 27.8% -> 60.7%) on the V7 measurement's 76.3%, which this file
+flagged as unsafe for over-broad spans; retiring that figure is part of the point of reverting. The
+paragraph below describes the V7 state and is kept because the failure mode is general.
+**Under V7 P. patens lost its rRNA source, and its FAIL flag silently changed basis.** Same
+shape as C. reinhardtii: `pct_rrna` came from Phypa_V3's Ensembl GFF3 `rRNA` features, and **V7's GWH
+annotation has ZERO rRNA features** — verified by downloading it, the only types present are `gene`,
+`mRNA`, `exon`, `CDS`, `five_prime_UTR`, `three_prime_UTR` over 33,075 genes. So `rrna_content.py` scored
+organelles only, wrote `rrna_indexed: no`, and `pct_rrna` came back blank. **The blank is correct
+behaviour** — that is exactly what `rrna_indexed` is for — but it moved this experiment's flag from
+`FAIL:very_low_mapping(28%,adj)`-class onto `FAIL:very_low_mapping(14%,raw)`, i.e. judged on a number
+whose ceiling is set by 8.6% organellar plus ~47% rRNA it can no longer see.
+`rdna_regions` is now measured for V7 as well (three arrays, see `config/genomes.yaml`), so both plants
+are back on an adjusted basis.
+
 **Note `chrI`, not `I`.** The rDNA table above writes C. elegans' array as `I:15062083-15071033`, which is
 the WormBase name; ce11 is chr-prefixed, so the bare form would have indexed **nothing** and reported 0%
 rRNA as though measured. `rrna_content.py` therefore **raises** on a configured region whose contig is
@@ -2316,16 +3021,55 @@ by species, and a row with no species sorts first, so the file opened on ~500 em
 
 Two changes, because either alone would have left the trap:
 
-- The rule's inputs are **named** (`stats`/`rrna`/`reads`/`script`) and the shell passes
-  `--combine {input.stats}`, with the two directories passed as `params` instead. **Never `--combine
+- The rule's inputs are **named** (`stats`/`rrna`/`reads`/`script`) and the shell passes an explicit
+  per-experiment glob, with the two directories passed as `params` instead. **Never `--combine
   {input}`.**
 - `--combine` now **rejects any file whose header is not exactly `COLUMNS`**, naming the file and both
   column counts. A too-broad glob has to fail, not average out — the whole failure was that a
   plausible-looking table hid it.
 
+**That header check is now scoped by NAME, because on its own it fires on the wrong things — and
+misses one.** `--combine`'s row set is `experiment_config.yaml`, not the directory it globs:
+
+- A TSV **naming no configured experiment is skipped with a warning.** Once an experiment is renamed or
+  split, no rule has its wildcards, so nothing can ever rewrite its file and it is frozen at whatever
+  schema it had. Both failure modes were observed from the *same* pre-sex-split pair:
+  `M.musculus-liver-old_ChROcap.tsv` froze at **18 columns** and hard-failed `stats_table` during a
+  two-experiment `--config experiments=C.reinhardtii…,P.patens…` re-map that had nothing to do with
+  mouse liver, while `liver-young` froze at the current 21, passed the check, and **silently produced a
+  44-row table over 42 experiments** — the worse of the two, since it reads as complete. Delete such
+  files; the warning says so.
+- A **configured** experiment with a wrong header still **exits nonzero**, and now says it is stale
+  output with the command to rebuild it. That is also what still catches `--combine {input}`: the rrna
+  and reads TSVs *are* named by experiment, so they hit this branch rather than the skip.
+- **Zero rows exits nonzero too.** Skipping by name means a `--combine` pointed somewhere entirely wrong
+  no longer fails on a header, and an empty global table reads exactly as complete as a 40-row-short one.
+
+Note this exposure is a consequence of `aac86f6` globbing the whole directory rather than taking
+`TARGETS` — right for the row set, but it puts every stale file in the corpus in scope of every subset
+run. `report_flags`'s survey-schema check is scoped the same way, to the files
+`read_survey_flags` can actually consult (`qc/reads/{exp}.tsv` for a configured experiment, plus the
+corpus-wide `read_structure.tsv` fallback); orphaned survey files were emitting warnings for
+experiments that no longer exist, which is noise in the one place whose value is that a warning means
+something.
+
 Also `--combine`'s sort key is `str()`-wrapped now, matching `--all`. It was the only reason the garbage
 rows did not crash on a `None`-vs-`str` comparison, i.e. the one thing that made the corruption survivable
 enough to be committed.
+
+**`stats_table` combines the DIRECTORY, not `TARGETS` — its scope is deliberately decoupled from its
+inputs.** The rule's inputs are scoped to `TARGETS`, but its output path,
+`qc/stats/experiment_stats.tsv`, is global and unscoped. While it also passed `--combine {input.stats}`,
+those were the same set, so `--config experiments=A,B` rebuilt the one global table from two rows and
+dropped the other 40 — found while re-running just the two updated genomes (P. patens V7,
+C. reinhardtii ASM4749649v1), where a 50-job DAG quietly included `stats_table`. **A subsetting flag must
+not narrow a global output.** The inputs still answer "when must this rerun, and after what" (the
+`rrna_content` race above); the glob `'{params.per_experiment}/*.tsv'` answers "what belongs in the
+table". It is **single-quoted so Python globs it, not bash** — `experiment_stats.py` globs any `--combine`
+argument containing `*`, and letting the shell expand it would resolve against whatever the subset left on
+disk. The residual cost is the reverse staleness gap: under a subset, a per-experiment TSV *outside*
+`TARGETS` that changes will not retrigger the rule. That trade is deliberate — a table one row stale is
+repairable with `--forcerun stats_table`, whereas a table 40 rows short reads as complete.
 
 **`umi_report.py` was checking the WRONG MATE, and it was the last place the old 3'-adaptor assumption
 survived.** It hardcoded `expect = declared if (not paired or mate_i == 2) else 0`, with a comment
@@ -2386,6 +3130,23 @@ which is precisely GCB, whose only project-mate is priB. There it is caught by `
 having two independent tells mattered. Run the standalone sweep for the full screen:
 `python src/qc/read_structure_qc.py --tsv qc/reads/read_structure.tsv`.
 
+**`signal_reads` reports NOT MEASURED (blank) rather than 0 when no contig matches, and its fallback is
+SAMPLE-keyed.** Two defects that combined to print `signal_reads 0` for
+`C.reinhardtii-liquidculture_5GRO` and `P.patens-plateculture_5GRO` beside 9,216 and 9,833 called peaks —
+which cannot both be true, and which reads as a dead library rather than as a measurement failure:
+
+- `mapped_reads()` skipped every contig outside `main_chromosomes` and returned the running total, so a
+  BAM from a *different naming regime* — i.e. an older assembly still on disk — was indistinguishable
+  from a library with no usable reads. It now returns `None` and names the file. Same rule `pct_rrna`
+  already follows: blank is NOT 0. A library genuinely carrying zero reads on its main chromosomes would
+  also have no peaks, so blank is the honest cell either way.
+- The `merged.bam` fallback still probed the **pre-refactor `runs/{run}/final.bam`** after alignment moved
+  to one BAM per sample. That is worse than finding nothing, because those files are **not `temp()`** and
+  survive a re-map, so on a re-mapped tree it read BAMs aligned to the PREVIOUS assembly. It now tries
+  `samples/{sample}/final.bam` first and falls back to the run-keyed path only for a tree that predates
+  the refactor. `star_logs()` was taught both layouts for exactly this reason; this was the counterpart it
+  missed.
+
 `signal_reads` sits below `unique_reads` by dedup (UMI libraries only, 3 of 40) and by the one-mate filter
 (paired libraries only, 5 of 40). For paired libraries it counts one mate per fragment, since that is what
 `final_bam` keeps.
@@ -2430,6 +3191,35 @@ Three reasons to leave them alone:
 This also matches the project's stated design (one experiment == one species x one condition == one
 model, no multi-tasking) and the workbook's own Field Guide rule for `replicate_group`: *"Assess
 replicate concordance before pooling; do not combine distinct conditions as replicates."*
+
+## Assay provenance: swept all 64 runs, no non-cap assay is a target
+
+Checked 2026-09-06, after the GSE233927 csRNA-seq/5'GRO-seq question above, because that series proves a
+deposit can hold both and nothing structural stops the wrong sample being picked. Method: every GEO series
+(16 of them) pulled as a `targ=gsm` dump and each manifest row's `sample_accession` matched against its
+own `!Sample_title`/`!Sample_description`, plus ENA `experiment_title` for the 9 non-GEO rows (4
+ArrayExpress, 4 CNCB cotton, 1 run-only).
+
+**Result: every one of the 55 GEO samples and 9 non-GEO samples names a cap-selected initiation assay** --
+PRO-cap, GRO-cap, 5'GRO-seq, ChRO-cap, CoPRO, or Spt5's `CAP_*`. No csRNA-seq, sRNA-seq, total RNA-seq,
+PRO-seq or non-cap GRO-seq sample appears as a target. The 5 TAP-/noTAP rows are all
+`target_use=control`. Two names that look wrong and are not: the fly embryo rows are
+`PROseq_PROcap34h1`-style submitter names, but ENA's `experiment_title` is "PRO-cap in Drosophila
+melanogaster embryo" with **`library_selection: CAGE`**, and PRJEB25091 holds only those 4 runs, so there
+is no PRO-seq there to leak.
+
+**The load-bearing finding is that NO ARCHIVE FIELD can verify cap selection for this corpus, so the
+manifest's `assay_label`/`cap_status` is the only record** -- the same default-deny situation as
+`umi_len`/`umi_loc`. Measured across all 64 runs:
+
+| field | values |
+| --- | --- |
+| `library_strategy` | **`OTHER` for 51/64**; wrongly `RNA-Seq` for Lam2013's 3 (GEO agrees, titles say 5'GRO-seq); `miRNA-Seq` for cotton's 4 |
+| `library_selection` | **`other` for 51/64**; `CAGE` for the 4 fly embryo runs; `cDNA` for Lam2013's 3 |
+
+So `library_strategy` is `OTHER` for csRNA-seq and 5'GRO-seq alike (see the GSE233927 note) *and* for
+almost everything else here. Re-run the sweep by title, never by strategy, and treat a new dataset's
+assay as curated-until-proven rather than archive-verified.
 
 ## Nothing is excluded: every dataset is analysed and modelled
 
@@ -2594,10 +3384,36 @@ already assigned in earlier lab work and two were not:
 
 | species | assigned before? | outcome |
 | --- | --- | --- |
-| C. reinhardtii | yes | **reused unchanged** |
-| P. patens | yes | **reused unchanged** |
+| C. reinhardtii | yes | reused unchanged **until the 2026-09 assembly swap REPLACED it — see below** |
+| P. patens | yes | reused unchanged **until the 2026-09 assembly swap REPLACED it — see below** |
 | S. moellendorffii | no | peak-level folds, permanently (no chromosomes exist); **built 2026-09-02** |
 | C. griseus | no | chromosome-level; **assigned here 2026-09-01** from CHO peak counts |
+
+**THE TWO PLANT ENTRIES ARE NO LONGER THE REUSED LAB ASSIGNMENT, and nothing said so — OPEN DECISION.**
+The 2026-09 assembly swap rewrote both `chrom_splits.yaml` blocks onto the new chromosome names, and in
+doing so replaced the peak-matched groupings with a mechanical **round-robin over chromosome index**
+(`i % 5`), while the comment above them still claimed "Reused UNCHANGED from earlier lab work … same
+peak-matched assignment". Measured against the previous entries:
+
+| species | chromosomes whose fold changed | old fold sizes | new fold sizes |
+| --- | --- | --- | --- |
+| C. reinhardtii | **13 of 17** | 2, 3, 3, 3, 6 | 4, 4, 3, 3, 3 |
+| P. patens | **24 of 26** | 4, 5, 5, 6, 7 | 6, 5, 5, 5, 5 |
+
+Two things are wrong with that, in the terms this file already sets out. It **breaks the one thing reuse
+buys** — "a locus in test here is in test everywhere else we train, and a divergence destroys that
+silently" — so a locus held out in the earlier lab work is now training data here for most chromosomes.
+And a round-robin is **not this project's method**: folds are matched on PEAK COUNTS, never on index or
+length.
+
+**Restoring the reused assignment is mechanical for C. reinhardtii**, because the assembly report gives
+the mapping directly: `chr_01`-`chr_17` are `CM104919.1`-`CM104935.1`, i.e. chromosome *N* is
+`CM(104918+N).1`, and Chlamydomonas chromosome numbering is standard across strains. For P. patens the
+same carry-over needs the V3-number -> GWH-ID correspondence confirmed from the FASTA's `OriSeqID`
+headers, and old fold 0's member `27` simply disappears (V7 resolves it as spurious). The alternative is
+to re-derive both from peak counts on the new assemblies, per the project's actual method, and accept the
+break with earlier work deliberately. **Either way it is a decision to record, not a rename to leave
+implicit.**
 
 The two cottons were added later and are the same story: no prior assignment, both
 chromosome-level, and both were **assigned here 2026-09-02** from their own peak counts. All four

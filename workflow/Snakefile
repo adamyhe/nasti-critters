@@ -244,7 +244,13 @@ def umi_arg(run_id):
 #: main_chromosomes by `bedgraph`. It is NOT safe to default to "chr", which is
 #: PINTS' own default and matches nothing for these -- the silent-zero-peaks bug
 #: this map exists to prevent.
-PINTS_CHROM_PREFIX = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": ""}
+PINTS_CHROM_PREFIX = {"ucsc": "chr", "ensembl": "", "ncbi_refseq": "",
+                      # "ncbi" is GenBank-accession naming (CM..., AP..., NC_...), which is
+                      # NOT the same thing as ncbi_refseq and should not be conflated with
+                      # it for GCA-only assemblies. "gwh" is CNCB's Genome Warehouse
+                      # (GWHFIHF00000001.1), which P. patens V7 uses. Both take the empty
+                      # prefix, as ensembl does.
+                      "ncbi": "", "gwh": ""}
 
 
 def pints_chrom_prefix(species):
@@ -286,9 +292,30 @@ def decoy_fastas(species, ext=""):
 
 
 def annotation_path(species):
-    """Fetched annotation for a species. GFF3 for the Ensembl-named assemblies,
-    GTF for the UCSC ones -- the source is chosen so chromosome names match the
-    FASTA, and swapping it would silently yield zero features."""
+    """Fetched annotation for a species, or [] where there is none.
+
+    GFF3 for the Ensembl-named assemblies, GTF for the UCSC ones -- the source
+    is chosen so chromosome names match the FASTA, and swapping it would
+    silently yield zero features.
+
+    A NULL `annotation_url` returns NO DEPENDENCY rather than a path, because
+    `annotation_format` is then null too and the interpolated name
+    (`C.reinhardtii.None.gz`) is one no rule can produce. That is not a
+    hypothetical: moving C. reinhardtii to ASM4749649v1 left it the one species
+    with no annotation, which made BOTH consumers -- orientation_qc and
+    rrna_content -- unbuildable, so `snakemake qc` died at DAG construction for
+    that experiment rather than skipping a panel.
+
+    Degrading to no dependency is right rather than merely convenient: the
+    annotation is used for QC only, never for labels, folds or peak calling.
+    rrna_content already treats a missing annotation as NOT MEASURED (a blank
+    pct_rrna, which the stats table distinguishes from 0), and orientation_qc's
+    two annotation-free read-outs -- the initiator logo and the summit-anchored
+    metaplot -- are the ones that carry the orientation verdict anyway. Only the
+    TSS-anchored panel is lost.
+    """
+    if not GENOMES[species].get("annotation_url"):
+        return []
     return (f"{REPO_ROOT}/data/annotation/{species}."
             f"{GENOMES[species]['annotation_format']}.gz")
 
@@ -483,6 +510,23 @@ rule stats:
     input:
         f"{QC}/stats/experiment_stats.tsv",
         f"{QC}/stats/experiment_stats.md",
+
+
+rule orientation:
+    """Just the initiator logos and metaplots. `snakemake orientation -c8`.
+
+    A narrow target because the plots are the one QC output that is re-read by
+    eye after every change to how they are drawn, and `qc` drags in three
+    reports that read the RAW FASTQS -- ~202 GiB, routinely deleted after
+    mapping. Requesting only these two outputs keeps a plot refresh from
+    depending on files that may not be on disk. Target name BEFORE --config.
+
+    Both outputs are named even though the png is a co-output of the tsv, so
+    that a tree where only one was written still rebuilds.
+    """
+    input:
+        expand(f"{QC}/orientation/{{exp}}.tsv", exp=TARGETS),
+        expand(f"{QC}/orientation/{{exp}}.orientation_qc.png", exp=TARGETS),
 
 
 rule fetch_only:
@@ -780,8 +824,9 @@ rule merge_run_fastqs:
     deduped per run keeps every cross-run duplicate. Gzip members concatenate, so a plain
     cat is a valid gzip stream -- no recompression.
 
-    A single-run sample is the overwhelming majority; it is hard-linked rather than copied
-    so the common case costs nothing.
+    A single-run sample is the overwhelming majority; it is symlinked rather than copied
+    so the common case costs nothing. That link is an OPTIMISATION AND MUST NEVER BE THE
+    THING THAT FAILS THE JOB -- see link_or_copy below.
     """
     input:
         lambda w: sample_input_fastqs(w.sample)
@@ -797,6 +842,35 @@ rule merge_run_fastqs:
         mkdir -p $(dirname {output.r1}) $(dirname {log})
         exec > {log} 2>&1
         set -o pipefail
+
+        # SYMLINK, deliberately -- not a hard link, and not a plain cp.
+        #
+        # fetch_fastq writes protected(), i.e. mode 0444. A HARD LINK carries that mode
+        # because it IS the same inode; a plain CP carries it too, because cp propagates
+        # the source mode (0444 & ~umask is still 0444). Either way the output is
+        # read-only, and Snakemake touches every output of a finished job --
+        # dag.check_and_touch_output -> IOFile.touch -> lutime(self.file, None) -- so the
+        # job dies in post-processing with PermissionError even though the merge itself
+        # worked. The tempting repair, chmod u+w on the output, is actively WRONG for the
+        # hard-link case: same inode, so it strips protection from the ARCHIVED FASTQ.
+        #
+        # A symlink has its own inode, so there is nothing to un-protect, and Snakemake
+        # handles the case on purpose: touch() notes "For symlink file or symlink
+        # directory, only the link itself is updated, not the target", and
+        # mtime_uncached() stats with follow_symlinks=False before anything else. It also
+        # keeps the optimisation intact -- still no second copy of the reads on disk.
+        #
+        # The copy fallback stays for the case where the symlink itself cannot be made,
+        # and chmods only its own fresh inode.
+        link_or_copy() {{
+            src=$1; dst=$2
+            rm -f "$dst"
+            if ln -s "$src" "$dst"; then return 0; fi
+            echo "NOTE: symlink refused above -- copying $src -> $dst instead."
+            cp "$src" "$dst"
+            chmod u+w "$dst"
+        }}
+
         files=({input})
         if [ {params.paired} -eq 1 ]; then
             # Mates alternate _1,_2 per run (sample_input_fastqs preserves that order);
@@ -806,12 +880,12 @@ rule merge_run_fastqs:
             for ((i=0; i<${{#files[@]}}; i+=2)); do
                 m1+=("${{files[$i]}}"); m2+=("${{files[$((i+1))]}}")
             done
-            if [ ${{#m1[@]}} -eq 1 ]; then ln -f "${{m1[0]}}" {output.r1}
+            if [ ${{#m1[@]}} -eq 1 ]; then link_or_copy "${{m1[0]}}" {output.r1}
             else cat "${{m1[@]}}" > {output.r1}; fi
-            if [ ${{#m2[@]}} -eq 1 ]; then ln -f "${{m2[0]}}" {output.r2}
+            if [ ${{#m2[@]}} -eq 1 ]; then link_or_copy "${{m2[0]}}" {output.r2}
             else cat "${{m2[@]}}" > {output.r2}; fi
         else
-            if [ ${{#files[@]}} -eq 1 ]; then ln -f "${{files[0]}}" {output.r1}
+            if [ ${{#files[@]}} -eq 1 ]; then link_or_copy "${{files[0]}}" {output.r1}
             else cat "${{files[@]}}" > {output.r1}; fi
             : > {output.r2}
         fi
@@ -1200,8 +1274,14 @@ rule fetch_annotation:
 
 
 rule orientation_qc:
-    """Initiator logo + stranded TSS metaplot: the read-out that catches a wrong
-    five_prime_mate or reverse_strand. Both are silent failures otherwise."""
+    """Initiator logo, summit-anchored metaplot and stranded TSS metaplot: the
+    read-out that catches a wrong five_prime_mate or reverse_strand. Both are
+    silent failures otherwise.
+
+    The first two panels are ANNOTATION-FREE, which is what lets this run for a
+    species with no annotation at all -- `annotation` resolves to no dependency
+    then and the flag is omitted from the command. See annotation_path().
+    """
     input:
         peaks=f"{OUT}/{{exp}}_peaks.bed.gz",
         pl=f"{OUT}/{{exp}}_pl.bw",
@@ -1220,6 +1300,9 @@ rule orientation_qc:
     params:
         script=f"{REPO_ROOT}/src/qc/orientation_qc.py",
         outdir=f"{QC}/orientation",
+        annotation=lambda w: (
+            f"--annotation {annotation_path(EXPERIMENTS[w.exp]['species'])}"
+            if annotation_path(EXPERIMENTS[w.exp]["species"]) else ""),
     resources:
         mem_mb=8000,
         runtime=60,
@@ -1228,7 +1311,10 @@ rule orientation_qc:
     shell:
         "mkdir -p $(dirname {log}) {params.outdir} && "
         "python {params.script} -e {wildcards.exp} --outdir {params.outdir} "
-        "--annotation {input.annotation} --tsv {output.tsv} > {log} 2>&1"
+        # Omitted entirely where the species has no annotation: an empty
+        # --annotation would be argparse's next flag, and the script's own
+        # fallback (fetch by URL) has nothing to fetch either.
+        "{params.annotation} --tsv {output.tsv} > {log} 2>&1"
 
 
 rule umi_report:
@@ -1408,9 +1494,25 @@ rule stats_table:
     The escape hatch survives: `experiment_stats.py --combine` still reads both
     directories opportunistically, so a table can be rebuilt by hand from
     whatever survives without touching the FASTQs.
+
+    SCOPE IS DELIBERATELY DECOUPLED FROM `TARGETS`. The inputs below are scoped to
+    TARGETS, but what gets combined is the whole per_experiment directory. Those
+    are two different questions: the inputs answer "when must this rerun, and
+    after what", the glob answers "what belongs in the table". Tying the second
+    to TARGETS meant `--config experiments=A,B` rebuilt the ONE global table from
+    two rows and silently dropped the other 40 -- a subsetting flag has no
+    business narrowing a global output. Recovery was possible only because
+    per_experiment/ is never pruned.
+
+    The cost is a staleness gap in the other direction: with a subset selected, a
+    per-experiment TSV outside TARGETS that changes on disk will not by itself
+    retrigger this rule. That is the right trade -- a table one row stale is
+    visibly repairable with `--forcerun stats_table`, a table 40 rows short is
+    not visibly anything.
     """
     input:
-        # NAMED, and --combine takes only `stats`. `--combine {input}` swept in
+        # ORDERING AND STALENESS ONLY -- not the row set; see the docstring.
+        # Nothing here is passed to --combine. `--combine {input}` once swept in
         # the rrna and reads TSVs and this rule's own script as well, and
         # DictReader absorbed all three: 685 rows over 42 experiments, every
         # pipeline column blank. rrna and reads are read from their
@@ -1429,12 +1531,17 @@ rule stats_table:
         md=f"{QC}/stats/experiment_stats.md",
     params:
         script=f"{REPO_ROOT}/src/qc/experiment_stats.py",
+        per_experiment=f"{QC}/stats/per_experiment",
         qc_rrna=f"{QC}/rrna",
         qc_reads=f"{QC}/reads",
     log:
         f"{WORK}/logs/experiment_stats/_table.log"
     shell:
         "mkdir -p $(dirname {log}) $(dirname {output.tsv}) && "
-        "python {params.script} --combine {input.stats} "
+        # SINGLE-QUOTED so the glob reaches Python rather than being expanded by
+        # bash: experiment_stats.py globs any --combine arg containing '*', and
+        # letting the shell do it would resolve the pattern against TARGETS-era
+        # state and reintroduce a partial table on an empty directory.
+        "python {params.script} --combine '{params.per_experiment}/*.tsv' "
         "--qc-rrna {params.qc_rrna} --qc-reads {params.qc_reads} "
         "-o {output.tsv} --markdown {output.md} > {log} 2>&1"

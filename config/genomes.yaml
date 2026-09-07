@@ -425,6 +425,37 @@ species:
   # filter" note in CLAUDE.md for what that leaves as the only guards.
   # ---------------------------------------------------------------------------
 
+    # REVERTED to v5.5 on 2026-09-07, after the swap to ASM4749649v1 on
+    # 2026-09-06. Two reasons, one measured and one strategic:
+    #
+    #  * THE LIBRARY IS NOT CC-1690, which is ASM4749649v1's strain. Same reads
+    #    against both references (input_reads byte-identical at 9,020,748 for
+    #    SRR24798065): unique 21.75% -> 21.38% and mismatch rate per base
+    #    0.27% -> 0.32% going v5.5 -> ASM4749649v1. Inverting the
+    #    --outFilterMismatchNmax 1 truncation, that is ~0.065%/base MORE
+    #    divergence from CC-1690 than from v5.5's CC-503, i.e. ~4% of the mapped
+    #    genome in a discordant haplotype block. Not a structural artifact: the
+    #    newer assembly has 2.1 Mb MORE sequence and 1,459 FEWER gaps, so a
+    #    structural gain would map more reads, not fewer with more mismatches.
+    #    The samples come from the Mayfield lab, which uses CR25, CR125 and
+    #    CC-1690; the measurement says this one is CR25 or CR125.
+    #  * MODELS ALREADY EXIST on v5.5, so reverting restores comparability --
+    #    which is exactly the argument this file recorded as the only one for
+    #    reverting, and it is now backed by the strain measurement rather than
+    #    standing alone.
+    #
+    # What reverting gives back besides those: the ANNOTATION (TSS metaplot and
+    # the GFF3 `rRNA` source, so rdna_regions returns to [] and pct_rrna to the
+    # 39.1% basis), and the REUSED LAB FOLD ASSIGNMENT -- the swap had replaced
+    # it with a mechanical round-robin, which broke the one thing reuse buys.
+    # What it costs: gap closure. v5.5 is 1,512 components against 17, which by
+    # the window arithmetic is ~5.6% of loci lost to gap-adjacent N -- the
+    # largest such penalty in the corpus. Accepted deliberately; comparability
+    # with existing models and a reference matching the library's own strain
+    # both outweigh it.
+    # Do NOT re-swap without a strain-matched assembly. ASM4749650v1 is the
+    # sister CC-1690 assembly and has the same problem; GCA_026108075.1 is also
+    # not CC-503.
   C.reinhardtii:
     #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
     #: vertebrates; this repo spans four taxa, and scoring a yeast or
@@ -490,6 +521,30 @@ species:
       Organelles (MT, cpDNA) soak up run-on reads and stay in the index as
       decoys; they are outside main_chromosomes so they cannot enter a fold.
 
+    # REVERTED to Phypa_V3 on 2026-09-07, after the swap to V7 on 2026-09-06.
+    #
+    #  * PHYPA_V3 IS THE ONLY VERSION THE UCSC GENOME BROWSER SUPPORTS, so V7
+    #    tracks cannot be inspected there. For a repo whose QC rests on looking
+    #    at signal, losing the browser is a real cost and not a cosmetic one.
+    #  * It restores the REUSED LAB FOLD ASSIGNMENT. The swap had replaced it
+    #    with a mechanical round-robin over chromosome index, moving 24 of 26
+    #    chromosomes and breaking the only thing reuse buys -- that a locus held
+    #    out here is held out everywhere else the lab trains. This was the last
+    #    open fold item in the repo.
+    #  * It restores the Ensembl GFF3 `rRNA` source, so rdna_regions returns to
+    #    [] and pct_rrna to its 47.4% basis. That also retires a figure this
+    #    file had flagged as unsafe: the V7 measurement gave 76.3% from three
+    #    round 1.4 Mb blocks whose ends were probably over-broad, and it was
+    #    that number -- not the assembly -- that had cleared this experiment's
+    #    FAIL:very_low_mapping flag (adj 27.8% -> 60.7%). Expect the FAIL back.
+    #
+    # COSTS, both real. Gap closure: V3 is 2,149 components against V7's 26, so
+    # ~1.9% of loci are lost to gap-adjacent N. And the SPURIOUS 27th CHROMOSOME
+    # returns -- V7 resolved it away as a mis-assembled fragment, and it is a
+    # member of fold 0 below, so fold 0 carries peaks on an artifact. That is
+    # the price of the reused assignment and the browser; do not silently drop
+    # `27` to fix it, since removing it IS a divergence from the reused folds.
+    # See CLAUDE.md for the full ledger.
   P.patens:
     #: JASPAR CORE collection for `modisco report`. Upstream hardcodes
     #: vertebrates; this repo spans four taxa, and scoring a yeast or

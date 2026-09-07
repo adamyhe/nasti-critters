@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""Is a species' upstream antisense peak SHARED-NFR divergent initiation, or a
+DIVERGENT GENE PAIR?
+
+The summit-anchored panel in orientation_qc.py reports an upstream antisense
+peak at ~-100 bp for every M. musculus and C. griseus experiment, which is the
+expected tetrapod promoter architecture: divergent initiation from the SAME
+nucleosome-free region as the main TSS. It reports the same feature for all four
+C. elegans libraries, and worm is not a tetrapod -- so either worm has that
+architecture (a real finding) or the feature has a mundane cause.
+
+The mundane cause to rule out is genome compaction. C. elegans is ~100 Mb with
+~20,000 genes, so head-to-head gene pairs whose SEPARATE minus-strand promoter
+sits 100-200 bp away are common. Anchoring on a plus-strand summit then puts
+that neighbour's sense signal in the antisense channel at exactly the offset a
+divergent NFR would produce. PINTS would call such a locus `bidirectional`, so
+the peak class does not separate them either.
+
+WHAT SEPARATES THEM IS ANNOTATION. Shared-NFR divergent transcription is
+largely UNANNOTATED -- it is upstream antisense RNA, not a gene. A divergent
+gene pair's upstream antisense IS an annotated minus-strand gene start. So:
+
+  (A) SIGNAL ATTRIBUTION. Of the upstream-band antisense signal, what share
+      falls within +/- ANNOT_HALFWIDTH bp of an annotated opposite-strand
+      protein-coding gene start? High share => gene pairs.
+
+  (B) PARTITION. Split summits by whether such an annotated start exists in
+      their upstream band, then compute the summit statistic separately. If the
+      peak SURVIVES in the unpaired class, the feature is not annotation and
+      shared-NFR initiation is the live reading. If it collapses, it was pairs.
+
+(A) is quoted against a SHIFT NULL -- the identical attribution with every
+annotated position moved by a fixed offset. That controls for annotation
+density, which is the thing that makes a compact genome look "explained"
+whatever is true: in a gene-dense genome a random position is near SOME gene
+start, so a raw attribution share means nothing on its own. Read the ratio, not
+the share.
+
+THE NULL USES SEVERAL SHIFTS AND TAKES THE MEDIAN, because ONE shift can ALIAS
+against gene spacing and silently return the observed value as its own null.
+Caught on a fixture periodic at 2 kb queried with a 10 kb shift: every shifted
+start landed on another start, so a case built to be 100% explained by
+annotation reported 1.01x enrichment. Real genomes are not periodic, but
+C. elegans genes average ~5 kb apart, which is the same order as any single
+shift worth using -- so the aliasing risk is live exactly where this test is
+aimed. The spread across shifts is reported; a wide one means the null itself
+is unstable and the ratio should not be read.
+
+Run mouse as the POSITIVE CONTROL: its peak is known to be shared-NFR, so it
+must survive (B) and show a low (A) ratio. Run fly as the NEGATIVE control: it
+has no peak to explain, so its numbers say what "nothing here" looks like. A
+worm result is only interpretable next to both.
+
+    python src/qc/divergent_annotation_test.py \
+        -e C.elegans-embryo_GROcap C.elegans-L3_GROcap \
+           C.elegans-L1starved_GROcap C.elegans-embryo-sdc2_GROcap \
+           M.musculus-liver-young-female_ChROcap D.melanogaster-S2_PROcap \
+        --tsv qc/orientation/divergent_annotation.tsv
+
+Standalone by design -- it touches no DAG output and reads only what is already
+on disk, so it needs no --forcerun and cannot trigger the fetch_fastq cascade.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import orientation_qc as oq  # noqa: E402  (reuse peak_maxima/annotation/statistics)
+
+#: A summit's antisense signal is credited to an annotated gene start within
+#: this distance. 50 bp is deliberately generous relative to the ~10-30 bp
+#: scatter between an annotated start and the observed initiation site, so the
+#: test errs toward EXPLAINING the feature -- the conservative direction for a
+#: script whose interesting outcome is "annotation does not explain it".
+ANNOT_HALFWIDTH = 50
+
+#: Offsets for the density-matched null. Spread over an order of magnitude and
+#: deliberately not multiples of one another, so no single gene-spacing
+#: periodicity can alias against all of them.
+NULL_SHIFTS = (2_300, 7_100, 13_700, 31_300, 71_900)
+
+
+def annotated_starts(tss, strand_wanted):
+    """{chrom: sorted array of positions} for one strand."""
+    import numpy as np
+    by = {}
+    for chrom, pos, strand in tss:
+        if strand == strand_wanted:
+            by.setdefault(chrom, []).append(pos)
+    return {c: np.sort(np.asarray(v, dtype=np.int64)) for c, v in by.items()}
+
+
+def near_annotated(chrom, positions, starts, halfwidth):
+    """Boolean mask: is each genomic position within halfwidth of a start?
+
+    searchsorted rather than an interval tree -- the arrays are per-chromosome
+    and already sorted, and the query is one nearest-neighbour distance.
+    """
+    import numpy as np
+    arr = starts.get(chrom)
+    if arr is None or arr.size == 0:
+        return np.zeros(positions.shape, dtype=bool)
+    i = np.searchsorted(arr, positions)
+    left = np.clip(i - 1, 0, arr.size - 1)
+    right = np.clip(i, 0, arr.size - 1)
+    d = np.minimum(np.abs(positions - arr[left]), np.abs(positions - arr[right]))
+    return d <= halfwidth
+
+
+def parse_region(spec):
+    """CHR:START-END (1-based inclusive, as printed everywhere else here)."""
+    chrom, _, span = spec.rpartition(":")
+    if not chrom or "-" not in span:
+        raise ValueError(f"bad region {spec!r}; expected CHR:START-END")
+    a, b = span.split("-", 1)
+    return chrom, int(a.replace(",", "")), int(b.replace(",", ""))
+
+
+def in_regions(chrom, pos, regions):
+    return any(c == chrom and a <= pos + 1 <= b for c, a, b in regions)
+
+
+def run(exp, tss, flank, shifts, halfwidth, exclude=()):
+    """One pass over the bigWigs, accumulating everything both tests need."""
+    import numpy as np
+    import pandas as pd
+    import pybigtools
+
+    peaks = pd.read_csv(exp.peaks, sep="\t", usecols=[0, 1, 2], header=None,
+                        names=["chrom", "start", "end"], dtype={"chrom": str},
+                        comment="#")
+    sites = oq.peak_maxima(list(peaks.itertuples(index=False, name=None)),
+                           exp.signals[0], exp.signals[1], None)
+
+    # The antisense channel is the strand OPPOSITE the summit's, so the
+    # annotated start that would explain it is also on the opposite strand.
+    starts = {"+": annotated_starts(tss, "+"), "-": annotated_starts(tss, "-")}
+    shifted = [{s: {c: a + k for c, a in d.items()} for s, d in starts.items()}
+               for k in shifts]
+
+    x = np.arange(-flank, flank)
+    band_up = (x <= -oq.SUMMIT_ANTI_MIN_OFFSET) & (x >= -oq.SUMMIT_ANTI_MAX_OFFSET)
+    band_dn = (x >= oq.SUMMIT_ANTI_MIN_OFFSET) & (x <= oq.SUMMIT_ANTI_MAX_OFFSET)
+
+    pl = pybigtools.open(str(exp.signals[0]))
+    mn = pybigtools.open(str(exp.signals[1]))
+    sizes = pl.chroms()
+    acc = {k: np.zeros(2 * flank) for k in
+           ("sense_paired", "anti_paired", "sense_unpaired", "anti_unpaired")}
+    n = {"paired": 0, "unpaired": 0, "paired_upstream": 0}
+    attr = {"annot": 0.0, "total": 0.0, "null": [0.0] * len(shifts)}
+
+    n_excluded = 0
+    for chrom, pos, strand in sites:
+        if chrom not in sizes:
+            continue
+        # Region exclusion exists for the C. elegans L3 case and others like it.
+        # ~17% of that library's peaks are 21U-RNA (piRNA) loci in two blocks on
+        # chrIV -- Pol II-initiated, carrying NO refGene protein-coding
+        # annotation, and densely clustered in BOTH orientations. Every one of
+        # them therefore lands in "unpaired" while producing upstream antisense
+        # from a NEIGHBOURING locus, which is the very thing the unpaired class
+        # is supposed to be free of.
+        if exclude and in_regions(chrom, pos, exclude):
+            n_excluded += 1
+            continue
+        s, e = pos - flank, pos + flank
+        if s < 0 or e > sizes[chrom]:
+            continue                      # partial window: drop, never pad
+        a = np.asarray(pl.values(chrom, s, e, fillna=0), dtype=float)
+        b = np.abs(np.asarray(mn.values(chrom, s, e, fillna=0), dtype=float))
+        if strand == "+":
+            sense, anti = a, b
+            opp = "-"
+        else:
+            sense, anti = b[::-1], a[::-1]
+            opp = "+"
+
+        # PER-SITE NORMALISATION, with ONE denominator for both strands --
+        # identical to orientation_qc.metaplot(), and required for two separate
+        # reasons. Accumulating raw profiles lets a single locus dominate: PRO-cap
+        # spans orders of magnitude and one snRNA or ribosomal-protein promoter
+        # can outweigh a thousand ordinary ones (measured elsewhere in this repo
+        # at 78.8% of a raw profile from 1 outlier site in 1001, enough to invert
+        # its argmax). And a raw-summed profile is not comparable to the panel's
+        # numbers, which are normalised -- so quoting a partition log2 against a
+        # whole-experiment log2 would have compared two different statistics.
+        # Sharing the denominator is also deliberate: separate ones would
+        # equalise the strands and destroy the comparison.
+        denom = sense.sum() + anti.sum()
+        if denom <= 0:
+            continue
+        sense = sense / denom
+        anti = anti / denom
+
+        # (B) partition. Genomic coordinates of the band, which for a
+        # minus-strand summit runs the other way -- hence the flip above and
+        # the sign here.
+        off_up = x[band_up]
+        gpos_up = pos + (off_up if strand == "+" else -off_up)
+        mask_up = near_annotated(chrom, gpos_up, starts[opp], halfwidth)
+        off_dn = x[band_dn]
+        gpos_dn = pos + (off_dn if strand == "+" else -off_dn)
+        mask_dn = near_annotated(chrom, gpos_dn, starts[opp], halfwidth)
+
+        # THE PARTITION MUST BE SYMMETRIC. Defining "paired" on the UPSTREAM
+        # side alone selects the complement to be downstream-biased: a summit
+        # whose opposite-strand neighbour sits DOWNSTREAM fails the upstream
+        # test, lands in "unpaired", and carries its downstream antisense in
+        # with it. Measured on the real corpus, that drove one experiment's
+        # unpaired class to log2 -2.54 with a peak at +164 bp -- enough to trip
+        # the strand-swap flag -- where its whole-set value was about -0.4. The
+        # artefact was entirely this asymmetry. So "unpaired" now means NO
+        # annotated opposite-strand start anywhere in the band, which is
+        # direction-neutral and is the only complement the two hypotheses can
+        # be compared across.
+        key = "paired" if (mask_up.any() or mask_dn.any()) else "unpaired"
+        n[key] += 1
+        if mask_up.any():
+            n["paired_upstream"] += 1
+        acc[f"sense_{key}"] += sense
+        acc[f"anti_{key}"] += anti
+
+        # (A) attribution stays UPSTREAM-only: the quantity being explained is
+        # upstream antisense signal, so the upstream mask is the right one here
+        # even though the partition above is symmetric.
+        w = anti[band_up]
+        attr["total"] += float(w.sum())
+        attr["annot"] += float(w[mask_up].sum())
+        for i, sh in enumerate(shifted):
+            attr["null"][i] += float(
+                w[near_annotated(chrom, gpos_up, sh[opp], halfwidth)].sum())
+
+    pl.close(); mn.close()
+
+    out = {"n_sites": len(sites) - n_excluded, "n_excluded": n_excluded,
+           "n_paired": n["paired"],
+           "n_unpaired": n["unpaired"],
+           "n_paired_upstream": n["paired_upstream"]}
+    for key in ("paired", "unpaired"):
+        if n[key] == 0:
+            out[key] = None
+            out[f"mag_{key}"] = None
+            continue
+        sense = acc[f"sense_{key}"] / n[key]
+        anti = acc[f"anti_{key}"] / n[key]
+        out[key] = oq.summit_notes(sense, anti, flank)
+        out[f"mag_{key}"] = magnitude(sense, anti, x, band_up)
+    out["attr"] = attr
+    return out
+
+
+def magnitude(sense, anti, x, band_up):
+    """AMPLITUDE of the upstream antisense peak, which the log2 ratio hides.
+
+    log2(upstream/downstream) is scale-free by construction, so a tiny bump and
+    a towering peak with the same asymmetry score identically -- and that is
+    exactly the distinction between "worm has a divergent peak" and "worm has a
+    divergent peak comparable to a tetrapod's". Reported three ways because no
+    single one is safe alone:
+
+      height     peak height in the panel's own units (mean fraction of site
+                 signal per bp). Comparable ACROSS experiments only because the
+                 profiles are per-site normalised.
+      prominence peak / median of the band. Scale-free, so it survives a
+                 difference in overall antisense level.
+      vs_sense   peak / the sense maximum at the anchor. The sense peak at 0 is
+                 guaranteed by the anchor, which makes it a stable internal
+                 reference: this is "how big is the divergent peak relative to
+                 the primary one".
+    """
+    import numpy as np
+    # UPSTREAM argmax -- deliberately NOT the same quantity summit_notes reports.
+    # summit_notes takes the argmax over the WHOLE band (both signs), because it
+    # is answering "where is the antisense weight"; this function is answering
+    # "how big is the DIVERGENT peak", which is upstream by definition. Both were
+    # called `at` in the first version and the TSV invited exactly the misreading
+    # it produced: fly's `at_unpaired` of -128 is only its best UPSTREAM
+    # position, while its band-wide maximum is at +37 -- on the summit. Both are
+    # reported now, named for their scope.
+    band = band_up | ((x >= oq.SUMMIT_ANTI_MIN_OFFSET)
+                      & (x <= oq.SUMMIT_ANTI_MAX_OFFSET))
+    up = np.where(band_up)[0]
+    j = int(up[int(np.argmax(anti[up]))])
+    k = int(np.where(band)[0][int(np.argmax(anti[band]))])
+    # Baseline over the FULL band, matching summit_notes, so this prominence is
+    # on the same scale as SUMMIT_PROMINENCE and the two cannot be compared
+    # wrongly. An upstream-only median would be a different number wearing the
+    # same name.
+    med = float(np.median(anti[band]))
+    smax = float(sense.max())
+    return {"at_upstream": int(x[j]), "at_band": int(x[k]),
+            "height": float(anti[j]),
+            "prominence": float(anti[j] / med) if med > 0 else float("nan"),
+            "vs_sense": float(anti[j] / smax) if smax > 0 else float("nan")}
+
+
+#: Below this share of summits, the unpaired class is too small to carry a
+#: metaplot and the partition is INCONCLUSIVE rather than negative. This is the
+#: expected failure mode in a gene-dense genome: if almost every summit has an
+#: annotated opposite-strand start in its band, there is no unannotated class
+#: left to test, and an empty class must never be reported as evidence.
+MIN_UNPAIRED_FRAC = 0.10
+#: log2 the unpaired class must reach for its upstream weight to count as
+#: surviving. Half the SUMMIT_SWAP_LOG2 magnitude, i.e. deliberately lenient --
+#: the question is whether the feature is still THERE, not how strong it is.
+SURVIVES_LOG2 = 0.5
+#: A "peak" nearer the anchor than this is not upstream in any useful sense --
+#: it is the summit's own footprint. Matches SUMMIT_ANTI_MIN_OFFSET, the band's
+#: inner bound, so the two cannot drift.
+SUMMIT_UPSTREAM_MIN = oq.SUMMIT_ANTI_MIN_OFFSET
+
+
+def read_partition(r):
+    """One-line reading of the partition test. A READING, not a proof."""
+    import re
+    n, un = r["n_sites"], r["n_unpaired"]
+    if not n:
+        return "no usable summits"
+    frac = un / n
+    if frac < MIN_UNPAIRED_FRAC or r["unpaired"] is None:
+        return (f"INCONCLUSIVE: only {frac:.1%} of summits lack an annotated "
+                "opposite-strand start in the band, so there is no unannotated "
+                "class to test. Expected in a gene-dense genome; it means the "
+                "partition cannot separate the two hypotheses here, NOT that "
+                "annotation explains the feature.")
+    note = r["unpaired"][0]
+    lr = re.search(r"log2 ratio ([+-][\d.]+)", note)
+    # `[+-]?`, NOT `-?`: summit_notes formats the offset with `{at:+d}`, so a
+    # POSITIVE position always carries a leading '+' and `-?\d+` never matches
+    # it. That silently reported "no localized peak" for a peak at +27 bp, and
+    # would have let a downstream peak be announced as "the upstream peak
+    # SURVIVES at +200 bp" -- hence the sign test below, which was also absent.
+    pk = re.search(r"peak at ([+-]?\d+) bp", note)
+    lr = float(lr.group(1)) if lr else 0.0
+    at = int(pk.group(1)) if pk else None
+
+    if at is not None and at <= -SUMMIT_UPSTREAM_MIN and lr >= SURVIVES_LOG2:
+        return (f"SHARED-NFR IS LIVE: the upstream peak SURVIVES at {at:+d} bp "
+                f"(log2 {lr:+.2f}) across the {un:,} summits with NO annotated "
+                "opposite-strand start in the band, so annotation does not "
+                "explain it.")
+    if at is not None and at > -SUMMIT_UPSTREAM_MIN:
+        return (f"NOT A DIVERGENT NFR: the unpaired class DOES have a localized "
+                f"antisense peak, but at {at:+d} bp -- on or downstream of the "
+                f"summit, not upstream (log2 {lr:+.2f} over the band). Antisense "
+                "sitting on the anchor is the peak's own footprint or an "
+                f"unresolved close pair, not divergent initiation. {un:,} summits.")
+    if lr >= SURVIVES_LOG2:
+        return (f"PARTLY SURVIVES: upstream weight holds (log2 {lr:+.2f}) in the "
+                f"{un:,} unannotated summits but with no localized peak -- "
+                "diffuse upstream antisense, not a divergent NFR.")
+    return (f"GENE PAIRS: the upstream feature COLLAPSES (log2 {lr:+.2f}, "
+            "no peak) once the "
+            f"{un:,} summits with no annotated partner are taken alone, so the "
+            "signal was tracking annotated divergent genes.")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-e", "--experiments", nargs="+", action="extend", default=[])
+    ap.add_argument("--flank", type=int, default=500)
+    ap.add_argument("--halfwidth", type=int, default=ANNOT_HALFWIDTH)
+    ap.add_argument("--shift", type=int, nargs="+", action="extend",
+                    default=[], metavar="BP",
+                    help=f"offsets for the density-matched null "
+                         f"(default {', '.join(f'{s:,}' for s in NULL_SHIFTS)}); "
+                         "several are used and the median taken, because one "
+                         "can alias against gene spacing")
+    ap.add_argument("--annotation", type=Path, default=None)
+    ap.add_argument("--exclude-region", nargs="+", action="extend", default=[],
+                    metavar="CHR:START-END",
+                    help="drop summits inside these regions, e.g. the C. elegans "
+                         "L3 21U-RNA blocks chrIV:5000000-6000000 and "
+                         "chrIV:13000000-17000000")
+    ap.add_argument("--all-biotypes", action="store_true",
+                    help="do NOT restrict to protein-coding (dilutes worm ~47%%)")
+    ap.add_argument("--tsv", type=Path, default=None)
+    ap.add_argument("--reverdict", type=Path, default=None, metavar="TSV",
+                    help="recompute the verdict column from an existing TSV and "
+                         "exit. Every input to read_partition() is stored there, "
+                         "so a corrected reading costs no second bigWig pass.")
+    args = ap.parse_args()
+
+    if args.reverdict:
+        with open(args.reverdict) as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+        for row in rows:
+            r = {"n_sites": int(row["n_sites"]),
+                 "n_unpaired": int(row["n_unpaired"]),
+                 "unpaired": [row["notes_unpaired"]] if row["notes_unpaired"] else None,
+                 "paired": [row["notes_paired"]] if row["notes_paired"] else None}
+            new = read_partition(r)
+            flag = "" if new == row.get("verdict", "") else "   [CHANGED]"
+            print(f"\n{row['experiment']} ({row['species']}){flag}\n  => {new}")
+            row["verdict"] = new
+        with open(args.reverdict, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter="\t")
+            w.writeheader(); w.writerows(rows)
+        print(f"\nrewrote {args.reverdict}")
+        return
+
+    if not args.experiments:
+        ap.error("pass -e EXPERIMENT ... (or --reverdict TSV)")
+    from experiments import Experiment
+    import numpy as np
+    import yaml
+    shifts = tuple(args.shift) or NULL_SHIFTS
+    exclude = tuple(parse_region(x) for x in args.exclude_region)
+    with open(REPO_ROOT / "config" / "genomes.yaml") as f:
+        genomes = yaml.safe_load(f)["species"]
+    # No logomaker/matplotlib: this script draws nothing.
+    oq.require_deps(("pybigtools", "numpy", "pandas"))
+
+    rows = []
+    for exp_id in args.experiments:
+        exp = Experiment.load(exp_id)
+        gaps = exp.missing_paths(Experiment.QC_INPUTS)
+        if gaps:
+            print(f"SKIP {exp_id}: missing {gaps[0]}")
+            continue
+        genome = genomes[exp.species]
+        if genome.get("annotation_url") is None and args.annotation is None:
+            print(f"SKIP {exp_id}: no annotation for {exp.species} -- this test "
+                  "is annotation-based and cannot run without one")
+            continue
+        print(f"\n=== {exp_id} ({exp.species})")
+        tss = oq.load_annotation(exp.species, genome,
+                                 REPO_ROOT / "data" / "annotation",
+                                 args.annotation,
+                                 coding_only=not args.all_biotypes)
+        print(f"  annotated starts: {len(tss):,} "
+              f"({'all biotypes' if args.all_biotypes else 'protein-coding only'})")
+        r = run(exp, tss, args.flank, shifts, args.halfwidth, exclude)
+        a = r["attr"]
+        tot = a["total"]
+        share = a["annot"] / tot if tot else float("nan")
+        nulls = sorted(n / tot for n in a["null"]) if tot else [float("nan")]
+        null = float(np.median(nulls))
+        # 0/0 is UNDEFINED, not infinite. Getting this wrong inverts the
+        # interesting result: the fixture where annotation explains NOTHING has
+        # share 0 and null 0, and reporting "inf" there reads as "maximally
+        # explained" -- the exact opposite of the truth.
+        if null > 0:
+            ratio = share / null
+        elif share > 0:
+            ratio = float("inf")
+        else:
+            ratio = float("nan")
+        if r["n_excluded"]:
+            print(f"  excluded by region: {r['n_excluded']:,} summits")
+        print(f"  sites used: {r['n_sites']:,}  "
+              f"paired {r['n_paired']:,} / unpaired {r['n_unpaired']:,} "
+              f"({100 * r['n_paired'] / max(r['n_sites'], 1):.1f}% paired; "
+              f"{r['n_paired_upstream']:,} of the paired have the partner "
+              "UPSTREAM)")
+        print(f"  (A) upstream antisense within {args.halfwidth} bp of an "
+              f"annotated opposite-strand start: {share:.1%}")
+        # Precomputed, NOT inlined into the f-string: a multi-line f-string
+        # expression is PEP 701, i.e. Python 3.12+, and this repo's env is
+        # 3.11. It parsed locally on 3.12 and was a SyntaxError on the cluster.
+        # Compile-check with `/usr/bin/python3 -c "import ast,sys;
+        # ast.parse(open(sys.argv[1]).read())" <file>` against an OLDER
+        # interpreter, not the newest one available.
+        enrich = ("undefined (no signal attributable either way)"
+                  if ratio != ratio else f"{ratio:.2f}x")
+        print(f"      shift null: median {null:.1%} "
+              f"(range {nulls[0]:.1%}-{nulls[-1]:.1%} over {len(nulls)} shifts)"
+              f"   ENRICHMENT {enrich}")
+        # Gated on the ENRICHMENT too, because a near-zero null is unstable in
+        # RELATIVE terms almost by definition -- mouse and hamster came back
+        # with null medians of 0.1% and enrichments of 171x and 56x, where the
+        # spread cannot change the conclusion. Warning there is noise in the one
+        # place the answer is clearest, and a warning that fires when nothing is
+        # wrong is worse than none.
+        if null and ratio == ratio and ratio < 5.0 \
+                and (nulls[-1] - nulls[0]) > 0.5 * null:
+            print("      WARNING: the null spans more than half its own median, "
+                  "so it is unstable here -- read (B), not this ratio")
+        for key in ("paired", "unpaired"):
+            print(f"  (B) {key}:")
+            m = r[f"mag_{key}"]
+            if m:
+                same = "" if m["at_band"] == m["at_upstream"] else \
+                    f"  (band-wide max is at {m['at_band']:+d} bp)"
+                print(f"        AMPLITUDE of the UPSTREAM peak at "
+                      f"{m['at_upstream']:+d} bp: height {m['height']:.2e} /bp, "
+                      f"prominence {m['prominence']:.2f}x band median, "
+                      f"{m['vs_sense']:.1%} of the sense anchor{same}")
+            if r[key] is None:
+                print("        no sites in this class")
+                continue
+            for line in r[key]:
+                print(f"        {line}")
+            if "<--" in " ".join(r[key]):
+                print("        NOTE: that flag came from summit_notes, which is "
+                      "written for a WHOLE experiment. On a partition subset it "
+                      "is not an experiment-level verdict -- read it as a "
+                      "property of this class only, never as a reason to "
+                      "re-map.")
+        print(f"  => {read_partition(r)}")
+        rows.append({
+            "experiment": exp_id, "species": exp.species,
+            "n_sites": r["n_sites"], "n_excluded": r["n_excluded"],
+            "n_paired": r["n_paired"],
+            "n_unpaired": r["n_unpaired"],
+            "n_paired_upstream": r["n_paired_upstream"],
+            "pct_paired": round(100 * r["n_paired"] / max(r["n_sites"], 1), 1),
+            "attr_share": round(share, 4), "attr_null": round(null, 4),
+            "attr_null_min": round(nulls[0], 4), "attr_null_max": round(nulls[-1], 4),
+            "attr_enrichment": round(ratio, 3),
+            "verdict": read_partition(r),
+            **{f"{k}_{key}": (round(r[f"mag_{key}"][k], 6)
+                              if r[f"mag_{key}"] else "")
+               for key in ("paired", "unpaired")
+               for k in ("at_upstream", "at_band", "height", "prominence",
+                         "vs_sense")},
+            "notes_paired": " | ".join(r["paired"] or []),
+            "notes_unpaired": " | ".join(r["unpaired"] or []),
+        })
+
+    if args.tsv and rows:
+        args.tsv.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.tsv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter="\t")
+            w.writeheader()
+            w.writerows(rows)
+        print(f"\nwrote {args.tsv}")
+
+
+if __name__ == "__main__":
+    main()

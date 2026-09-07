@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate 5'-end orientation: initiator PWM/logo, and stranded TSS metaplots.
+"""Validate 5'-end orientation: initiator PWM/logo, and stranded metaplots.
 
 Two assumptions in this pipeline are conventions rather than documented facts,
 and both are silent when wrong:
@@ -20,11 +20,66 @@ read-outs that catch it.
    are centred on 3' ends instead and the logo is flat or shows an unrelated
    bias. A flat logo is the alarm.
 
-2. STRANDED METAPLOT around annotated gene TSSs.
+2. SUMMIT-ANCHORED METAPLOT, centred on each peak's own signal maximum.
+   Annotation-free, like the PWM, and therefore the metaplot that works where the
+   gene models do not -- which is most non-model species here. It costs nothing:
+   peak_maxima() is already computed for the PWM.
+
+   READ THE ANTISENSE CHANNEL, NOT THE SENSE ONE. Centring on the maximum makes
+   a sense peak at 0 tautological; it is guaranteed by construction and is
+   evidence of nothing. The informative signal is where the ANTISENSE weight
+   sits: if the two strand tracks are swapped it moves DOWNSTREAM, and the sign
+   flip is unambiguous in a way the annotation-anchored version never was.
+
+   ONLY THE DOWNSTREAM READING IS A FAULT. An UPSTREAM peak at ~-100 bp is a
+   TETRAPOD expectation, NOT a corpus-wide one: divergent initiation sharing one
+   NFR with the main TSS is a vertebrate promoter architecture, and most taxa
+   here do not have it. So absence of an upstream peak is the NULL for
+   everything outside mouse and hamster -- it is not a deficiency, and it must
+   never be read as one. Measured over this corpus: 18 of 20 mouse/hamster
+   experiments report a localized peak at median log2 +1.39, against 10 of 22
+   for every other taxon at median +0.09.
+
+   C. ELEGANS IS THE ONE NON-TETRAPOD THAT SHOWS THE TETRAPOD PATTERN and it is
+   UNEXPLAINED -- all four worm libraries peak at -97 to -124 bp with log2 +0.81
+   to +1.21. It is not a peak-calling artefact (see the antisense-fraction
+   caveat below): worm sits at 26-59% bidirectional, the same range as fly at
+   22-52%, and fly runs -0.13 to -0.54. The likeliest benign explanation is
+   DIVERGENT GENE PAIRS rather than shared-NFR initiation -- a 100 Mb genome
+   with ~20,000 genes has many head-to-head pairs whose separate minus-strand
+   promoter sits ~100-200 bp away. That is distinguishable: shared-NFR divergent
+   transcription is largely UNANNOTATED, a divergent gene pair is an annotated
+   minus-strand gene start. Do not resolve it from this panel alone.
+
+   THE STATISTIC IS log2(upstream / downstream) ANTISENSE, not an argmax, over a
+   band that excludes the anchor's own footprint and stops before neighbouring
+   promoters dominate. Argmax was tried first and is fragile in precisely the
+   case this panel exists for: on a channel with no localized peak it lands
+   wherever noise is highest, which across the corpus meant |offset| 360-500 for
+   fly, A. thaliana, P. patens, S. pombe and four S. cerevisiae experiments, and
+   a few bp off the anchor for cotton and others -- and that second group then
+   tripped a naive `argmax > 0` swap test. A position is reported only when the
+   peak is prominent and away from the edge; otherwise the verdict says there is
+   no localized antisense peak, which for a unidirectional species is the
+   correct answer rather than a fault.
+
+   The panel gives antisense ITS OWN Y-AXIS for the same reason. Sharing one
+   scale with the anchor spike compressed it onto the axis line and made every
+   species look identical -- M.musculus-GCB (peak at -137) and
+   S.cerevisiae-Ino80ctl (no localized peak) were indistinguishable by eye.
+
+3. STRANDED METAPLOT around annotated gene TSSs.
    Plus-strand genes should show plus-track signal peaking just downstream of
    the annotated TSS, and minus-strand genes the mirror image on the minus
    track. If the two tracks are swapped, reverse_strand is wrong for that
    experiment. If signal centres on gene 3' ends, the mate choice is wrong.
+
+   SKIPPED ENTIRELY where the species has no annotation (`annotation_url: null`
+   in config/genomes.yaml -- currently only C. reinhardtii, whose ASM4749649v1
+   assembly has none and never will). load_annotation() returns no TSSs, this
+   panel draws "no metaplot", and no flag is raised. Panels 1 and 2 are
+   annotation-free and still carry the orientation verdict, which is the reason
+   the summit-anchored panel exists.
 
    DIVERGENT upstream antisense signal is expected in some species and NOT in
    others -- C. elegans promoters are predominantly unidirectional, so absent
@@ -76,10 +131,18 @@ REQUIRED = {
 }
 
 
-def require_deps() -> None:
-    """Fail early, with the fix, if the environment predates the QC deps."""
+def require_deps(mods=None) -> None:
+    """Fail early, with the fix, if the environment predates the QC deps.
+
+    `mods` narrows the check to the modules the caller actually imports. The
+    default is everything this script needs. It matters because the set is not
+    uniform: divergent_annotation_test.py reuses peak_maxima() and
+    load_annotation() but draws nothing, so demanding logomaker/matplotlib of
+    it would refuse to run on an environment that can run it perfectly well.
+    """
     import importlib.util
-    absent = sorted({pkg for mod, pkg in REQUIRED.items()
+    wanted = REQUIRED if mods is None else {m: REQUIRED[m] for m in mods}
+    absent = sorted({pkg for mod, pkg in wanted.items()
                      if importlib.util.find_spec(mod) is None})
     if not absent:
         return
@@ -94,14 +157,36 @@ def require_deps() -> None:
 
 
 def load_annotation(species: str, genome: dict, cache: Path,
-                    local: Path | None = None) -> list[tuple]:
+                    local: Path | None = None,
+                    coding_only: bool = False) -> list[tuple]:
     """(chrom, tss, strand) per gene, in the assembly's own chromosome naming.
 
     `local` is the path to an already-fetched annotation. The Snakemake rule
     passes it, so the DAG owns the download and parallel jobs for the same
     species cannot race for the same file.
+
+    `coding_only` restricts to protein-coding: `NM_` transcripts for the UCSC
+    GTF branch, `biotype=protein_coding` for the Ensembl GFF3 branch. It
+    defaults to FALSE so the DAG's metaplot is unchanged -- the two branches
+    already select different things (per-transcript all-biotypes for GTF,
+    per-gene protein-coding-only for GFF3), and flipping that for every
+    experiment would move every published `n_tss`. Pass it where the dilution
+    matters: C. elegans refGene is ~47% non-coding (25,200 NR_ of 54,144
+    transcripts), largely snoRNA/snRNA/misc_RNA with no Pol II initiation, so
+    any test that asks whether a feature sits on an annotated GENE start needs
+    them gone or the answer is diluted by loci that were never promoters.
     """
     url, fmt = genome["annotation_url"], genome["annotation_format"]
+    # No annotation for this assembly at all -- C. reinhardtii under
+    # ASM4749649v1. Return no TSSs rather than raising: metaplot() already
+    # returns (None, None, 0) for an empty site list, render() draws
+    # "no metaplot", and verdict() raises no metaplot line. The initiator logo
+    # and the summit-anchored metaplot are annotation-free and still carry the
+    # verdict, which is the reason the summit panel exists.
+    if url is None and local is None:
+        print("  no annotation for this assembly -- TSS metaplot skipped "
+              "(logo and summit metaplot are annotation-free)")
+        return []
     if local is None:
         cache.mkdir(parents=True, exist_ok=True)
         local = cache / Path(url).name
@@ -121,6 +206,17 @@ def load_annotation(species: str, genome: dict, cache: Path,
             if not keep:
                 continue
             chrom, start, end, strand, attrs = p[0], int(p[3]), int(p[4]), p[6], p[8]
+            if coding_only:
+                # UCSC refGene has no gene_biotype; NM_ vs NR_ is the only
+                # coding/non-coding signal it carries. Ensembl GFF3's `gene`
+                # type is already protein-coding (non-coding genes are
+                # `ncRNA_gene` and never reach here), so the biotype test is
+                # belt-and-braces there rather than the load-bearing filter.
+                if fmt == "gtf":
+                    if 'transcript_id "NM_' not in attrs:
+                        continue
+                elif "protein_coding" not in attrs:
+                    continue
             tss = start if strand == "+" else end
             key = (chrom, tss, strand)
             if key in seen:
@@ -300,14 +396,161 @@ def information_content(pwm, flank):
     return bits, bg
 
 
-def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir):
+def summit_metaplot(sites, pl_bw, mn_bw, flank):
+    """Metaplot anchored on peak maxima rather than annotated TSSs.
+
+    `sites` is peak_maxima() output, already strand-resolved, so this is just
+    metaplot() over a different anchor set -- no extra bigWig pass beyond the
+    windows themselves.
+    """
+    return metaplot(sites, pl_bw, mn_bw, flank)
+
+
+#: Offsets inside this are the anchor's own footprint and are excluded from
+#: every summit statistic. The summit IS the sense maximum, so the first few
+#: tens of bp carry the peak's own signal on both strands.
+SUMMIT_ANTI_MIN_OFFSET = 20
+#: An argmax this close to the BAND's outer edge is not a peak -- it is where
+#: the noise happened to be highest on a profile with no peak in it. Measured
+#: across the corpus: fly, A. thaliana, P. patens, S. pombe and four
+#: S. cerevisiae experiments all reported an "antisense peak" at |offset|
+#: 360-500 against a 500 bp flank, which is this artefact, not a reading.
+#:
+#: MEASURED AGAINST SUMMIT_ANTI_MAX_OFFSET, NOT THE WINDOW FLANK. The first
+#: version compared against the flank (500), which was wrong once argmax was
+#: restricted to the band: the edge where noise piles up is then 300, not 500,
+#: so a "peak" at -257 or +243 passed a check meant to exclude exactly that.
+#: The corpus showed three -- MEF_CoPRO +243 and priB_PROcap +241, both with
+#: log2 ratios of +0.13 and +0.00 (i.e. no asymmetry at all, so no peak to
+#: report), and P.patens -257, which is separately too weak to interpret.
+#: Nothing real is near the bound: every genuine peak measured sits at
+#: -97 to -159.
+SUMMIT_EDGE_MARGIN = 60
+#: Outer edge of the band. Divergent initiation sits at -50 to -250 bp; the
+#: measured corpus puts every real antisense peak at -97 to -159. Past this,
+#: what the window contains is NEIGHBOURING PROMOTERS, not divergence -- which
+#: is the dominant effect in the dense genomes (S. cerevisiae runs 1.2-4.1
+#: peaks per 2114 bp, so a +-500 window usually holds another peak, and yeast
+#: accordingly shows the corpus's highest antisense fraction, 35-43%, with a
+#: monotone rise to the edge). PROVISIONAL, like FLAT_BITS: calibrated from
+#: this corpus, not from anything principled.
+SUMMIT_ANTI_MAX_OFFSET = 300
+#: A peak must exceed this multiple of the band's own median to count as
+#: localized rather than as a ripple on a flat channel.
+SUMMIT_PROMINENCE = 1.5
+#: Antisense mean inside the excluded anchor footprint, over the band MAXIMUM,
+#: above which the two strands look collapsed onto one point. Against the band
+#: median this fired on a broad genuine upstream peak, which still carries real
+#: signal at offset 0 while the median is dragged down by the quiet downstream
+#: half. Against the maximum it asks the right question: is the summit itself
+#: the largest antisense feature anywhere in the window? Measured this way
+#: rather than by argmax because the footprint is outside the band, so an
+#: on-summit peak would otherwise surface only as an argmax pinned to the band
+#: edge -- which is what the first version of this check did.
+SUMMIT_ONSUMMIT_FACTOR = 2.0
+#: log2(upstream / downstream antisense) at or below this, with enough
+#: antisense to be real, is the strand-swap signature.
+SUMMIT_SWAP_LOG2 = -1.0
+#: Below this share of windowed signal the antisense channel is too weak to
+#: interpret either way.
+SUMMIT_MIN_ANTI_FRAC = 0.05
+
+
+def summit_notes(sense, anti, flank):
+    """Read of the summit-anchored panel. NEVER gated on annotation quality --
+    it uses none.
+
+    Only the antisense channel is interpreted. See the module docstring: the
+    sense peak at offset 0 is an artefact of the anchor and says nothing.
+    """
+    import numpy as np
+    if sense is None or anti is None or anti.sum() <= 0:
+        return ["summit metaplot: no antisense signal (unidirectional promoters "
+                "are normal in some species; not a flag)"]
+    x = np.arange(-flank, flank)
+    frac = anti.sum() / max(sense.sum() + anti.sum(), 1e-9)
+
+    # THE STATISTIC IS A RATIO, NOT AN ARGMAX. Reporting argmax was fragile in
+    # exactly the case this panel is for: on a channel with no localized peak,
+    # argmax lands wherever noise is highest -- at the window edge (|offset|
+    # 360-500 for fly, A. thaliana, P. patens, S. pombe and four
+    # S. cerevisiae experiments) or a few bp off the anchor -- and the second
+    # of those then tripped the `at > 0` strand-swap test. Most of the flags
+    # raised on the first full run were that artefact.
+    #
+    # Total antisense weight upstream vs downstream degrades to 0 on a flat
+    # channel instead, has no edge behaviour, and is the quantity the
+    # strand-swap question actually asks.
+    band = ((np.abs(x) >= SUMMIT_ANTI_MIN_OFFSET)
+            & (np.abs(x) <= SUMMIT_ANTI_MAX_OFFSET))
+    up = float(anti[band & (x < 0)].sum())
+    dn = float(anti[band & (x > 0)].sum())
+    eps = 1e-12
+    lr = float(np.log2((up + eps) / (dn + eps)))
+
+    # Is there a peak at all? Judged inside the same band, and required to be
+    # both prominent against the band's own median and away from the edge.
+    idx = np.where(band)[0]
+    j = int(idx[int(np.argmax(anti[idx]))])
+    at = int(x[j])
+    baseline = float(np.median(anti[band]))
+    prominent = baseline > 0 and float(anti[j]) >= SUMMIT_PROMINENCE * baseline
+    localized = (prominent
+                 and (SUMMIT_ANTI_MAX_OFFSET - abs(at)) > SUMMIT_EDGE_MARGIN)
+
+    # The FRACTION is nearly circular and is printed for context only, never as
+    # evidence: across this corpus it correlates with the share of peaks PINTS
+    # called BIDIRECTIONAL at Pearson +0.94. A bidirectional call means an
+    # opposite-strand peak was already found nearby, so anchoring on those
+    # summits puts antisense in the window by construction. The log2 ratio is
+    # the independent quantity (r = -0.29 with the same share), and
+    # S. cerevisiae is the proof they are different: 92.8% bidirectional and
+    # 40.4% antisense, yet log2 -0.03 -- bidirectional calls fill the window
+    # SYMMETRICALLY and do not manufacture an upstream peak.
+    note = (f"summit metaplot: antisense {frac:.1%} of windowed signal "
+            "(tracks the bidirectional peak fraction; context only), "
+            f"upstream/downstream log2 ratio {lr:+.2f}")
+    if localized:
+        note += f", peak at {at:+d} bp"
+    else:
+        note += (f", NO localized antisense peak (argmax {at:+d} bp is at the "
+                 "window edge or not prominent) -- unidirectional promoters, "
+                 "or neighbouring peaks inside the window; not a fault")
+
+    if frac <= SUMMIT_MIN_ANTI_FRAC:
+        note += "  (antisense too weak to interpret)"
+        return [note]
+
+    # Severity depends on whether a PEAK backs the asymmetry. A real strand
+    # swap puts a localized antisense peak downstream; a dense genome's
+    # neighbouring promoters produce the same sign with no peak at all, which
+    # is a reading to look at rather than a fault to assert. The REVIEW marker
+    # is counted separately from flags for exactly this distinction.
+    inner = float(anti[np.abs(x) < SUMMIT_ANTI_MIN_OFFSET].mean())
+    if lr <= SUMMIT_SWAP_LOG2 and localized:
+        note += ("  <-- antisense weight is DOWNSTREAM of the summit and peaks "
+                 f"at {at:+d} bp; expected upstream. Suspect the two strand "
+                 "tracks are swapped (reverse_strand)")
+    elif lr <= SUMMIT_SWAP_LOG2:
+        note += ("  <-- REVIEW: antisense weight is downstream but with no "
+                 "localized peak -- in a dense genome this is neighbouring "
+                 "promoters inside the window, not necessarily a strand swap")
+    elif float(anti[j]) > 0 and inner >= SUMMIT_ONSUMMIT_FACTOR * float(anti[j]):
+        note += ("  <-- antisense is concentrated ON the summit rather than "
+                 "upstream; suspect an unextracted UMI or a 5' offset "
+                 "collapsing the two strands")
+    return [note]
+
+
+def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir,
+           s_sense=None, s_anti=None, n_summit=0):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(19, 4))
     if pwm is not None:
         import logomaker
         bits, _ = information_content(pwm, flank_pwm)
@@ -336,6 +579,42 @@ def render(exp_id, pwm, n_pwm, sense, anti, n_tss, flank_pwm, flank_meta, outdir
         axes[1].legend(frameon=False)
     else:
         axes[1].text(.5, .5, "no metaplot", ha="center"); axes[1].axis("off")
+
+    if s_sense is not None:
+        x = np.arange(-flank_meta, flank_meta)
+        # ANTISENSE OWNS THE Y-AXIS, and this is the whole reason the panel is
+        # worth looking at. Sharing one scale with sense made it useless: the
+        # sense spike at 0 is guaranteed by the anchor and set the scale, so the
+        # antisense channel was compressed onto the axis line and EVERY species
+        # looked like a single spike. Checked on the first full run --
+        # M.musculus-GCB (antisense peak at -137) and S.cerevisiae-Ino80ctl (no
+        # localized peak at all) were indistinguishable by eye.
+        #
+        # Sense is kept as faint context on a twin axis, unlabelled, because it
+        # confirms the anchor worked and nothing more.
+        axes[2].plot(x, s_anti, color="tab:orange", lw=1, label="antisense")
+        # Shade the band the statistic uses, so the printed ratio and the
+        # picture cannot disagree about what was measured.
+        for sign in (-1, 1):
+            axes[2].axvspan(sign * SUMMIT_ANTI_MIN_OFFSET, sign * flank_meta,
+                            color="grey", alpha=0.07)
+        axes[2].axvline(0, color="k", lw=0.8, ls="--")
+        axes[2].set_xlabel("offset from peak summit (bp)")
+        axes[2].set_ylabel("mean fraction of site signal (antisense)")
+        ctx = axes[2].twinx()
+        ctx.plot(x, s_sense, color="tab:blue", lw=0.8, alpha=0.3,
+                 label="sense (anchor, own scale)")
+        ctx.set_yticks([])
+        h1, l1 = axes[2].get_legend_handles_labels()
+        h2, l2 = ctx.get_legend_handles_labels()
+        axes[2].legend(h1 + h2, l1 + l2, fontsize=8)
+        # The title says what to look at, because the obvious feature is the
+        # uninformative one: sense peaks at 0 by construction.
+        axes[2].set_title(f"summit-anchored, {n_summit:,} peaks (annotation-free)\n"
+                          "ANTISENSE trace: downstream = strands swapped\n"
+                          "upstream peak: tetrapod expectation; absence is the null")
+    else:
+        axes[2].text(.5, .5, "no summit metaplot", ha="center"); axes[2].axis("off")
 
     fig.suptitle(exp_id)
     fig.tight_layout()
@@ -398,11 +677,24 @@ def verdict(pwm, sense, anti, flank_pwm, flank_meta, tss_anchored=True):
         # system -- a numeric enrichment score was added here and removed again,
         # because deciding placement by eye is the actual requirement.
         def metanote(text, suspicious, hint):
+            """A suspicious reading is ALWAYS surfaced. `tss_anchored` sets its
+            severity, not its visibility.
+
+            This used to drop the "<--" marker entirely where the annotation is not
+            TSS-anchored, which meant such a reading was invisible to n_flagged and to
+            anything grepping for "<--": present in the prose, absent from triage. The
+            gate exists because that check went 0-for-11 on those species, so it must not
+            raise a hard flag -- but a silent downgrade is the wrong way to say so. Emit
+            REVIEW instead: it counts, it greps, and it says why it might be wrong.
+            """
             if not suspicious:
                 return text
             if tss_anchored:
                 return f"{text}  <-- {hint}"
-            return f"{text}  (advisory: annotation is not TSS-anchored)"
+            return (f"{text}  <-- REVIEW: {hint} -- but this metaplot may be measuring the "
+                    "ANNOTATION here (annotation_tss_anchored: false), where the check has "
+                    "a history of false positives. Confirm against the initiator PWM and "
+                    "the summit-anchored panel, both of which are annotation-free.")
 
         half = len(sense) // 2
         down, up = sense[half:].sum(), sense[:half].sum()
@@ -418,8 +710,9 @@ def verdict(pwm, sense, anti, flank_pwm, flank_meta, tss_anchored=True):
             if anti.sum() > sense.sum() else
             f"antisense/sense {anti.sum() / max(sense.sum(), 1e-9):.2f}")
         if not tss_anchored:
-            notes.append("metaplot ADVISORY for this species "
-                         "(annotation_tss_anchored: false)")
+            notes.append("metaplot is ADVISORY for this species "
+                         "(annotation_tss_anchored: false); any line above marked REVIEW "
+                         "is suspicious but may reflect the annotation, not the pipeline")
     return notes
 
 
@@ -484,21 +777,31 @@ def main():
         sense, anti, n_tss = metaplot(tss, exp.signals[0], exp.signals[1],
                                       args.flank_meta, args.max_tss)
         print(f"  annotated TSSs used: {n_tss:,}")
-        lines = verdict(pwm, sense, anti, args.flank_pwm, args.flank_meta,
+        s_sense, s_anti, n_summit = summit_metaplot(
+            sites, exp.signals[0], exp.signals[1], args.flank_meta)
+        lines = summit_notes(s_sense, s_anti, args.flank_meta)
+        lines += verdict(pwm, sense, anti, args.flank_pwm, args.flank_meta,
                         tss_anchored=genomes[exp.species].get(
                             "annotation_tss_anchored", True))
         for line in lines:
             print(f"  {line}")
         out = render(exp_id, pwm, n_pwm, sense, anti,
-                     n_tss, args.flank_pwm, args.flank_meta, args.outdir)
+                     n_tss, args.flank_pwm, args.flank_meta, args.outdir,
+                     s_sense=s_sense, s_anti=s_anti, n_summit=n_summit)
         print(f"  wrote {out}")
         if args.tsv:
             args.tsv.parent.mkdir(parents=True, exist_ok=True)
-            flagged = [l for l in lines if "<--" in l]
+            # Two tallies, not one. A REVIEW item is surfaced and greppable like any
+            # other "<--" line, but it must not inflate n_flagged: the whole point of
+            # separating them is that the flagged count stays a count of things believed
+            # to be real.
+            review = [l for l in lines if "<-- REVIEW:" in l]
+            flagged = [l for l in lines if "<--" in l and "<-- REVIEW:" not in l]
             with open(args.tsv, "w") as f:
-                f.write("experiment\tspecies\tn_peak_maxima\tn_tss\tn_flagged\tnotes\n")
-                f.write(f"{exp_id}\t{exp.species}\t{n_pwm}\t{n_tss}\t{len(flagged)}\t"
-                        f"{'; '.join(lines)}\n")
+                f.write("experiment\tspecies\tn_peak_maxima\tn_tss\t"
+                        "n_flagged\tn_review\tnotes\n")
+                f.write(f"{exp_id}\t{exp.species}\t{n_pwm}\t{n_tss}\t"
+                        f"{len(flagged)}\t{len(review)}\t{'; '.join(lines)}\n")
             print(f"  wrote {args.tsv}")
         ran += 1
     print(f"\n{ran} experiment(s) plotted into {args.outdir}")
