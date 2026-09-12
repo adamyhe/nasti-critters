@@ -489,6 +489,30 @@ exactly 1 blank column). So the setting every `extract_loci` call in this repo p
 attribution fail, and `filter_nonACGT_regions.py` — which DROPS such loci — is the remedy. That is the
 whole reason it exists; the `snp_bed` variable name is a leftover from where it was first used.
 
+**THE TWO WIDTHS, AND THEY ARE NOT THE WAY ROUND THEY LOOK** — measured from the real files
+2026-09-07, after assuming the opposite and being caught by a guard. `combine_peaks` is a plain `cat` of
+PINTS' two files plus a coordinate sort, so it adds **no class column**: the class is recoverable ONLY
+from the field count.
+
+| width | class | layout | example |
+| --- | --- | --- | --- |
+| **9** | **unidirectional** | chrom, start, end, name, **q-value**, **strand**, ?, summit, ? | `NC_053424.1 263 278 NC_053424.1-6 0.0141816 - 108 264 26` |
+| **6** | **bidirectional** | chrom, start, end, **confidence label**, summit, summit | `NC_053424.1 55691 55926 Relaxed 55922 55692` |
+
+The intuitive reading — "unidirectional is plain BED6" — is **wrong**. Unidirectional rows are the WIDE
+ones, because they carry a name, a q-value and a real strand; bidirectional rows are narrow and carry
+PINTS' `Relaxed` / `Stringent(qval)` label plus **two** summits, which is what a divergent pair needs.
+Two independent confirmations: the 9-field group is 96.4% of G. hirsutum and 94.1% of G. arboreum,
+matching the separately measured "94% and 96% unidirectional", and only the 9-field rows have `+`/`-`/`.`
+in column 5. `src/analysis/stratify_peaks.py` checks both before splitting and aborts rather than writing
+misleading subsets.
+
+**So per-peak CONFIDENCE is already on disk, in two different forms** — a continuous q-value for the
+96% that are unidirectional, and a two-level label for the rest. Nothing consumes it yet; `load_bed`
+reads columns 0-2 only, so training, benchmarking and attribution are all confidence-blind. That is what
+makes stratified evaluation possible without recomputing anything.
+
+
 **A PINTS peak file is RAGGED, and the filter script has to read it line by line because of that.**
 `combine_peaks` concatenates the unidirectional and bidirectional calls, which carry different numbers
 of columns, so `pd.read_csv(peaks, sep="\t", header=None)` dies with
@@ -853,13 +877,14 @@ version provides and there is no argument parsing to drift.
 means it will crash. `neg hyp` near 50% with `neg pos` near 0 is the fingerprint — the *hypothetical*
 array is signed, and it is the value **at the observed base** that is one-signed.
 
-**One unrelated anomaly this survey turned up, still open: `G.hirsutum-ovule_GROcap` is the corpus
-outlier in the opposite direction.** It is the only file where `neg hyp` is *below* 50% (39.8% counts,
-38.7% profile) while `neg pos` is **95.6% for BOTH heads** — i.e. the observed base is almost always the
-negative one, and the two attribute types agree to three significant figures where every other
-experiment's differ substantially. Its profile range (−484 to +461) is also the widest here. It is the
-tetraploid with 171,449 loci, so a subgenome effect is plausible, but nothing about it is established.
-Worth a look once its job finishes.
+**This survey also turned up `G.hirsutum-ovule_GROcap` as the corpus outlier in the OPPOSITE
+direction**, which proved to be a broken model rather than a modisco problem — see "G. hirsutum is the
+corpus's WORST model" in the cotton section. It is the only file where `neg hyp` is *below* 50% (39.8%
+counts, 38.7% profile) while `neg pos` is **95.6% for BOTH heads**, i.e. the observed base is almost
+always the negative one. Consequence for reading its report: nearly every seqlet lands in the
+**negative** metacluster, so its motifs are in `neg_patterns` while `pos_patterns` is close to empty —
+the reverse of every other experiment. Do not read that as "no motifs found", and do not read it as
+biology either, given the model behind it.
 
 ## Where benchmark output goes
 
@@ -889,6 +914,20 @@ concatenation, so each locus counts once regardless of how large its fold was. A
 correlations would weight a small fold equally with a large one, and for C. elegans, where one fold is
 one chromosome, the fold sizes differ enough to matter. Same construction in both scripts; keep them in
 step.
+
+**Every metric here is a CORRELATION, so none of them can see a GLOBAL OFFSET.** Pearson and
+Spearman are invariant under an affine transform of the prediction, so a model whose output is uniformly
+far too low — but correctly *ranked* across loci — still scores well. Not hypothetical:
+`G.hirsutum-ovule_GROcap` scores `log_counts_pearson` 0.49 while its counts head puts real peak sequence
+at **e^-16 ≈ 1e-7 times** the counts of its own reference. It surfaced through a `modisco motifs` crash
+survey, not through the benchmarks, and `compare_bpnet_cherimoya.py` cannot see it either. If absolute
+calibration ever matters, that needs a new metric — do not expect these four to catch it.
+
+**`counts_pearson` is near zero for everything and is NOT a model failing.** Over all ten folds of both
+cottons it runs **0.0037-0.0601**, while `log_counts_pearson` on the same folds is 0.46-0.60. Raw PRO-cap
+counts are heavy-tailed enough that Pearson on them is dominated by a handful of loci. It is BPNet-only,
+`compare_bpnet_cherimoya.py` already skips it, and it should not be quoted.
+
 
 Note upstream's `benchmark_bpnet.py` also reports `orientation_index_pearson`, which neither script
 here computes. Not an oversight to fix silently — adding it means defining the orientation index the
@@ -1816,6 +1855,264 @@ the C. griseus counts were gathered by hand. It now falls back to a per-CHROMOSO
 fold member anyway), and `--by-chrom` forces that view for an assigned species — e.g. to retune from a
 deeper library. Anything outside the allow-list still prints under "NOT in any fold", which is the
 chrom-naming-mismatch tell.
+
+### G. hirsutum is the corpus's WORST model, and five folds agree — so the ceiling is in the DATA
+
+Found 2026-09-07 while diagnosing a `modisco motifs` crash in the yeasts, which is the only reason
+anyone looked: **nothing in the benchmark pipeline flags this experiment.** Ranked on
+`genome_wide.profile_pearson` across all 42 benchmarked experiments it is last by a discontinuity:
+
+| | `profile_pearson` |
+| --- | --- |
+| **`G.hirsutum-ovule_GROcap`** | **0.0621** |
+| `C.reinhardtii-liquidculture_5GRO` | 0.1644 (**2.65x higher**) |
+| `D.melanogaster-S2_5GROcap` | 0.1825 |
+| `P.patens-plateculture_5GRO` | 0.1973 |
+| `C.griseus-BMDM-KLA1h_GROcap` (8th) | 0.2228 |
+
+**The worst-to-second gap (+0.102) is LARGER than the gap spanning second through eighth (+0.058)**, so
+it sits off the bottom of the distribution rather than merely last.
+
+**All five folds agree to within 0.017** (0.0491-0.0663, sd 0.0066), against the diploid's 0.2581-0.3053.
+That is the load-bearing observation and it rules out three explanations at once: **not** one diverged
+fold (which `attribute.py`'s fold-mean would then have inherited), **not** training instability, and
+**not** the `valid_count_corr` checkpoint-selection hazard — all three produce scatter across folds, not
+five-fold consensus. Retraining, reseeding or changing the schedule will not move it. **The ceiling is
+in the data or the labels.**
+
+**Its attributions are 100% sign-inverted, which is how this was found.** Every one of 171,449 loci has
+`sum(ohe * hypothetical) < 0` for BOTH heads, against **0.0%** of the diploid's 95,685:
+
+| | f(x) − f(ref) | implied counts ratio |
+| --- | --- | --- |
+| G. hirsutum | −16.14 counts, −16.18 profile | **e^−16.1 ≈ 1e-7** |
+| G. arboreum | +5.90, +4.33 | e^+5.9 ≈ 366x |
+
+**Do NOT read the −16 as biology; it is most likely a soft-reference artifact.** The default
+`--reference-mode frequency` reference is a **soft PFM, not a one-hot input** — which is exactly why it
+has to reach tangermeme as a callable, to get past its one-hot validator — so `f(ref)` is an
+extrapolation, and a model with no sequence skill has no reason to extrapolate sensibly. The diploid's
+`+5.9` is equally large, merely signed the other way. Cheap decisive test:
+`attribute.py -e G.hirsutum-ovule_GROcap --reference-mode dinucleotide`, whose shuffles are hard one-hot
+and in-distribution; the output path carries the mode, so it cannot overwrite the frequency run.
+
+**RESOLVED 2026-09-08: IT IS PER-PEAK COVERAGE, AND HOMOEOLOGY IS REFUTED.** Depth-matching (test (b),
+`src/analysis/matched_comparison.py`) accounts for **84% of the 4.45x gap** — raw 4.45x falls to
+**1.56x** once loci are matched on observed counts — and depth predicts per-locus correlation strongly
+*within* each experiment (Spearman **0.649** for AA, **0.581** for AD). The candidates below are kept
+because the reasoning is what the result had to overturn, and because the nesting trap they describe is
+what made the answer interpretable.
+
+**The mechanism is arithmetic, and the read budgets are what settle it.** The two libraries have
+*essentially identical* budgets — **141.0 M vs 140.1 M signal reads, 142.9 M vs 143.5 M unique** — so
+mappability loss cannot be the cause: had MAPQ 255 been discarding homoeologous reads, AD would have
+ended with FEWER. It did not. The whole depth difference is that one budget was divided across 1.79x
+more peaks:
+
+    peak-count ratio = genome size 1.449x  x  peaks/Mb 1.237x  =  1.793x
+    reads/peak ratio =                                            1.805x   <- the same number
+
+They agree *because* the budgets are equal. So the chain is **ploidy -> ~1.8x more initiation sites ->
+same sequencing depth -> half the reads per peak -> low per-locus profile correlation.** A tetraploid
+needs roughly twice its diploid progenitor's depth to reach equal per-peak coverage, and it was
+sequenced to the same depth. That is an experimental-design gap, not a pipeline defect and not a
+subgenome artifact.
+**THE EQUAL-BUDGET ARGUMENT REFUTES ONE HOMOEOLOGY MECHANISM, NOT BOTH — do not overstate it, as an
+earlier version of this note did by concluding "test (c) is dropped".** Homoeology has two distinct
+routes to a lower score and they need separating:
+
+- **Read depletion** — MAPQ 255 discarding homoeologous reads. **Refuted**, by the equal budgets above:
+  nothing was lost, so nothing was depleted.
+- **Sequence ambiguity** — two near-identical inputs (~85 differences per 2114 bp window) carrying
+  genuinely different profiles, which imposes irreducible error **regardless of depth**. **Untouched by
+  any matching done here**, because matching on depth or confidence cannot remove it.
+
+A residual that survives both covariates uniformly is exactly what the second predicts.
+
+**THE CORPUS-WIDE CONSEQUENCE IS THE BIGGER FINDING: `profile_pearson` IS LARGELY A DEPTH STATISTIC.**
+Within G. arboreum alone, per-locus correlation runs **0.0040 in the shallowest count decile to 0.6617
+in the deepest — a 165x range**. The largest *between-experiment* difference in the entire 42-experiment
+corpus is 4.5x. So every cross-experiment model comparison in this repo is confounded by per-peak
+coverage, and **both cotton models are far better than their headline numbers**: AA reaches 0.66 and AD
+0.41 on their top decile, against published 0.28 and 0.06. Quote a locus set, or match, or say neither
+and expect the number to mean little. This is measured for the cottons only; the other 40 experiments
+are unchecked.
+
+**The three candidates as they stood, CAUSALLY NESTED rather than rival**, with the trap that an
+"explanation" at one level may be a symptom of the next:
+
+1. **Peak-set quality.** 171,640 peaks, the corpus's largest, **96% unidirectional**, and the weakest
+   initiator logo here at 0.11 bits — this file already says to treat that set as low-confidence-heavy.
+   A model cannot fit a profile at loci that are not really initiation sites.
+2. **Thin per-peak coverage: 816 reads/peak against the diploid's 1,473, 1.8x thinner** (140.1 M signal
+   over 171,640 peaks vs 141.0 M over 95,714). Both clear `THIN_COVERAGE_READS_PER_PEAK = 500`, so
+   neither is flagged. Noisier observed profiles cap the achievable correlation directly, and this is
+   downstream of (1): calling 1.8x more peaks from the same depth is what makes them thin.
+3. **Homoeology / mappability.** A05 and D05 are 96%+ identical (~85 differences per 2114 bp window) and
+   the paired-homoeolog fold constraint deliberately puts both in the SAME fold, so the model sees
+   near-duplicate sequences carrying different measured signal, because MAPQ 255 discards reads that
+   cannot be assigned to one subgenome.
+   **But note mappability is a DETERMINISTIC function of the reference**, not sampling noise — so it is
+   reproducible, learnable in principle, and its main effect is to *deplete* unique reads. That is to
+   say it most likely acts THROUGH (2) rather than as irreducible label noise, which is why a
+   depth-matched test could "explain away" homoeology while homoeology is still the root cause.
+
+**How to test, in order:**
+
+- **Split per-locus metrics by PINTS class and confidence.** Free: `combine_peaks` keeps upstream's
+  strand/confidence/class/summit columns precisely so this is possible, and
+  `benchmark_predictions.py --output-fname` saves the per-locus predictions. If the bad loci are the
+  low-confidence unidirectional calls, it is (1).
+- **Depth-match across the two cottons.** Bin loci by observed window counts and compare
+  G. hirsutum against G. arboreum within bins. If the gap closes, depth is sufficient; if it survives
+  depth matching, something else is live. Same logic as GC-matching negatives.
+- **2D stratify depth x mappability**, which is the only way to separate (2) from (3). A mappability
+  score needs no new tooling: subsample ~20 30-mers per peak window, align them with **STAR against the
+  index that already exists**, and take the uniquely-mapped fraction per locus. Then ask whether the
+  gradient follows uniqueness with depth held fixed.
+
+**TEST (a) IS DONE, 2026-09-08, AND ITS ANSWER IS A DISSOCIATION: peak confidence explains a lot of
+WITHIN-experiment variance and NONE of the between-species gap.** Run by splitting the peak file on
+PINTS confidence (`src/analysis/stratify_peaks.py`) and scoring each stratum with
+`benchmark_predictions.py --loci`, so the numbers come from the same code that wrote the canonical JSON.
+`profile_pearson`, q1 = most confident quartile of unidirectional calls:
+
+| stratum | AD hirsutum | AA arboreum | AA/AD |
+| --- | --- | --- | --- |
+| uniq1 | 0.1601 | **0.5883** | 3.67x |
+| uniq2 | 0.0661 | 0.4314 | 6.53x |
+| uniq3 | 0.0475 | 0.1697 | 3.57x |
+| uniq4 | 0.0437 | 0.1198 | 2.74x |
+| bi | 0.1064 | 0.2492 | 2.34x |
+| all | 0.0621 | 0.2764 | 4.45x |
+
+**The gradient is real and monotone in BOTH species** — 3.66x from q1 to q4 in the tetraploid, 4.91x in
+the diploid — so peak-set quality is a genuine effect and **generic, not tetraploid-specific**. `jsd`
+agrees independently throughout (0.5814 vs 0.3487 at q1).
+**But the gap does not close at matched confidence: 3.67x at q1 against 4.45x unstratified.** The
+sharpest statement is that **the tetraploid's most confident quartile (0.1601) scores BELOW the
+diploid's third quartile (0.1697)**, barely clearing its worst (0.1198). So (1) is ruled out as the
+explanation for the AD-vs-AA gap while being confirmed as a large within-experiment effect. Next is (2),
+depth-matching, which confidence stratification cannot control for: the q-value ranks peaks *within* an
+experiment, and AD still runs 816 reads/peak against AA's 1,473.
+
+**Two corpus-wide consequences, neither cotton-specific:**
+
+- **`profile_pearson` is a peak-set-composition number as much as a model number.** The diploid's own
+  headline 0.2764 understates its model, which reaches **0.5883** on its confident quarter. If a 3.7-4.9x
+  within-experiment gradient holds for both cottons it very likely holds everywhere, so **any quoted
+  figure should say which locus set it is on.** This is not yet measured for the other 40 experiments.
+- **Only the PROFILE columns are safe to compare across strata.** `profile_pearson` and `profile_jsd`
+  are per-locus medians (`pearson_corr` runs over each locus's flattened profile), so subsetting merely
+  chooses which loci to median over. `log_counts_pearson` and `counts_spearman` are correlations ACROSS
+  loci, so subsetting restricts the count range and depresses them mechanically — which is why `bi`
+  reads 0.3627 against 0.4885 while being the *better* stratum on profile. That is range restriction,
+  not evidence.
+
+**`benchmark_predictions.py --per-locus-tsv` exists for the next tests** — coordinates, fold, per-locus
+profile Pearson and JSD, observed counts and predicted log counts, one row per evaluated locus. It makes
+depth-matching and the depth x mappability join analyses rather than further reruns. `--output-fname`
+cannot serve: it dumps `{preds, signals}` with **no coordinates**, and `load_bed` reads columns 0-2, so
+its rows cannot be joined to anything.
+**Rows are aligned with `extract_loci(return_mask=True)`, which is REQUIRED rather than tidy** — that
+call drops loci falling off a contig end or inside an exclusion zone, so a positional join would
+silently misalign.
+
+**THE MASK INDEXES THE INTERLEAVED LOCI, NOT THE LOCI AS PASSED.** `extract_loci` runs
+`_interleave_loci(loci, chroms)` *before* its loop, so the chromosome filter is already applied by the
+time the first `kept_mask` entry is appended — the docstring's "complete set of interleaved peaks" means
+**interleaved**, which is easy to read as "provided". Indexing the passed frame is therefore wrong by
+exactly the size of the fold's chromosome subset, and on the real tree that was **a mask of 36,732
+against 171,640 loci**. The frame is rebuilt with tangermeme's own `_interleave_loci` rather than by
+reproducing its filter, so the two cannot drift; for a single DataFrame it takes columns 0-2, applies
+`numpy.isin(chrom, chroms)` and reindexes by `arange`, i.e. **filters while preserving order**. It is
+private, so a rename upstream gives an immediate `ImportError` rather than a silent misalignment.
+**A fixture without `chroms` CANNOT catch this** — that is how it got through: with `chroms=None` the
+mask length equals the provided length and naive indexing coincidentally works. Any test of this must
+pass a real chromosome subset; verified on a two-contig fixture for `None`, `["chr1"]` and `["chr2"]`.
+
+**The mask is appended LAST**, so it must be popped before the existing `len(data) == 3` control-track
+test: without popping, a signals-only call plus a mask looks exactly like a call with controls, and the
+mask would be used AS a control track. Verified across all four combinations of controls x mask. Both
+the mask length and the per-fold row counts are asserted, and a mismatch raises rather than writing a
+misaligned table — which is what caught the interleave bug on the first real run.
+
+
+**JOINT depth x confidence matching adds almost nothing over depth alone — run 2026-09-09.** The
+per-locus tables were annotated with the peak file's own q-value (`annotate_per_locus.py`, joining on
+coordinate; 99.86-99.89% joined) and standardised over the 6x6 cell cross product:
+
+| matched on | raw | matched | explained |
+| --- | --- | --- | --- |
+| depth | 4.45x | 1.56x | 84% |
+| depth x confidence | 4.64x | **1.52x** | 86% |
+
+Confidence removes only **7% of the depth-matched residual**. The raw ratios differ because the joint
+run is restricted to unidirectional loci — `uni_qval` is undefined for the bidirectional class.
+**So a ~1.5x residual survives everything measurable, and it is uniform rather than localised**:
+per-cell ratio median 1.51x, IQR 1.31-1.71, 91% of 35 usable cells favouring the diploid, covering 100%
+of loci. It is not an artefact of thin cells.
+
+**Secondary observation, consistent with something tetraploid-specific being real:** `rho(uni_qval)` is
+**-0.345** for the diploid against only **-0.180** for the tetraploid, so PINTS confidence is about half
+as informative in AD. Plausibly its background estimation is affected by the duplicated genome; not
+established.
+
+**DECISION 2026-09-11: `G.hirsutum-ovule_GROcap` IS EXCLUDED FROM FINAL REPORTING ONLY. EVERY ANALYSIS
+STILL RUNS.** The boundary is narrow and deliberate — it sits at the write-up, not anywhere in the
+pipeline:
+
+- **Nothing is excluded from the PIPELINE.** It preprocesses, trains, benchmarks, attributes and goes
+  through modisco exactly as before, and those outputs are kept. That follows "Nothing is excluded:
+  every dataset is analysed and modelled" — `tier` gates preprocessing only and `launch.py` deliberately
+  does not filter on `qc_flags`. Nothing about the DATA is known to be wrong: the library maps fine and
+  its peak calls are sound.
+- **Nothing in the CODE implements this.** No `tier` change, no launcher filter, no skip in
+  `compare_bpnet_cherimoya.py`. The exclusion is applied by a person deciding what goes in a figure or
+  a table, which is the only place it belongs. Do not add a switch for it.
+- **The outputs stay worth GENERATING and worth LOOKING AT — they are diagnostic.** This experiment is
+  what exposed the one-signed-attribution crash, and its contrast with the diploid is what established
+  that `profile_pearson` is largely a depth statistic. Both of those are results, produced by an
+  uninterpretable model. Keep running it for exactly that reason.
+- **What is excluded is REPORTING it as evidence about biology**: its motifs, its attributions, and its
+  metrics. `profile_pearson` 0.0621 is the corpus's lowest, its attributions are 100% sign-inverted, and
+  the modisco report puts nearly everything in `neg_patterns`.
+- **The AA-vs-AD MODEL comparison: compute it, do not report it.** The tetraploid's model cannot carry a
+  biological claim. The diploid's is fine (0.2764 overall, 0.5883 on its confident quartile) and can be
+  reported on its own.
+- **Peak-level AA-vs-AD results are UNAFFECTED and remain reportable** — the peaks/Mb comparison, the
+  mapping rates and the adapter work depend on no model and stand as written.
+- **The remedy, if it is ever wanted as a reportable model, is DEPTH, not reprocessing**: ~2x the reads,
+  or a stricter peak set. Nothing in the pipeline needs changing.
+
+Test (c) — a per-locus sequence-uniqueness score to test the surviving ambiguity mechanism — is
+therefore **parked, not refuted**. It is worth doing only if tetraploid modelling becomes a question in
+its own right; it would be establishing whether tetraploids are intrinsically harder, not diagnosing
+this experiment.
+
+**The matching tooling, and what it is validated against.** `matched_comparison.py` reports three things
+in reading order: `Spearman(covariate, profile_pearson)` *within* each experiment (a rho near 0 means
+that covariate cannot explain a between-experiment gap, and the rest is moot); a cell-wise table on bin
+edges from the POOLED distribution so both are on one scale; and a **directly standardised** score per
+experiment, the weighted mean of its per-cell medians under common weights, whose ratio against the raw
+ratio is the answer. Cells with fewer than 50 loci in *either* experiment are dropped and counted, and
+if none qualifies it **exits nonzero** rather than reporting a number built from nothing — non-overlapping
+populations cannot be rescued by matching, and that case is reported as itself.
+Validated on four fixtures with known ground truth: an identical `prof_r = f(counts)` sampled at two
+depths standardises 0.52x -> 0.98x (reported as depth accounting for 96%); identical depths with
+different levels leave 4.00x -> 4.00x (0%); and a two-covariate fixture where `prof_r =
+g(depth)*h(qval)` is identical in both gives **71% for depth alone, 40% for confidence alone, and 96%
+jointly**, which is the property that matters — joint matching must close more than either margin.
+**Only `profile_pearson` is a valid response here.** It is a per-locus median, so reweighting merely
+chooses which loci to summarise. The JSON's `log_counts_pearson` and `counts_spearman` are correlations
+ACROSS loci and are range-restricted by any subsetting or matching, so they serve only as the covariate.
+
+**What this does NOT overturn:** the peaks/Mb result under "Do NOT adopt the paper's looser STAR
+settings" is a peak-COUNT comparison and depends on no model. It does add a caveat to reading the
+AA-vs-AD pair as a MODELLING comparison — **the tetraploid's model is the worst in the corpus and the
+diploid's is mid-pack** — so any cross-species claim resting on those two models is confounded by model
+quality before biology enters.
+
 
 ## Assemblies and exclusion lists
 
@@ -3367,6 +3664,15 @@ it in advance, and a trained model is *better* evidence about a library than a p
 So `tier` gates preprocessing only, `launch.py` deliberately does not filter on it or on `qc_flags`, and
 proposals to add an `exclude` tier have been declined. The flags exist to tell you which numbers to
 distrust when reading results, not to decide what runs.
+
+**"Distrust when reading results" has been exercised once, and the distinction is the point.**
+`G.hirsutum-ovule_GROcap` was excluded from FINAL REPORTING on 2026-09-11 — see "G. hirsutum is the
+corpus's WORST model" in the cotton section. **Every analysis still runs**, and its outputs are kept and
+still read as diagnostics; what is excluded is reporting its motifs, attributions or metrics as evidence
+about biology. That is this rule working as designed rather than an exception to it: the data is not
+known to be wrong, the fitted model cannot carry a claim, and those are different judgements. **The
+exclusion lives in the write-up, not in the code — do not convert it into a `tier` entry, a launcher
+filter or a skip in the analysis scripts.**
 
 ### Depth requirements scale with the nascent transcriptome, NOT with a constant
 

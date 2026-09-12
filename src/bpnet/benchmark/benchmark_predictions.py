@@ -56,6 +56,30 @@ def main():
              "only PRINTED its metrics until 2026-09-04",
     )
     parser.add_argument(
+        "--loci", type=str, default=None,
+        help="BED of loci to evaluate on (default: the experiment's PINTS "
+             "peaks). For STRATIFIED evaluation -- e.g. unidirectional vs "
+             "bidirectional calls -- so a subset's score is computed by this "
+             "script rather than by a second copy of the metric definition. "
+             "A custom set gets its own metrics filename, carrying the file's "
+             "stem, so it cannot overwrite the canonical JSON the launcher's "
+             "already-done check reads. NOT usable for the peak-level species "
+             "(S. pombe, S. moellendorffii): fold_loci() joins their fold CSV "
+             "positionally against the full peak file, so a subset raises "
+             "rather than silently misaligning",
+    )
+    parser.add_argument(
+        "--per-locus-tsv", type=str, default=None,
+        help="write one row per evaluated locus: coordinates, fold, per-locus "
+             "profile Pearson and JSD, observed counts and predicted log "
+             "counts. Unlike --output-fname (which dumps arrays with no "
+             "coordinates, so its rows cannot be joined to anything) this is "
+             "keyed by position, which is what makes stratified and "
+             "depth-matched analysis a join rather than another full rerun. "
+             "Rows are aligned via extract_loci(return_mask=True), since that "
+             "call drops loci that fall off a contig end or outside --chroms",
+    )
+    parser.add_argument(
         "--output-fname", type=str, default=None,
         help="optional joblib dump of the raw predictions and signals. "
              "Separate from --metrics-dir: this is the predictions, that is "
@@ -85,7 +109,7 @@ def main():
 
     params = load_params("bpnet", {})
     params.update({
-        "loci": str(exp.peaks),
+        "loci": str(REPO_ROOT / args.loci) if args.loci else str(exp.peaks),
         "sequences": str(exp.sequences),
         "signals": [str(x) for x in exp.signals],
         "controls": [str(x) for x in exp.controls] if exp.controls else None,
@@ -112,7 +136,11 @@ def main():
         pearson_corr,
         spearman_corr,
     )
-    from tangermeme.io import extract_loci
+    # _interleave_loci is private, but it is exactly the function whose output
+    # extract_loci's return_mask indexes, so reproducing its filtering here
+    # instead would be a second copy that could drift. A rename upstream gives
+    # an immediate ImportError rather than a silent misalignment.
+    from tangermeme.io import _interleave_loci, extract_loci
     from tangermeme_compat import patch_numeric_chroms
 
     # Numeric chromosome names (A.thaliana 1-5, C.reinhardtii 1-17,
@@ -129,6 +157,8 @@ def main():
 
     signals = []
     preds = []
+    want_per_locus = args.per_locus_tsv is not None
+    locus_frames = []
     for f in folds:
         fold, model_path, test_chroms = f["fold"], f["model"], f["test_chroms"]
         # Peak-level species (S. pombe, S. moellendorffii) have test_chroms
@@ -153,7 +183,36 @@ def main():
             # progress without also turning on every other message.
             verbose=args.progress or params["verbose"],
             ignore=IGNORE,
+            return_mask=want_per_locus,
         )
+        # The mask is appended LAST, so it has to come off before the
+        # control-track test below -- otherwise a 2-output call with a mask
+        # looks exactly like a 3-output call with controls, and the mask would
+        # be used as a control track.
+        if want_per_locus:
+            kept_mask = data[-1].numpy().astype(bool)
+            data = data[:-1]
+            # The mask indexes the INTERLEAVED loci, not the loci as passed:
+            # extract_loci runs `_interleave_loci(loci, chroms)` before its
+            # loop, so the chromosome filter has already been applied by the
+            # time the first kept_mask entry is appended. Indexing test_loci
+            # directly is wrong by exactly the size of the fold's chromosome
+            # subset -- a mask of 36,732 against 171,640 loci. Rebuild the
+            # frame with tangermeme's own function rather than reproducing its
+            # filter here, so the two cannot drift; for a single DataFrame it
+            # selects columns 0-2, applies numpy.isin(chrom, chroms) and
+            # reindexes by arange, i.e. filters while preserving order.
+            interleaved = _interleave_loci(test_loci, test_chroms)
+            if len(kept_mask) != len(interleaved):
+                raise RuntimeError(
+                    f"fold {fold}: extract_loci returned a mask of "
+                    f"{len(kept_mask)} for {len(interleaved)} interleaved loci "
+                    f"({len(test_loci)} before the chromosome filter), so rows "
+                    f"cannot be aligned to coordinates. Refusing to write a "
+                    f"per-locus table rather than emit a misaligned one."
+                )
+            kept = interleaved.iloc[np.flatnonzero(kept_mask)]
+            locus_frames.append((fold, kept.reset_index(drop=True)))
         if len(data) == 3:
             X, y, X_ctl = data
             X_ctl = (torch.abs(X_ctl),)
@@ -265,11 +324,55 @@ def main():
             "counts_spearman": counts_spearman_all,
         },
     }
-    out_path = metrics_path("bpnet", exp.id, args.metrics_dir)
+    # A custom locus set gets its own filename for the same reason
+    # attribute.py's does: different loci, different numbers, and nothing else
+    # on disk would record which set produced the file. It also keeps a
+    # stratified run from overwriting the canonical JSON that
+    # benchmark/launch.py's already-done check reads.
+    if args.loci:
+        stem = Path(params["loci"]).name.split(".")[0]
+        default = metrics_path("bpnet", exp.id, args.metrics_dir)
+        out_path = default.with_name(f"{exp.id}_{stem}.json")
+    else:
+        out_path = metrics_path("bpnet", exp.id, args.metrics_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(metrics, f, indent=4)
     print(f"\nMetrics saved to {out_path}")
+
+    if want_per_locus:
+        # Per-locus rows, keyed by coordinate. profile_pearson and profile_jsd
+        # are ALREADY per locus (pearson_corr runs over each locus's flattened
+        # profile, and the reported figure is a median over them), so these are
+        # the same numbers the JSON summarises rather than a re-derivation.
+        # The counts columns are per locus too, but note the JSON's
+        # log_counts_pearson is a correlation ACROSS loci -- so it is subject
+        # to range restriction when you subset, while the profile columns are
+        # not. Stratify on the profile columns; use the counts columns as the
+        # covariate to match on.
+        rows = []
+        for i, (fold, coords) in enumerate(locus_frames):
+            n = len(coords)
+            if not (len(profile_corr[i]) == len(profile_jsd[i]) == n):
+                raise RuntimeError(
+                    f"fold {fold}: {n} coordinates against "
+                    f"{len(profile_corr[i])} profile correlations. Refusing to "
+                    f"write a misaligned per-locus table."
+                )
+            obs = signals[i].sum(dim=(-1, -2)).numpy()
+            pred_log = preds[i][1].squeeze().numpy()
+            frame = coords.copy()
+            frame["fold"] = fold
+            frame["profile_pearson"] = profile_corr[i]
+            frame["profile_jsd"] = profile_jsd[i]
+            frame["obs_counts"] = obs
+            frame["pred_log_counts"] = pred_log
+            rows.append(frame)
+        table = pd.concat(rows, ignore_index=True)
+        tsv_path = REPO_ROOT / args.per_locus_tsv
+        tsv_path.parent.mkdir(parents=True, exist_ok=True)
+        table.to_csv(tsv_path, sep="\t", index=False, float_format="%.6g")
+        print(f"Per-locus table saved to {tsv_path} ({len(table):,} loci)")
 
     if params["output_fname"] is not None:
         import joblib
