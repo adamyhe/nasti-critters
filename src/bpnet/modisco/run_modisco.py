@@ -25,6 +25,7 @@ Usage -- identical to `modisco` itself:
 import runpy
 import shutil
 import sys
+import sysconfig
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -32,11 +33,32 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from modiscolite_compat import patch_one_signed_attributions  # noqa: E402
 
 
+def find_modisco() -> str | None:
+    """The `modisco` script, preferring the one beside THIS interpreter.
+
+    `shutil.which` alone is not enough: run as `.venv/bin/python
+    run_modisco.py` -- without the venv activated, which is how a one-off
+    invocation usually looks -- PATH does not contain the venv's bin and the
+    script reports modisco missing while it sits next to the interpreter
+    actually running. The launcher activates the environment, so its emitted
+    command was always fine; this is for everything else.
+    """
+    # sysconfig rather than `Path(sys.executable).parent`, because resolving
+    # the interpreter follows the venv's symlink out to the base Python, whose
+    # bin directory holds no modisco. This reports the ENVIRONMENT's script
+    # directory, which is the one that matches the modiscolite just imported.
+    sibling = Path(sysconfig.get_path("scripts")) / "modisco"
+    if sibling.is_file():
+        return str(sibling)
+    return shutil.which("modisco")
+
+
 def main() -> int:
-    script = shutil.which("modisco")
+    script = find_modisco()
     if script is None:
-        print("modisco not found on PATH. It is a uv dependency -- activate the "
-              "venv (`source .venv/bin/activate`) or run via `uv run`.\n"
+        print("modisco not found beside this interpreter or on PATH. It is a "
+              "uv dependency -- activate the venv (`source .venv/bin/activate`) "
+              "or run via `uv run`.\n"
               "Note the package is `modisco`, NOT `modisco-lite`; see CLAUDE.md.",
               file=sys.stderr)
         return 1

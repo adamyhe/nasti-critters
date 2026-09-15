@@ -995,6 +995,17 @@ def run_modisco(family: str) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     setup = _setup_block(args)
 
+    # Resolved once, and checked: only bpnet has a front end today, so a second
+    # family would otherwise emit jobs pointing at a path that does not exist
+    # and fail one queue wait later.
+    runner = REPO_ROOT / f"src/{family}/modisco/run_modisco.py"
+    if not runner.exists():
+        parser.error(
+            f"no modisco front end at {runner}. `modisco motifs` must run "
+            f"through it -- see src/modiscolite_compat.py for why -- so add "
+            f"one for {family} before enumerating its jobs."
+        )
+
     submitted = skipped_done = skipped_missing = 0
     total = 0
     for exp_id in experiments:
@@ -1024,7 +1035,6 @@ def run_modisco(family: str) -> None:
             # S.pombe_PROcap. That front end patches the library and then hands
             # argv to the real CLI unchanged. `report` is unaffected and still
             # calls modisco directly. See src/modiscolite_compat.py.
-            runner = REPO_ROOT / f"src/{family}/modisco/run_modisco.py"
             cmd = (
                 f"python {shlex.quote(str(runner))} motifs "
                 f"-s {shlex.quote(str(ohe))} "
