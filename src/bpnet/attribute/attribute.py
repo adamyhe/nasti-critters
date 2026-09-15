@@ -28,6 +28,7 @@ from experiments import (  # noqa: E402
     IGNORE,
     load_model,
     load_params,
+    loci_stem,
 )
 
 
@@ -213,7 +214,7 @@ def main():
         # A custom locus set gets its own name for the same reason the reference
         # mode does: different loci, different numbers, and nothing else on disk
         # would record which set produced the file.
-        stem = loci_path.name.split(".")[0]
+        stem = loci_stem(loci_path)
         params["output_fname"] = str(
             ATTR_DIR / FAMILY / f"{exp.id}_{stem}_attr_{args.attribute_type}"
                                 f"_{args.reference_mode}.npz")

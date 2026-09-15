@@ -176,10 +176,11 @@ def main() -> int:
 
     outdir = args.outdir or (REPO_ROOT / "qc" / "stratified" / exp.id)
     outdir.mkdir(parents=True, exist_ok=True)
-    # Names are chosen so Path(...).name.split(".")[0] -- the stem
-    # benchmark_predictions.py --loci puts in the metrics filename -- is the
-    # informative part. "{exp}.uni.bed" would give a stem of just the first
-    # dotted component of the experiment id.
+    # Names are short and dot-free because they become the label
+    # experiments.loci_stem() puts in the metrics filename. That function only
+    # strips the format and compression suffixes, so "{exp}.uni.bed" would also
+    # be unambiguous -- but "uni" keeps the filename readable, and these names
+    # are what the JSONs already on disk were written with.
     print()
     for name, rows in groups_out.items():
         if not rows:

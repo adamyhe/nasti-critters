@@ -30,7 +30,7 @@ which loci to summarise, while `log_counts_pearson` in the JSON is a correlation
 ACROSS loci and would be range-restricted by any of this.
 
 Usage:
-    python src/analysis/depth_matched.py \\
+    python src/analysis/matched_comparison.py \\
         qc/stratified/G.arboreum-ovule_GROcap/per_locus.tsv \\
         qc/stratified/G.hirsutum-ovule_GROcap/per_locus.tsv
 """

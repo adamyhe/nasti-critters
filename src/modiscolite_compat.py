@@ -52,7 +52,10 @@ Three notes on the fix:
     the installed version with an empty `values` array and does nothing if the
     probe passes, so the shim disappears when modisco-lite is fixed rather than
     shadowing a corrected implementation. It also refuses to install a patch
-    that fails its own probe.
+    that fails its own probes -- BOTH of them, because the empty-input probe
+    short-circuits in the early return and so cannot see a signature change in
+    the function being wrapped. `_probe_delegates` covers that by calling
+    through on non-empty input and comparing against the unpatched result.
 
 Reached only through `src/bpnet/modisco/run_modisco.py`, because `modisco` is
 invoked as a CLI: nothing in this repo imports modiscolite, so there is no
@@ -88,6 +91,26 @@ def _probe_ok(fn) -> bool:
     return np.isscalar(out) or np.ndim(out) == 0
 
 
+def _probe_delegates(fn, original) -> bool:
+    """Does `fn` still reach `original` unchanged for a NON-empty call?
+
+    The empty probe cannot answer this: it returns inside the early return and
+    never touches the wrapped function, so on its own it would pass a shim that
+    raises TypeError on every real call. Signature drift upstream is exactly
+    what the refusal below claims to catch, so it has to be probed for
+    separately -- with input on the side that is NOT short-circuited, and
+    checking the value matches rather than merely that nothing raised.
+    """
+    rng = np.random.default_rng(0)
+    values, null_values = np.abs(rng.normal(size=200)), rng.normal(size=2000)
+    try:
+        got = fn(values, null_values, increasing=True, target_fdr=0.2)
+        want = original(values, null_values, increasing=True, target_fdr=0.2)
+    except Exception:
+        return False
+    return bool(np.isclose(got, want))
+
+
 def patch_one_signed_attributions(verbose: bool = False) -> bool:
     """Patch modiscolite so a one-signed attribution track does not crash.
 
@@ -107,7 +130,8 @@ def patch_one_signed_attributions(verbose: bool = False) -> bool:
         return False
 
     _ORIGINAL = extract_seqlets._isotonic_thresholds
-    if not _probe_ok(_fixed_isotonic_thresholds):
+    if not (_probe_ok(_fixed_isotonic_thresholds)
+            and _probe_delegates(_fixed_isotonic_thresholds, _ORIGINAL)):
         _ORIGINAL = None
         raise RuntimeError(
             "the one-signed-attribution patch failed its own probe, so it is "

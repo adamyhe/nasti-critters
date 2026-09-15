@@ -552,6 +552,13 @@ the same reason the reference mode is in there: different loci give different nu
 on disk would record which set produced the file. The launcher mirrors that naming, so its already-done
 check follows.
 
+**`{stem}` comes from `experiments.loci_stem()`, and it strips SUFFIXES rather than cutting at the first
+dot.** Both `attribute.py` and `benchmark_predictions.py --loci` did the latter, which defeats the point
+of the stem here specifically: every experiment id in this corpus contains dots, so
+`G.hirsutum-ovule_GROcap_uni.bed` and `G.arboreum-ovule_GROcap_bi.bed` both reduced to `G` and the second
+run overwrote the first. `qc/stratified/`'s short names (`uni.bed`, `uniq1.bed`) were unaffected, which is
+why the stratified JSONs on disk keep their names.
+
 ## Launchers: eight of them, one emission path
 
 `src/launcher.py` holds the selection rule and the emission machinery; the eight

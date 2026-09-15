@@ -174,6 +174,27 @@ def metrics_path(family: str, experiment: str,
     return base / f"{experiment}.json"
 
 
+def loci_stem(path: str | Path) -> str:
+    """Label for a custom locus set, for the output filename it goes into.
+
+    `--loci` changes where both `attribute.py` and `benchmark_predictions.py`
+    write, so a run on a subset cannot overwrite the canonical output. That
+    only holds if two different locus files cannot reduce to the same label,
+    and cutting at the first dot does not give it: EVERY experiment id in this
+    repo contains dots, so `G.hirsutum-ovule_GROcap_uni.bed` and
+    `G.arboreum-ovule_GROcap_bi.bed` both become `G` -- the collision the name
+    exists to prevent. Only the compression and format suffixes come off.
+
+    Defined here for the same reason `attribution_path()` and `metrics_path()`
+    are: two copies of a naming rule is how two scripts start disagreeing about
+    where a file went.
+    """
+    name = Path(path).name
+    if name.endswith((".gz", ".bz2", ".zst", ".xz")):
+        name = name.rsplit(".", 1)[0]
+    return Path(name).stem or name
+
+
 def motif_db_path(species: str) -> Path:
     """MEME database for `modisco report`, chosen by the species' taxon.
 
