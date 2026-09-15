@@ -189,9 +189,11 @@ def motif_db_path(species: str) -> Path:
         plants       A. thaliana, C. reinhardtii, P. patens, S. moellendorffii,
                      G. arboreum, G. hirsutum
 
-    The files are NOT fetched by anything -- download them from JASPAR into
-    `data/motifs/` yourself. They are a reporting convenience with no effect on
-    the motifs modisco discovers, which is why this is not a pipeline step.
+    Fetch them with `src/bpnet/modisco/fetch_motif_dbs.py`, which derives WHICH
+    files are needed from this function -- so the filename convention has one
+    definition, here. That script is standalone and NOT a Snakemake rule: the
+    database is a reporting convenience with no effect on the motifs modisco
+    discovers, so it must not become a network dependency of the pipeline.
     """
     genomes = _load(CONFIG / "genomes.yaml")["species"]
     if species not in genomes:
