@@ -23,6 +23,7 @@ from experiments import (  # noqa: E402
     IGNORE,
     load_model,
     load_params,
+    loci_stem,
     metrics_path,
 )
 
@@ -330,7 +331,7 @@ def main():
     # stratified run from overwriting the canonical JSON that
     # benchmark/launch.py's already-done check reads.
     if args.loci:
-        stem = Path(params["loci"]).name.split(".")[0]
+        stem = loci_stem(params["loci"])
         default = metrics_path("bpnet", exp.id, args.metrics_dir)
         out_path = default.with_name(f"{exp.id}_{stem}.json")
     else:
