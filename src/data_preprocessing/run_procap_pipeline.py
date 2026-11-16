@@ -66,6 +66,14 @@ AWK_DEINTERLEAVE = (
     '{ name = $1; sub(/^@[^ \\t]+[ \\t]+/, "", name); sub(/\\/[12]$/, "", name); rec = "@" name "\\n" $2 "\\n+\\n" $4; if (NR % 2 == 1) print rec | ("gzip > " o1); else print rec | ("gzip > " o2) }'
 )
 
+#: Move a UMI the submitter left in the READ NAME (umi_loc `read name`) into the
+#: first token, which is all STAR keeps: `@SRR.1 inst:...:AAA_CCC/1` ->
+#: `@SRR.1:AAACCC`. Exits nonzero on a UMI that is not exactly `len` long. Keep
+#: identical to AWK_HEADER_UMI in workflow/Snakefile.
+AWK_HEADER_UMI = (
+    r"""NR % 4 == 1 { u = $2; sub(/^.*:/, "", u); sub(/\/[12]$/, "", u); gsub(/_/, "", u); if (length(u) != len) { print "read " (NR + 3) / 4 ": header UMI " u " is not " len " nt: " $0 > "/dev/stderr"; exit 1 } print $1 ":" u; next } { print }"""
+)
+
 
 def load(path: Path) -> dict:
     with path.open() as f:
@@ -208,7 +216,11 @@ def star_index(species: str, genome: dict, threads: int, dry_run: bool,
         print(f"  NOTE: no rDNA decoy configured for {species}; ENCODE aligns to "
               "genome + rDNA. See rdna_note in config/genomes.yaml.")
 
-    index_dir.mkdir(parents=True, exist_ok=True)
+    # Not under --dry-run: an empty index directory is exactly what Snakemake's
+    # star_index output looks like half-built, and with a stale marker in
+    # .snakemake/incomplete it fails every later DAG with IncompleteFilesException.
+    if not dry_run:
+        index_dir.mkdir(parents=True, exist_ok=True)
     run(
         ["STAR", "--runThreadN", threads, "--runMode", "genomeGenerate",
          "--genomeDir", index_dir, "--genomeFastaFiles", *fastas,
@@ -278,6 +290,10 @@ def umi_arg(pipeline: dict, umi: dict, paired: bool, run_id: str) -> list:
             "config/procap_pipeline.yaml."
         )
     fastp_loc = locations[loc]
+    if fastp_loc == "read_name":
+        # Already out of the sequence; process_run moves it into the name STAR
+        # keeps. Asking fastp to extract would cut real bases.
+        return []
     if fastp_loc == "read2" and not paired:
         raise SystemExit(
             f"run {run_id}: umi_loc {loc!r} maps to fastp read2, but the run is "
@@ -308,6 +324,13 @@ def process_run(run_id: str, layout: str, index_dir: Path, work: Path,
 
     # -- inputs: prefer FASTQs already fetched by fetch_fastqs.py
     urls = ena_fastq_urls(run_id, layout, known_urls)
+    # fastp below takes mates by POSITION; ENA's orphan-reads `{run}.fastq.gz`
+    # beside _1/_2 sorts first and would become mate 1. resolve_runs.py drops
+    # orphans; this catches a table resolved before it did.
+    if layout.upper().startswith("PAIRED") and len(urls) != 2:
+        raise SystemExit(
+            f"run {run_id}: PAIRED but {len(urls)} FASTQs ({urls}). Re-run "
+            "src/data_preprocessing/resolve_runs.py, which keeps _1/_2 only.")
     fastqs = []
     for url in urls:
         name = Path(url).name
@@ -337,6 +360,23 @@ def process_run(run_id: str, layout: str, index_dir: Path, work: Path,
             if not dry_run:
                 subprocess.run(["bash", "-o", "pipefail", "-c", cmd], check=True)
         fastqs = [m1, m2]
+
+    # -- 0b. a UMI the submitter left in the READ NAME: STAR keeps only the
+    # first token, so move it there in fastp's `<name>:<UMI>` form, which
+    # dedup's umi_separator already reads. Keep in step with rule header_umi.
+    locations = steps["dedup"].get("umi_locations", {}) or {}
+    if umi.get("enabled") and locations.get(umi.get("loc", "")) == "read_name":
+        renamed = []
+        for i, fq in enumerate(fastqs, start=1):
+            out = work / f"{run_id}.umi_{i}.fastq.gz"
+            if not out.exists() or force:
+                cmd = (f"zcat {fq} | awk -v len={umi['len']} '{AWK_HEADER_UMI}'"
+                       f" | gzip > {out}")
+                print(f"  $ {cmd}")
+                if not dry_run:
+                    subprocess.run(["bash", "-o", "pipefail", "-c", cmd], check=True)
+            renamed.append(out)
+        fastqs = renamed
 
     # -- 1. fastp: adapter trimming (+ UMI if this library has one)
     trimmed = [work / f"{f.name.replace('.fastq.gz', '')}.trimmed.fastq.gz"
@@ -682,7 +722,8 @@ def main():
             continue
 
         work = work_root / exp_id
-        work.mkdir(parents=True, exist_ok=True)
+        if not args.dry_run:
+            work.mkdir(parents=True, exist_ok=True)
         index_dir = star_index(species, genomes[species], args.threads,
                                args.dry_run, force=False)
 

@@ -182,6 +182,14 @@ EXPERIMENT_IDS = {
      "liver"): "C.griseus-liver_GROcap",
     ("Shamie2021_cg_5GRO", "untreated", "not reported",
      "lung"): "C.griseus-lung_GROcap",
+
+    # Wang2025 (Nat Genet, GSE236370): bladder urothelial cells, two biological
+    # replicates each. The Kmt2c/Kmt2d double knockout is a perturbation and
+    # gets its own model, as Ino80/Spt5 do.
+    ("Wang2025_mm_urothelium_PROcap", "Kmt2c/Kmt2d wild type (Adeno-mCherry)",
+     "cell culture", "bladder urothelial cells"): "M.musculus-urothelium_PROcap",
+    ("Wang2025_mm_urothelium_PROcap", "Kmt2c/Kmt2d double knockout (Adeno-Cre)",
+     "cell culture", "bladder urothelial cells"): "M.musculus-urothelium-Kmt2cdKO_PROcap",
 }
 
 SPECIES = {

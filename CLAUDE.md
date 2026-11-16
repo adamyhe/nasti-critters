@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **nasti-critters** — NAScent Transcription Initiation Critters. A research repo of training/evaluation
 scripts (no installable package, no test suite) for base-resolution sequence-to-function models of PRO-cap
-transcription-initiation profiles across non-human species. **42 experiments over 12 species**
+transcription-initiation profiles across non-human species. **44 experiments over 12 species**
 (*D. melanogaster*, *M. musculus*, *C. elegans*, *S. cerevisiae*, *S. pombe*, *A. thaliana*,
 *C. reinhardtii*, *P. patens*, *S. moellendorffii*, *C. griseus*, *G. arboreum*, *G. hirsutum*), defined
 in `config/experiment_config.yaml` and generated from the manifest in `planning/`.
@@ -24,7 +24,7 @@ Two model families are trained on the same data:
   deployment-ready**, and attribution is blocked (see below).
 
 `data/`, `models/`, `logs/`, `predictions/`, `performance_metrics/`, `attributions/`, `modisco/` and
-`qc/` are gitignored — the FASTQ set alone is ~202 GiB, so check `git status` before any bulk `git add`.
+`qc/` are gitignored — the FASTQ set alone is ~220 GiB, so check `git status` before any bulk `git add`.
 Every script resolves config/data paths relative to `REPO_ROOT`, computed from `__file__`, so scripts can
 be invoked from anywhere; the launchers assume the repo root as CWD.
 
@@ -124,7 +124,7 @@ variable rather than inlining it across lines inside an f-string.
 # --- ENCODE PRO-cap pipeline (the current path for producing labels) ---
 python src/data_preprocessing/resolve_runs.py                  # manifest -> run accessions via ENA
 python src/data_preprocessing/build_experiment_config.py        # manifest -> experiment_config.yaml
-python src/data_preprocessing/fetch_fastqs.py --dry-run         # ~202 GiB for all 42 experiments
+python src/data_preprocessing/fetch_fastqs.py --dry-run         # ~220 GiB for all 44 experiments
 python src/data_preprocessing/fetch_fastqs.py --tier include -j 4
 python src/data_preprocessing/fetch_fastqs.py --verify-only     # md5 audit of what is on disk
 python src/data_preprocessing/run_procap_pipeline.py --list     # what is defined and what is ready
@@ -265,14 +265,14 @@ script — do not add another**, and do not add another copy of the flag block.
 
 | launcher | job unit | jobs | GPU | skips |
 | --- | --- | --- | --- | --- |
-| `src/bpnet/fit/launch.py` | experiment x **fold** | 214 | yes | `.final.torch` exists, missing inputs, no fold assignment |
-| `src/cherimoya/fit/launch.py` | experiment x **fold** | 214 | yes | same |
-| `src/bpnet/benchmark/launch.py` | **experiment** | 42 | yes | metrics JSON exists, missing inputs, **folds not all trained** |
-| `src/cherimoya/benchmark/launch.py` | **experiment** | 42 | yes | same |
-| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 42 x types | yes | output npz exists, missing inputs, **folds not all trained** |
-| `src/bpnet/attribute/launch_filter.py` | **experiment** | 42 | **no** | filtered BED + OHE exist, peaks/sequences missing |
-| `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 42 x types | **no** | .h5 exists, attribution or OHE npz missing |
-| `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 42 x types | **no** | report dir exists, .h5 or MEME db missing |
+| `src/bpnet/fit/launch.py` | experiment x **fold** | 224 | yes | `.final.torch` exists, missing inputs, no fold assignment |
+| `src/cherimoya/fit/launch.py` | experiment x **fold** | 224 | yes | same |
+| `src/bpnet/benchmark/launch.py` | **experiment** | 44 | yes | metrics JSON exists, missing inputs, **folds not all trained** |
+| `src/cherimoya/benchmark/launch.py` | **experiment** | 44 | yes | same |
+| `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 44 x types | yes | output npz exists, missing inputs, **folds not all trained** |
+| `src/bpnet/attribute/launch_filter.py` | **experiment** | 44 | **no** | filtered BED + OHE exist, peaks/sequences missing |
+| `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 44 x types | **no** | .h5 exists, attribution or OHE npz missing |
+| `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 44 x types | **no** | report dir exists, .h5 or MEME db missing |
 
 Why the job units differ, since each was a design question:
 
@@ -322,7 +322,7 @@ blocker.)
 
 ### `filter_nonACGT_regions.py` is REQUIRED, and produces modisco's other input
 
-**`deep_lift_shap` refuses a sequence containing an unknown base** — verified against tangermeme 1.4.1, in
+**`deep_lift_shap` refuses a sequence containing an unknown base** — verified against tangermeme 1.4.1 and again under 1.5.0, in
 **both** reference modes, so the frequency default does not rescue it. **And `extract_loci(ignore=IGNORE)`
 is exactly what creates that column**: `ignore` KEEPS a locus containing an N and zeroes the column rather
 than dropping the locus. So the setting every `extract_loci` call in this repo passes is what makes
@@ -555,7 +555,7 @@ could go stale.
 implementation detail. `fold-mean` also carries `{metric}_sd` and `n_folds` and draws ±1 sd error bars —
 worth having, because a bare point invites reading a 0.01 gap as real when the folds behind it span 0.05.
 `per-fold`'s Wilcoxon p is **not interpretable**: folds of one experiment share an architecture, a library
-and a peak set, so 5 × 42 is not 210 independent pairs. Use it to see spread, not significance.
+and a peak set, so 5 × 44 is not 220 independent pairs. Use it to see spread, not significance.
 
 Cherimoya is not deployment-ready, so treat anything this produces as a development comparison.
 
@@ -601,7 +601,7 @@ ENCODE orchestrates these steps with [rmsp](https://github.com/aldenleung/rmsp),
 Snakemake fills the same role here. Two drivers, same steps:
 
 - **`workflow/Snakefile` — preferred.** Proper DAG: parallel, resumable, atomic outputs, per-rule
-  resources. ~286 jobs for `tier=include`, ~908 for all tiers (approximate — `fetch_fastq` is one job per
+  resources. ~330 jobs for `tier=include`, ~1000 for `tier=include,conditional` (approximate — `fetch_fastq` is one job per
   FASTQ *not already on disk*, so the total moves with local state). Scope is fetch -> negatives;
   `resolve_runs.py`/`build_experiment_config.py` stay outside as metadata work, and training stays on the
   launchers.
@@ -638,7 +638,7 @@ Snakemake-specific rules:
   change to experiment grouping costs no re-alignment.
 
 **Fetching is separate from mapping.** `fetch_fastqs.py` bulk-downloads every FASTQ the config references
-(~202 GiB, 82 files over 64 runs) with md5 verification, so transfers can run on a login/transfer node and
+(~220 GiB, 85 files over 67 runs) with md5 verification, so transfers can run on a login/transfer node and
 a failed mapping run never re-downloads. Transfers stage through `data/fastq/.incoming/` and move to the
 final path only once the md5 matches — **a file at the final path always means complete and verified.**
 `run_procap_pipeline.py --fastq-dir` picks those up and only falls back to downloading on demand; set
@@ -654,7 +654,7 @@ sample->run crosswalk, which is what *labels* each file.
   the 5' end of *every* alignment record, so on a paired BAM it counts R1's 5' end (the initiation site)
   and R2's 5' end (the RNA 3' end, opposite strand) alike — roughly half the track becomes strand-flipped
   3'-end signal. `final_bam` applies `samtools view -f 64`, selected by `steps.signal.five_prime_mate`,
-  **after dedup** because `umi_tools --paired` needs both mates. Only 8 of 42 experiments are paired, which
+  **after dedup** because `umi_tools --paired` needs both mates. Only 10 of 44 experiments are paired, which
   is why this went unnoticed. **R1 is a convention here, not a documented fact** — validate it like
   `reverse_strand`, by confirming signal piles up at annotated TSSs rather than 3' ends.
 - **Strand orientation.** `--reverse-strand` swaps which read strand becomes the plus track. R1/R2
@@ -673,8 +673,21 @@ sample->run crosswalk, which is what *labels* each file.
   deduplicating a non-UMI PRO-cap library destroys real stacked 5' ends — but a missed UMI is silent, and
   `umi_report.py`'s automated backstop is **blind for 6 of 12 species** (see `docs/investigations.md`), so
   this rests on manifest curation.
+- **A UMI can arrive in the READ NAME instead of the sequence** — `umi_loc: read name`, first seen in
+  GSE236370, whose submitter clipped a 6+6 nt dual UMI into `...:5317:GCTCAG_GTTAGA/1`. fastp `--umi`
+  would then cut real bases, and **STAR keeps only the first token of a read name**, so the UMI is lost at
+  alignment without a word. `rule header_umi` / `AWK_HEADER_UMI` (one program, identical in both
+  drivers) rewrites it to fastp's `<name>:<UMI>` form before trimming, and exits nonzero on a UMI of the
+  wrong length rather than deduplicating on garbage. Its awk program is passed as `params: lambda w: ...`:
+  a bare params STRING gets its braces expanded as wildcards.
+- **ENA can list a THIRD FASTQ for a paired run** — orphan reads as `{run}.fastq.gz` beside `_1`/`_2`
+  (`SRR25117689`). Mates are paired by POSITION everywhere, and the orphan sorts first, so it would become
+  mate 1. `resolve_runs.py` drops it; both drivers refuse a PAIRED run that resolves to any count but two.
+- **`run_procap_pipeline.py --dry-run` must not create directories.** An empty `data/star/{species}` is
+  what a half-built `star_index` output looks like, and with a stale marker in `.snakemake/incomplete`
+  it fails every later Snakemake DAG with `IncompleteFilesException`.
 - **No UMI means no dedup**, by design: `final_bam` takes `unique.bam` directly when `has_umi(run)` is
-  false, so the `dedup` rule never runs for 39 of 42 experiments.
+  false, so the `dedup` rule never runs for 39 of 44 experiments.
 - **fastp and umi_tools disagree about the UMI separator by default.** fastp appends the UMI with `:`;
   umi_tools' `--umi-separator` defaults to `_`. An SRA-style read name contains no `_`, so umi_tools takes
   the *entire read name* as the UMI and aborts with `AssertionError: not all umis are the same length`.
@@ -1004,8 +1017,10 @@ parallelising it, since concurrent jobs race for the same fetched file.
   **excludes nothing, silently**. So `src/tangermeme_compat.py` patches the one function, and
   **`patch_numeric_chroms()` is SELF-RETIRING**: it functionally probes the installed tangermeme and does
   not patch if the probe passes, and refuses to install a patch that fails its own probe. Called from all
-  five scripts that pass a blacklist into `extract_loci`. **The tangermeme PR is worth two
-  `dtype={0: str}` edits**, in `match.extract_matching_loci` and `io._load_exclusion_zones`.
+  five scripts that pass a blacklist into `extract_loci`. **Under tangermeme 1.5.0 (pinned since
+  2026-11-09) the probe passes and the patch is a no-op**: `_load_exclusion_zones` was fixed upstream.
+  `match.extract_matching_loci` was NOT. It still calls `read_csv` with no `dtype`, so
+  `sample_negatives`' DataFrame workaround stays, and the tangermeme PR is down to that one edit.
 - **`-j` in `make_negatives.py` is a PROCESS pool, and has to be** — the strand merge and GC matching are
   in-process now, so threads serialise on the GIL. It buys parallelism ACROSS experiments, not within one
   (`extract_matching_loci`'s internal `joblib` scan is pinned to `n_jobs=1`). Each worker holds a genome,

@@ -226,6 +226,10 @@ def umi_arg(run_id):
             f"steps.dedup.umi_locations in config/procap_pipeline.yaml."
         )
     fastp_loc = UMI_LOCATIONS[loc]
+    if fastp_loc == "read_name":
+        # Already out of the sequence; the header_umi rule moves it into the
+        # name STAR keeps. Asking fastp to extract would cut real bases.
+        return ""
     if fastp_loc == "read2" and not is_paired(run_id):
         raise WorkflowError(
             f"run {run_id}: umi_loc {loc!r} maps to fastp read2, but the run is "
@@ -352,6 +356,22 @@ def has_umi(run_id):
     return bool(RUN_UMI.get(run_id, {}).get("enabled"))
 
 
+def header_umi(run_id):
+    """The UMI arrives in the READ NAME rather than the sequence (see
+    steps.dedup.umi_locations), so header_umi must rewrite it before trimming."""
+    return (has_umi(run_id)
+            and UMI_LOCATIONS.get(RUN_UMI[run_id].get("loc", "")) == "read_name")
+
+
+#: Move a header UMI into the name STAR keeps: `@SRR.1 inst:...:AAA_CCC/1` ->
+#: `@SRR.1:AAACCC`. The UMI is the last ':' field of the SECOND token, /1 or /2
+#: and the per-mate '_' join stripped. Exits nonzero on the first read whose UMI
+#: is not exactly `len` long, so a deposit without the expected header fails
+#: here instead of being deduplicated on garbage. One source line on purpose
+#: (see deinterleave); identical to AWK_HEADER_UMI in run_procap_pipeline.py.
+AWK_HEADER_UMI = r"""NR % 4 == 1 { u = $2; sub(/^.*:/, "", u); sub(/\/[12]$/, "", u); gsub(/_/, "", u); if (length(u) != len) { print "read " (NR + 3) / 4 ": header UMI " u " is not " len " nt: " $0 > "/dev/stderr"; exit 1 } print $1 ":" u; next } { print }"""
+
+
 # --------------------------------------------------- FASTQ names and URLs
 # ENA-reported paths, not constructed: ENA's layout varies between
 # vol1/fastq/<prefix>/<run>/ and vol1/fastq/<prefix>/<padded>/<run>/.
@@ -384,7 +404,19 @@ def run_fastqs(run_id):
     is_paired() here would make the DAG look for two files that do not exist.
     """
     if RUN_FASTQS.get(run_id):
-        return sorted(RUN_FASTQS[run_id])
+        files = sorted(RUN_FASTQS[run_id])
+        # merge_run_fastqs pairs mates by POSITION, so a third file -- ENA's
+        # orphan-reads `{run}.fastq.gz` beside _1/_2 -- would sort first and
+        # become mate 1, with _1 as mate 2. resolve_runs.py drops orphans;
+        # this catches a table resolved before it did.
+        if (str(RUN_LAYOUT.get(run_id, "")).upper().startswith("PAIRED")
+                and len(files) != 2):
+            raise WorkflowError(
+                f"run {run_id}: PAIRED but {len(files)} FASTQs in "
+                f"manifest_runs_resolved.tsv ({files}). Re-run "
+                "src/data_preprocessing/resolve_runs.py, which keeps _1/_2 only."
+            )
+        return files
     return ([f"{run_id}_1.fastq.gz", f"{run_id}_2.fastq.gz"]
             if str(RUN_LAYOUT.get(run_id, "")).upper().startswith("PAIRED")
             else [f"{run_id}.fastq.gz"])
@@ -409,6 +441,9 @@ def sample_input_fastqs(sample_id):
     for r in SAMPLE_RUNS[sample_id]:
         if is_interleaved(r):
             out += [f"{WORK}/runs/{r}/mate_1.fastq.gz", f"{WORK}/runs/{r}/mate_2.fastq.gz"]
+        elif header_umi(r):
+            out += [f"{WORK}/runs/{r}/umi_{m}.fastq.gz"
+                    for m in range(1, len(run_fastqs(r)) + 1)]
         else:
             out += [f"{FASTQ_DIR}/{fq}" for fq in run_fastqs(r)]
     return out
@@ -798,6 +833,40 @@ rule deinterleave:
         """
 
 
+rule header_umi:
+    """Move a UMI the submitter left in the READ NAME into the name STAR keeps.
+
+    For umi_loc `read name` (steps.dedup.umi_locations): the UMI was clipped off
+    the sequence before deposit, so fastp has nothing to extract, and STAR
+    keeps only the first whitespace token -- the SRA accession -- so without
+    this the UMI never reaches umi_tools. Output is fastp's own convention,
+    `<first token>:<UMI>`, so dedup's umi_separator works unchanged. Each mate
+    is rewritten independently; their names already correspond.
+    """
+    input:
+        lambda w: f"{FASTQ_DIR}/{run_fastqs(w.run)[int(w.mate) - 1]}"
+    output:
+        temp(f"{WORK}/runs/{{run}}/umi_{{mate}}.fastq.gz")
+    wildcard_constraints:
+        mate="[12]",
+    params:
+        umi_len=lambda w: RUN_UMI[w.run]["len"],
+        # A function, not the bare string: Snakemake expands {...} in a params
+        # STRING as wildcards, and the awk program is full of braces.
+        awk=lambda w: AWK_HEADER_UMI,
+    resources:
+        runtime=180,
+    log:
+        f"{WORK}/logs/header_umi/{{run}}_{{mate}}.log"
+    shell:
+        r"""
+        mkdir -p $(dirname {output}) $(dirname {log})
+        exec 2> {log}
+        set -o pipefail
+        zcat {input} | awk -v len={params.umi_len} '{params.awk}' | gzip > {output}
+        """
+
+
 rule adapter_fasta:
     """Write a named adapter's sequences to a FASTA for fastp --adapter_fasta.
 
@@ -862,10 +931,20 @@ rule merge_run_fastqs:
         #
         # The copy fallback stays for the case where the symlink itself cannot be made,
         # and chmods only its own fresh inode.
+        #
+        # EXCEPT for a WRITABLE source, which here means a temp() intermediate
+        # (header_umi's umi_N, deinterleave's mate_N) rather than a protected()
+        # archived FASTQ. Snakemake deletes a temp() file as soon as its last
+        # consumer -- this rule -- finishes, so a symlink to one dangles before
+        # trim ever runs ("missing locally, parent dir contents: raw_1.fastq.gz",
+        # job 51747005). A HARD link keeps the inode alive when the temp path
+        # goes. Both live under WORK, so it cannot cross a filesystem, and the
+        # protected()-mode trap above does not apply to a writable file.
         link_or_copy() {{
             src=$1; dst=$2
             rm -f "$dst"
-            if ln -s "$src" "$dst"; then return 0; fi
+            if [ -w "$src" ] && ln "$src" "$dst"; then return 0; fi
+            if [ ! -w "$src" ] && ln -s "$src" "$dst"; then return 0; fi
             echo "NOTE: symlink refused above -- copying $src -> $dst instead."
             cp "$src" "$dst"
             chmod u+w "$dst"

@@ -184,9 +184,22 @@ steps:
     # read 2's first 10 GENOMIC bases -- a tag determined by read 2's own
     # mapping position, so it added nothing beyond the fragment's 3' coordinate
     # while dropping 43-57% of reads.
+    #
+    # `read name` -> read_name is NOT a fastp value: it is a UMI the SUBMITTER
+    # already clipped off the sequence and moved into the read header, so there
+    # is nothing left in the read for fastp to extract (and --umi_loc would cut
+    # real bases). Both drivers skip fastp's --umi for it and instead rewrite
+    # the header into the fastp form `<first token>:<UMI>` before trimming --
+    # the only part of the name STAR keeps is the first token, so a UMI left in
+    # the second token is silently discarded at alignment. Measured on
+    # Wang2025_mm_urothelium_PROcap (GSE236370): every read is named
+    # `SRR25117688.1 E00489:...:5317:GCTCAG_GTTAGA/1`, a 6 + 6 nt dual UMI
+    # joined by `_`, identical on both mates, with the modal read length 144 of
+    # a 150-cycle run. umi_len counts the UMI with the `_` removed (12).
     umi_locations:
       "5' adaptor": read1
       "3' adaptor": read2
+      "read name": read_name
     notes: >-
       Only meaningful for libraries with a UMI. For datasets without one, record
       dedup as skipped rather than silently collapsing genuine duplicate 5' ends
