@@ -26,6 +26,7 @@ Three emission modes over the one selection rule:
 """
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -206,14 +207,54 @@ def _add_common_args(
     )
 
 
+def _apptainer_image() -> Path | None:
+    """The .sif named by $APPTAINER_IMAGE at EMISSION time, or None to run natively.
+
+    Read from the environment, never from a flag default or a tracked file, so no
+    cluster path enters the repo. Fails here, before anything is submitted, if the
+    file is missing -- otherwise every job would die on its first line instead.
+    """
+    value = os.environ.get("APPTAINER_IMAGE", "").strip()
+    if not value:
+        return None
+    image = Path(value).expanduser()
+    if not image.is_file():
+        sys.exit(f"APPTAINER_IMAGE set but not found: {image}")
+    return image
+
+
+def _apptainer_wrap(command: str, gpus: int) -> str:
+    """Run `command` inside $APPTAINER_IMAGE, if set.
+
+    The image's own PATH replaces the host's inside the container, so the bare
+    `python`/`modisco` in every command resolves to the image's interpreter and
+    nothing from the host env can leak in. --nv only where a GPU is requested.
+    REPO_ROOT is always bound (Sherlock binds /oak by default, other sites may
+    not), plus each entry of $APPTAINER_BIND, colon- or space-separated.
+    """
+    image = _apptainer_image()
+    if image is None:
+        return command
+    binds = [str(REPO_ROOT)] + os.environ.get("APPTAINER_BIND", "").replace(":", " ").split()
+    parts = ["apptainer", "exec"] + (["--nv"] if gpus else [])
+    for b in binds:
+        parts += ["--bind", b]
+    parts.append(str(image))
+    return " ".join(shlex.quote(p) for p in parts) + " " + command
+
+
 def _setup_block(args) -> str:
     """Environment setup injected into each generated job.
 
     Module names differ per site, so the default only activates this repo's own
-    environment; --setup-file replaces it wholesale.
+    environment; --setup-file replaces it wholesale. Under $APPTAINER_IMAGE the
+    default activation is dropped: the image supplies the Python stack, and
+    activating a host venv would only mislead whoever reads the script.
     """
     if args.setup_file:
         return Path(args.setup_file).read_text().rstrip()
+    if _apptainer_image() is not None:
+        return "# Python stack from $APPTAINER_IMAGE; no host env activated."
     return textwrap.dedent(f"""\
         # Default setup: this repo's mamba env + uv venv (venv last so its
         # interpreter wins). Use --setup-file for site-specific module loads.
@@ -250,6 +291,9 @@ def _emit(
     launchers so the sbatch directives, the setup block and the three modes
     cannot drift between them.
     """
+    # Container wrap first, so an env prefix below lands OUTSIDE `apptainer
+    # exec` -- apptainer passes the host environment through, PATH excepted.
+    command = _apptainer_wrap(command, gpus)
     # Environment goes on the command as a `VAR=value cmd` prefix rather than as
     # an `export` line in the sbatch body, so the SAME string carries it in all
     # three emission modes. An export would silently vanish under

@@ -192,7 +192,7 @@ are still in development and are not in tangermeme yet**. This is not a wrapper-
 the missing piece is upstream of this repo entirely.
 
 What the code shows, for whoever picks it up when the rules land. The ordinary nonlinearities are
-already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax`, and those are the only
+already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax` (1.5.0 still has no `expm1` rule), and those are the only
 activations `cherimoya/cheri.py` and `cherimoya.py` use — so the gap is at the WRAPPER level, exactly
 where bpnet-lite needs `{_ProfileLogitScaling: _nonlinear}`. `cherimoya/wrappers.py` defines
 `ControlWrapper`, `_ProfileLogitScaling`, `ProfileWrapper`, `LogCountWrapper` and
