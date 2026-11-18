@@ -43,15 +43,31 @@ Three things the paper and archive do not tell you, all measured from 200 k read
   reads carry `TGGAATTCTCGGGTGCCAAGG`), and 0.1% of the trimmed R1s carry a residual copy. Pinning it on
   already-trimmed reads costs nothing. Expect `read_structure_qc` to report little adapter for these runs,
   which is the deposit, not a curation error.
-- **R1 is the RNA 5' end**: R1's first base is 73% G (the cap-adjacent G) and R2's last base is 68% C,
-  its complement. So `five_prime_mate: R1` and no `reverse_strand`, which `snakemake orientation` should
-  confirm.
+- **READ 1 IS NOT THE RNA 5' END, and the first reading of this was WRONG.** R1's first base being 73% G
+  and the adapter after the insert were taken to mean R1 reads the RNA sense from its 5' end. Neither can
+  tell the two layouts apart: `TGGAATTCTCGGGTGCCAAGG` is both the standard 3' adapter and the reverse
+  complement of the Mahat 2016 PRO-seq 5' adapter (VRA5), and GEO cites Mahat 2016. The annotated-TSS
+  metaplot settled it (2026-11-16): with R1, nearly all signal was ANTISENSE at ~+60 bp, i.e. read 1's 5'
+  end is the RNA 3' end (the pause site), on the opposite strand. The initiator logo still looked strong
+  (1.95 bits at offset 0), so **the logo alone cannot catch this**. Curated per run as `rna_5prime_end`:
+  `R2` for the three true pairs, `R1_3prime` for `SRR25117689` (no R2 deposited), which takes each R1
+  alignment's far end on the flipped strand, valid because the ~50 bp inserts sit wholly in the 144 bp read.
 
 **`SRR25117689` also lists an orphan-reads `SRR25117689.fastq.gz`** (0.5 GB) beside `_1`/`_2`, the
 corpus's first three-file paired run. Every consumer pairs mates **by position**, and the orphan sorts
 first, so `merge_run_fastqs` and the serial driver would have made it mate 1 with `_1` as mate 2.
 `resolve_runs.py` now drops it (ftp, md5 and bytes together, so the lists stay index-aligned), and both
 drivers refuse a PAIRED run that does not resolve to exactly two files.
+
+**`SRR25117689` (WT rep 1) has NO READ 2 in the deposit, found only after mapping.** Its `_2` is a second
+copy of read 1: same strand, adapter still on, UMI-clipped, while `_1` is the submitter-trimmed copy. In 100%
+of 100 k pairs `_2` starts with `_1`; for the other three runs `_2` is the reverse complement of `_1` in 81-86%.
+The identical UMI halves (`NAAATG_NAAATG` vs `GCTCAG_GTTAGA` on a true pair) were the visible tell, and
+none of the pre-mapping checks looked for it. Processed as a pair, STAR booked **99.97% `too short`** and
+the sample contributed 51 reads, so the first WT peaks and bigWigs (2026-11-15) were rep 2 alone.
+Curated as `deposited_single_mate: 2` -> `raw.single_mate` (per RUN, since rep 2 is a true pair), and
+processed single-end from the untrimmed `_2`, so trimming is this pipeline's own.
+**Check for it on any new paired deposit**: mate 2 should be the reverse complement of mate 1.
 
 ## The 2026-09-01 cotton addition: GRO-cap in diploid and tetraploid cotton
 

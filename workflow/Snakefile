@@ -138,6 +138,8 @@ TARGETS = selected_experiments()
 # not experiment, so a run shared by two experiments is mapped only once.
 RUN_SPECIES, RUN_LAYOUT, RUN_UMI, RUN_ADAPTER, EXP_RUNS = {}, {}, {}, {}, {}
 RUN_INTERLEAVED = {}
+RUN_FIVE_PRIME_END = {}  # run -> R1 | R2 | R1_3prime; see five_prime_end()
+RUN_SINGLE_MATE = {}  # run -> the ONE deposited mate to process; see single_mate()
 
 # TWO MERGE LEVELS. Several runs of ONE sample are resequencing of one library and are
 # concatenated as FASTQ, BEFORE alignment and dedup -- otherwise umi_tools only ever sees
@@ -167,6 +169,10 @@ for name in TARGETS:
         RUN_UMI[run_id] = raw.get("umi", {}) or {}
         RUN_ADAPTER[run_id] = raw.get("adapter", "") or ""
         RUN_INTERLEAVED[run_id] = bool(raw.get("interleaved"))
+    for run_id, mate in (raw.get("single_mate") or {}).items():
+        RUN_SINGLE_MATE[str(run_id)] = int(mate)
+    for run_id, end in (raw.get("five_prime_end") or {}).items():
+        RUN_FIVE_PRIME_END[str(run_id)] = str(end)
 
 
 #: Adapter name -> LIST of sequences, from steps.trim.adapters. Resolved here so
@@ -348,8 +354,22 @@ def is_paired(run_id):
     the orientation QC as an antisense peak just DOWNSTREAM of the TSS instead
     of divergent upstream, with antisense/sense of exactly 1.00 (one R2 per R1).
     """
+    if single_mate(run_id):
+        return False
     return (str(RUN_LAYOUT.get(run_id, "")).upper().startswith("PAIRED")
             or is_interleaved(run_id))
+
+
+def single_mate(run_id):
+    """The one mate file to process for a PAIRED deposit with no real read 2, or None.
+
+    SRR25117689 (GSE236370) is deposited PAIRED, but its `_2` is a second copy of
+    read 1 -- same strand, adapter still on -- not read 2 (100% of 100 k pairs;
+    the other three runs of the study are true pairs). Fed as a pair, STAR
+    booked 99.97% `too short`. From raw.single_mate (manifest
+    `deposited_single_mate`); the run is then processed as single-end.
+    """
+    return RUN_SINGLE_MATE.get(run_id)
 
 
 def has_umi(run_id):
@@ -422,6 +442,53 @@ def run_fastqs(run_id):
             else [f"{run_id}.fastq.gz"])
 
 
+def five_prime_end(run_id):
+    """Which read end is the RNA 5' end: R1 (corpus default), R2, or R1_3prime.
+
+    A per-RUN override of steps.signal.five_prime_mate, from raw.five_prime_end
+    (manifest `rna_5prime_end`). GSE236370 uses the Mahat 2016 PRO-seq adapter
+    layout, so READ 1 is the reverse complement of the RNA read from its 3' END:
+    with R1 the TSS metaplot put nearly all signal ANTISENSE at ~+60 bp (the pause
+    site) rather than a sense spike at 0. R2 for its true pairs; R1_3prime for
+    its single-end run (no R2 deposited), which takes the far end of each R1
+    alignment on the opposite strand -- valid because its ~50 bp inserts sit
+    wholly inside the 144 bp read.
+    """
+    end = RUN_FIVE_PRIME_END.get(run_id, FIVE_PRIME_MATE)
+    if end not in ("R1", "R2", "R1_3prime"):
+        raise WorkflowError(f"run {run_id}: five_prime_end {end!r} not R1, R2 or R1_3prime")
+    if end == "R2" and not is_paired(run_id):
+        raise WorkflowError(f"run {run_id}: five_prime_end R2 on a run processed single-end")
+    if end == "R1_3prime" and is_paired(run_id):
+        raise WorkflowError(f"run {run_id}: five_prime_end R1_3prime is for single-end runs; "
+                            "use R2 for a pair")
+    return end
+
+
+#: R1_3prime: turn each alignment into a 1-bp record at its 3' END on the
+#: OPPOSITE strand, so the unchanged `genomecov -5` downstream counts the RNA 5'
+#: end. Reference span from the CIGAR (M/D/N/=/X; soft clips excluded). Tags are
+#: dropped, since MD/NM would describe the old record. One source line on purpose
+#: (see deinterleave); identical to AWK_THREE_PRIME_FLIP in run_procap_pipeline.py.
+AWK_THREE_PRIME_FLIP = r"""/^@/ { print; next } { len = 0; c = $6; while (match(c, /^[0-9]+[MIDNSHP=X]/)) { n = substr(c, 1, RLENGTH - 1) + 0; op = substr(c, RLENGTH, 1); if (op ~ /[MDN=X]/) len += n; c = substr(c, RLENGTH + 1) } rev = int($2 / 16) % 2; flag = rev ? $2 - 16 : $2 + 16; pos = rev ? $4 : $4 + len - 1; print $1, flag, $3, pos, $5, "1M", "*", 0, 0, substr($10, 1, 1), substr($11, 1, 1) }"""
+
+
+def processing_fastqs(run_id):
+    """The FASTQs that ENTER the pipeline -- run_fastqs() minus an unused mate.
+
+    run_fastqs() stays "what is on disk", which fetch and the read QC need; only
+    the merge and header_umi inputs come from here.
+    """
+    files = run_fastqs(run_id)
+    mate = single_mate(run_id)
+    if not mate:
+        return files
+    want = [f for f in files if f.endswith(f"_{mate}.fastq.gz")]
+    if len(want) != 1:
+        raise WorkflowError(f"run {run_id}: single_mate {mate} matches {want} in {files}")
+    return want
+
+
 def _rep(sample_id):
     """A representative run for a sample. Every run of one sample comes from the same
     experiment, so species/layout/UMI/adapter are shared -- any of them answers."""
@@ -433,6 +500,7 @@ def sample_is_paired(s):   return is_paired(_rep(s))
 def sample_has_umi(s):     return has_umi(_rep(s))
 def sample_adapter_fa(s):  return adapter_fasta(_rep(s))
 def sample_umi_arg(s):     return umi_arg(_rep(s))
+def sample_five_prime_end(s): return five_prime_end(_rep(s))
 
 
 def sample_input_fastqs(sample_id):
@@ -443,9 +511,9 @@ def sample_input_fastqs(sample_id):
             out += [f"{WORK}/runs/{r}/mate_1.fastq.gz", f"{WORK}/runs/{r}/mate_2.fastq.gz"]
         elif header_umi(r):
             out += [f"{WORK}/runs/{r}/umi_{m}.fastq.gz"
-                    for m in range(1, len(run_fastqs(r)) + 1)]
+                    for m in range(1, len(processing_fastqs(r)) + 1)]
         else:
-            out += [f"{FASTQ_DIR}/{fq}" for fq in run_fastqs(r)]
+            out += [f"{FASTQ_DIR}/{fq}" for fq in processing_fastqs(r)]
     return out
 
 
@@ -844,7 +912,7 @@ rule header_umi:
     is rewritten independently; their names already correspond.
     """
     input:
-        lambda w: f"{FASTQ_DIR}/{run_fastqs(w.run)[int(w.mate) - 1]}"
+        lambda w: f"{FASTQ_DIR}/{processing_fastqs(w.run)[int(w.mate) - 1]}"
     output:
         temp(f"{WORK}/runs/{{run}}/umi_{{mate}}.fastq.gz")
     wildcard_constraints:
@@ -1162,16 +1230,25 @@ rule final_bam:
     params:
         # -f 64 = first in pair, -f 128 = second. Single-end reads have neither
         # bit set, so this must only be applied to paired runs.
+        # The mate is per RUN (five_prime_end()), not the global setting alone.
         select=lambda w: (
-            f"samtools view -b -f {64 if FIVE_PRIME_MATE == 'R1' else 128}"
+            f"samtools view -b -f {64 if sample_five_prime_end(w.sample) == 'R1' else 128}"
             if sample_is_paired(w.sample) else ""
         ),
+        flip=lambda w: int(sample_five_prime_end(w.sample) == "R1_3prime"),
+        # A function so the awk braces are not expanded as wildcards.
+        awk=lambda w: AWK_THREE_PRIME_FLIP,
     log:
         f"{WORK}/logs/final_bam/{{sample}}.log"
     shell:
         r"""
         mkdir -p $(dirname {log})
-        if [ -n "{params.select}" ]; then
+        set -o pipefail
+        if [ {params.flip} -eq 1 ]; then
+            samtools view -h {input} 2> {log} \
+              | awk -F'\t' -v OFS='\t' '{params.awk}' \
+              | samtools sort -o {output.bam} - >> {log} 2>&1
+        elif [ -n "{params.select}" ]; then
             {params.select} -o {output.bam} {input} > {log} 2>&1
         else
             ln -f {input} {output.bam}

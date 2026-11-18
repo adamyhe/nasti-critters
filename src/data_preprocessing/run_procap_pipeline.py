@@ -74,6 +74,13 @@ AWK_HEADER_UMI = (
     r"""NR % 4 == 1 { u = $2; sub(/^.*:/, "", u); sub(/\/[12]$/, "", u); gsub(/_/, "", u); if (length(u) != len) { print "read " (NR + 3) / 4 ": header UMI " u " is not " len " nt: " $0 > "/dev/stderr"; exit 1 } print $1 ":" u; next } { print }"""
 )
 
+#: five_prime_end R1_3prime: each alignment -> a 1-bp record at its 3' end on the
+#: opposite strand, so genomecov -5 counts the RNA 5' end of a read-1-antisense
+#: library. Keep identical to AWK_THREE_PRIME_FLIP in workflow/Snakefile.
+AWK_THREE_PRIME_FLIP = (
+    r"""/^@/ { print; next } { len = 0; c = $6; while (match(c, /^[0-9]+[MIDNSHP=X]/)) { n = substr(c, 1, RLENGTH - 1) + 0; op = substr(c, RLENGTH, 1); if (op ~ /[MDN=X]/) len += n; c = substr(c, RLENGTH + 1) } rev = int($2 / 16) % 2; flag = rev ? $2 - 16 : $2 + 16; pos = rev ? $4 : $4 + len - 1; print $1, flag, $3, pos, $5, "1M", "*", 0, 0, substr($10, 1, 1), substr($11, 1, 1) }"""
+)
+
 
 def load(path: Path) -> dict:
     with path.open() as f:
@@ -308,7 +315,8 @@ def process_run(run_id: str, layout: str, index_dir: Path, work: Path,
                 force: bool, fastq_dir: Path | None = None,
                 known_urls: dict[str, list[str]] | None = None,
                 sort_ram_gb: float = 10.0, adapter: str = "",
-                interleaved: bool = False) -> Path:
+                interleaved: bool = False, single_mate: int | None = None,
+                five_prime_end: str | None = None) -> Path:
     """fastp -> STAR -> unique filter -> dedup for a single run. Returns BAM."""
     steps = pipeline["steps"]
     # `interleaved` overrides the archive layout: a deposit reported SINGLE
@@ -316,7 +324,10 @@ def process_run(run_id: str, layout: str, index_dir: Path, work: Path,
     # every R2 contributes its 5' end (the RNA 3' end, opposite strand,
     # displaced downstream by the fragment length) to the signal. Keep in step
     # with is_paired()/is_interleaved() in workflow/Snakefile.
-    paired = layout.upper().startswith("PAIRED") or interleaved
+    # `single_mate`: a PAIRED deposit with no real read 2 (SRR25117689's _2 is a
+    # second copy of read 1), processed single-end from that one file. Keep in
+    # step with single_mate()/processing_fastqs() in workflow/Snakefile.
+    paired = (layout.upper().startswith("PAIRED") or interleaved) and not single_mate
     final_bam = work / f"{run_id}.final.bam"
     if final_bam.exists() and not force:
         print(f"  {run_id}: final BAM exists, skipping")
@@ -331,6 +342,10 @@ def process_run(run_id: str, layout: str, index_dir: Path, work: Path,
         raise SystemExit(
             f"run {run_id}: PAIRED but {len(urls)} FASTQs ({urls}). Re-run "
             "src/data_preprocessing/resolve_runs.py, which keeps _1/_2 only.")
+    if single_mate:
+        urls = [u for u in urls if u.endswith(f"_{single_mate}.fastq.gz")]
+        if len(urls) != 1:
+            raise SystemExit(f"run {run_id}: single_mate {single_mate} matches {urls}")
     fastqs = []
     for url in urls:
         name = Path(url).name
@@ -442,8 +457,24 @@ def process_run(run_id: str, layout: str, index_dir: Path, work: Path,
     # of every record, so both mates would contribute and half of each track
     # would be strand-flipped 3'-end signal. After dedup, because umi_tools
     # --paired needs both mates. Keep in step with final_bam in the Snakefile.
+    # Per-RUN override of the global mate; see five_prime_end() in the Snakefile.
+    end = five_prime_end or steps["signal"].get("five_prime_mate", "R1")
+    if end not in ("R1", "R2", "R1_3prime"):
+        raise SystemExit(f"run {run_id}: five_prime_end {end!r} not R1, R2 or R1_3prime")
+    if end == "R2" and not paired:
+        raise SystemExit(f"run {run_id}: five_prime_end R2 on a run processed single-end")
+    if end == "R1_3prime" and paired:
+        raise SystemExit(f"run {run_id}: five_prime_end R1_3prime is for single-end runs")
+    if end == "R1_3prime":
+        flipped = work / f"{run_id}.flip.bam"
+        cmd = (f"samtools view -h {final_bam} | awk -F'\\t' -v OFS='\\t' "
+               f"'{AWK_THREE_PRIME_FLIP}' | samtools sort -o {flipped} -")
+        print(f"  $ {cmd}")
+        if not dry_run:
+            subprocess.run(["bash", "-o", "pipefail", "-c", cmd], check=True)
+            os.replace(flipped, final_bam)
     if paired:
-        mate_flag = 64 if steps["signal"].get("five_prime_mate", "R1") == "R1" else 128
+        mate_flag = 64 if end == "R1" else 128
         mated = work / f"{run_id}.mate.bam"
         run(["samtools", "view", "-b", "-f", mate_flag, "-o", mated, final_bam],
             dry_run)
@@ -733,7 +764,9 @@ def main():
                         raw.get("umi", {}), args.threads, args.dry_run,
                         args.force, fastq_dir, known_urls,
                         args.star_sort_ram, raw.get("adapter", ""),
-                        bool(raw.get("interleaved")))
+                        bool(raw.get("interleaved")),
+                        (raw.get("single_mate") or {}).get(run_id),
+                        (raw.get("five_prime_end") or {}).get(run_id))
             for run_id in raw["runs"]
         ]
         pl_bw, mn_bw = make_signal(bams, exp_id, genomes[species], out_dir, work,

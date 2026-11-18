@@ -433,6 +433,36 @@ def main():
                 "      interleaved: true  # deposited SINGLE but holds "
                 "interleaved mate pairs; see the manifest note"
             )
+        # Per RUN, not per experiment like `interleaved`: replicates of one
+        # experiment can differ (GSE236370 WT rep 1 has no real read 2, rep 2 does).
+        single = {}
+        for (gsm, rs), r in zip(sample_runs, rows):
+            mate = r.get("deposited_single_mate", "").strip()
+            if not mate:
+                continue
+            if mate not in ("1", "2"):
+                raise ValueError(f"{gsm}: deposited_single_mate must be 1 or 2, got {mate!r}")
+            single.update({x: int(mate) for x in rs})
+        if single:
+            pairs = ", ".join(f"{q(k)}: {v}" for k, v in single.items())
+            lines.append(
+                f"      single_mate: {{{pairs}}}  # PAIRED deposit, no real read 2: "
+                "process this mate single-end; see the manifest note"
+            )
+        ends = {}
+        for (gsm, rs), r in zip(sample_runs, rows):
+            end = r.get("rna_5prime_end", "").strip()
+            if not end:
+                continue
+            if end not in ("R1", "R2", "R1_3prime"):
+                raise ValueError(f"{gsm}: rna_5prime_end must be R1, R2 or R1_3prime, got {end!r}")
+            ends.update({x: end for x in rs})
+        if ends:
+            pairs = ", ".join(f"{q(k)}: {q(v)}" for k, v in ends.items())
+            lines.append(
+                f"      five_prime_end: {{{pairs}}}  # per-run RNA 5' end; "
+                "overrides steps.signal.five_prime_mate"
+            )
         adapter = adapter_from_rows(rows)
         if adapter:
             lines.append(f"      adapter: {q(adapter)}")

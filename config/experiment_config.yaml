@@ -1223,6 +1223,8 @@ experiments:
         GSM7528774: ["SRR25117688"]
       library_layout: "PAIRED"
       run_match_basis: "manifest (already resolved)"
+      single_mate: {"SRR25117689": 2}  # PAIRED deposit, no real read 2: process this mate single-end; see the manifest note
+      five_prime_end: {"SRR25117689": "R1_3prime", "SRR25117688": "R2"}  # per-run RNA 5' end; overrides steps.signal.five_prime_mate
       adapter: "smallRNA_RA3"
       umi: {enabled: true, len: 12, loc: "read name"}
     processed:
@@ -1251,6 +1253,7 @@ experiments:
         GSM7528776: ["SRR25117686"]
       library_layout: "PAIRED"
       run_match_basis: "manifest (already resolved)"
+      five_prime_end: {"SRR25117687": "R2", "SRR25117686": "R2"}  # per-run RNA 5' end; overrides steps.signal.five_prime_mate
       adapter: "smallRNA_RA3"
       umi: {enabled: true, len: 12, loc: "read name"}
     processed:
