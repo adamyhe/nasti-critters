@@ -350,6 +350,7 @@ The single-experiment path remains available and implements the same steps:
 ```bash
 python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
 uv run python src/make_negatives.py -j 4
+python src/launch_negatives.py --dry-run   # or one SLURM job per experiment (set APPTAINER_IMAGE on Sherlock)
 ```
 
 Two species use **peak-level** folds and need them built once their peaks

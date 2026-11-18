@@ -141,6 +141,8 @@ snakemake blacklists -c1                                # cheapest way to unbloc
 # GC-matched negatives: model prep, deliberately OUTSIDE the DAG. Run from the venv.
 uv run python src/make_negatives.py --dry-run
 uv run python src/make_negatives.py -e S.cerevisiae_PROcap --force -j 3
+python src/launch_negatives.py --dry-run          # one CPU job per experiment; tangermeme, so set
+                                                  # APPTAINER_IMAGE on Sherlock
 
 # Peak-level folds (required before S. pombe / S. moellendorffii training)
 python src/data_preprocessing/make_random_splits.py
@@ -257,10 +259,11 @@ needing pushing upstream before those species are used elsewhere: `C.griseus`, b
 6-fold `C.elegans`, and S. moellendorffii's peak-level folds. Derivations, the paired-homoeolog constraint
 for G. hirsutum, and the per-library balance notes are in `docs/cross-validation-folds.md`.
 
-## Launchers: eight of them, one emission path
+## Launchers: nine of them, one emission path
 
 `src/launcher.py` holds the selection rule and the emission machinery; the eight `launch.py` files are thin
-wrappers over `_add_common_args` and `_emit`. **It is the only thing in the repo that writes an sbatch
+wrappers over `_add_common_args` and `_emit` (the ninth, `src/launch_negatives.py`, sits beside the
+script it runs). **It is the only thing in the repo that writes an sbatch
 script — do not add another**, and do not add another copy of the flag block.
 
 | launcher | job unit | jobs | GPU | skips |
@@ -273,11 +276,16 @@ script — do not add another**, and do not add another copy of the flag block.
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 44 | **no** | filtered BED + OHE exist, peaks/sequences missing |
 | `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 44 x types | **no** | .h5 exists, attribution or OHE npz missing |
 | `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 44 x types | **no** | report dir exists, .h5 or MEME db missing |
+| `src/launch_negatives.py` | **experiment** | 44 | **no** | negatives BED exists, peaks/sequences/bigWigs missing |
 
 Why the job units differ, since each was a design question:
 
 - **Benchmarking is per EXPERIMENT because it is forced.** Both scripts report a `genome_wide` block
   pooled over all folds, which cannot be computed if the folds are split across jobs.
+- **Negatives are per EXPERIMENT and CPU-only, and the launcher is not under a family directory** because
+  both families share them. It gates on peaks, FASTA and both bigWigs, not `exp.missing`, which demands the
+  negatives it produces. `make_negatives.py` stages its output and renames it, so a requeued job killed
+  mid-write cannot leave a truncated file that the skip test then reads as done.
 - **Attribution is per (experiment x type), not per fold**, because `attribute.py` loops every fold
   internally and averages. It follows that a partly trained experiment is not partly attributable — the
   script exits 1, so the launcher skips it and reports `3/5 folds trained`.
@@ -683,6 +691,17 @@ sample->run crosswalk, which is what *labels* each file.
 - **ENA can list a THIRD FASTQ for a paired run** — orphan reads as `{run}.fastq.gz` beside `_1`/`_2`
   (`SRR25117689`). Mates are paired by POSITION everywhere, and the orphan sorts first, so it would become
   mate 1. `resolve_runs.py` drops it; both drivers refuse a PAIRED run that resolves to any count but two.
+- **The RNA 5' end is not always R1, and the initiator logo will not tell you.** GSE236370 uses the Mahat
+  2016 PRO-seq adapter layout, so read 1 is the reverse complement of the RNA from its 3' END. With R1 the
+  logo still read 1.95 bits at offset 0 while the TSS metaplot put the signal antisense at ~+60 bp (pause
+  sites). Per-RUN override: manifest `rna_5prime_end` (`R1`/`R2`/`R1_3prime`) -> `raw.five_prime_end` ->
+  `five_prime_end()`; `R1_3prime` rewrites each alignment to a 1-bp record at its 3' end on the opposite
+  strand (`AWK_THREE_PRIME_FLIP`, identical in both drivers), so `genomecov -5` downstream is unchanged.
+- **A PAIRED deposit can lack read 2 entirely.** `SRR25117689`'s `_2` is a second copy of read 1, which
+  maps 99.97% `too short` as a pair. Before trusting a new paired deposit, check that mate 2 is the reverse
+  complement of mate 1. The fix is per RUN: manifest `deposited_single_mate` -> `raw.single_mate` ->
+  `single_mate()`/`processing_fastqs()` in the Snakefile and `single_mate=` in the serial driver, processed
+  single-end. `run_fastqs()` stays "what is on disk", so fetch and read QC still see both files.
 - **`run_procap_pipeline.py --dry-run` must not create directories.** An empty `data/star/{species}` is
   what a half-built `star_index` output looks like, and with a stale marker in `.snakemake/incomplete`
   it fails every later Snakemake DAG with `IncompleteFilesException`.

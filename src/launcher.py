@@ -911,6 +911,108 @@ def run_filter(family: str, script: Path) -> None:
     )
 
 
+def build_negatives_parser(script: Path) -> argparse.ArgumentParser:
+    launcher = "src/launch_negatives.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate GC-matched negative jobs, one per experiment.
+
+            Runs {script.name} -e EXP for each experiment whose peaks, FASTA and
+            both strand bigWigs exist and whose negatives BED does not. Negatives
+            are model prep, deliberately OUTSIDE the Snakemake DAG, and shared by
+            both model families, which is why this launcher lives beside the
+            script rather than under a family directory. The fit launchers skip
+            any experiment without them.
+
+            CPU-only. {script.name} imports tangermeme, which is on the torch side
+            and cannot install natively on Sherlock, so export APPTAINER_IMAGE
+            (the cherimoya image) before submitting there.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # One experiment per job, and extract_matching_loci's scan is pinned to
+    # n_jobs=1 inside the script, so extra cores would idle. Memory is the real
+    # cost: each job holds its genome plus the genome-wide GC tiles. Not yet
+    # measured on mm10 -- raise --mem rather than guess if a job is OOM-killed.
+    _add_common_args(parser, launcher, gpu=False,
+                     default_cpus=2, default_mem="32G", default_time="4:00:00")
+    parser.add_argument(
+        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        help="limit to these experiment IDs (default: every one in the config)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help=f"regenerate existing negatives (passed through to {script.name})",
+    )
+    signal = parser.add_mutually_exclusive_group()
+    signal.add_argument("--no-signal-filter", dest="signal_flag",
+                        action="store_const", const="--no-signal-filter",
+                        help=f"passed through to {script.name}")
+    signal.add_argument("--force-signal-filter", dest="signal_flag",
+                        action="store_const", const="--force-signal-filter",
+                        help=f"passed through to {script.name}")
+    parser.add_argument("--requeue", action="store_true",
+                        help="submit with --requeue; safe here, since a rerun "
+                             "skips an experiment whose negatives already exist")
+    return parser
+
+
+def run_negatives(script: Path) -> None:
+    """Enumerate and emit one GC-matched negatives job per experiment."""
+    parser = build_negatives_parser(script)
+    args = parser.parse_args()
+
+    if _apptainer_image() is None and not args.print_commands:
+        print("NOTE: APPTAINER_IMAGE is unset, so jobs need a native torch-side "
+              f"venv for {script.name} (tangermeme). On Sherlock, export it first.",
+              file=sys.stderr)
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / "negatives"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = skipped_experiments = 0
+    total = 0
+    for exp_id in experiments:
+        try:
+            exp = Experiment.load(exp_id)
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        total += 1
+
+        # What the script reads -- not exp.missing, which demands the very
+        # negatives this step produces.
+        absent = exp.missing_paths(kinds=("peaks", "sequences", "signals"))
+        if absent:
+            print(f"SKIP {exp_id}: missing data — {', '.join(absent)}", file=sys.stderr)
+            skipped_missing += 1
+            continue
+        if Path(exp.negatives).exists() and not args.force:
+            skipped_done += 1
+            continue
+
+        cmd = f"python {shlex.quote(str(script))} -e {shlex.quote(exp_id)}"
+        if args.force:
+            cmd += " --force"
+        if args.signal_flag:
+            cmd += f" {args.signal_flag}"
+        submitted += _emit(args, log_dir, setup, f"negatives_{exp_id}", cmd, gpus=0)
+
+    print(
+        f"\n{_action(args)} {submitted} negatives jobs of {total} (one per "
+        f"experiment); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing data"
+        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
 def numba_env(args) -> dict[str, int]:
     """Pin numba to the cores the job actually asked for.
 
