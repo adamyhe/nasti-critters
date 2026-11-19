@@ -21,7 +21,7 @@ Two model families are trained on the same data:
 - **Cherimoya** — newer architecture. It is **not** D. melanogaster-only: `fit_cherimoya.py` takes `-e`
   and resolves paths, species and folds through `src/experiments.py` exactly as `fit_bpnet.py` does.
   Training and benchmarking work, but per `src/cherimoya/README.md` the models are **not
-  deployment-ready**, and attribution is blocked (see below).
+  deployment-ready**, and attribution needs the cherimoya **0.3.1** image (see below).
 
 `data/`, `models/`, `logs/`, `predictions/`, `performance_metrics/`, `attributions/`, `modisco/` and
 `qc/` are gitignored — the FASTQ set alone is ~220 GiB, so check `git status` before any bulk `git add`.
@@ -259,10 +259,10 @@ needing pushing upstream before those species are used elsewhere: `C.griseus`, b
 6-fold `C.elegans`, and S. moellendorffii's peak-level folds. Derivations, the paired-homoeolog constraint
 for G. hirsutum, and the per-library balance notes are in `docs/cross-validation-folds.md`.
 
-## Launchers: nine of them, one emission path
+## Launchers: ten of them, one emission path
 
-`src/launcher.py` holds the selection rule and the emission machinery; the eight `launch.py` files are thin
-wrappers over `_add_common_args` and `_emit` (the ninth, `src/launch_negatives.py`, sits beside the
+`src/launcher.py` holds the selection rule and the emission machinery; the nine `launch.py` files are thin
+wrappers over `_add_common_args` and `_emit` (`src/launch_negatives.py` sits beside the
 script it runs). **It is the only thing in the repo that writes an sbatch
 script — do not add another**, and do not add another copy of the flag block.
 
@@ -273,6 +273,7 @@ script — do not add another**, and do not add another copy of the flag block.
 | `src/bpnet/benchmark/launch.py` | **experiment** | 44 | yes | metrics JSON exists, missing inputs, **folds not all trained** |
 | `src/cherimoya/benchmark/launch.py` | **experiment** | 44 | yes | same |
 | `src/bpnet/attribute/launch.py` | experiment x **attribute type** | 44 x types | yes | output npz exists, missing inputs, **folds not all trained** |
+| `src/cherimoya/attribute/launch.py` | experiment x **attribute type** | 44 x types | yes | same as BPNet's; needs the 0.3.1 image |
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 44 | **no** | filtered BED + OHE exist, peaks/sequences missing |
 | `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 44 x types | **no** | .h5 exists, attribution or OHE npz missing |
 | `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 44 x types | **no** | report dir exists, .h5 or MEME db missing |
@@ -331,12 +332,27 @@ directory would imply they need producing twice and would mean `launch_filter.py
 it was filtering for, which it does not. `attribution_path()` therefore takes `family` first, matching
 `model_path()`; `filtered_loci_path()` and `ohe_path()` do not take one at all.
 
-`attribute.py` is BPNet-only and pins `FAMILY = "bpnet"` at module level rather than taking a flag.
-**Cherimoya attribution is BLOCKED, not merely absent — do not start it.** It needs DeepLIFT rescale rules
-that are still in development and are not in tangermeme yet; the missing piece is upstream of this repo.
-(`cherimoya/wrappers.py`'s `ExpectedCountsWrapper` composes `torch.expm1` with a per-group softmax, and
-`expm1` is absent from tangermeme's rule table — treat that as the visible candidate, not the confirmed
-blocker.)
+Each family has its own script, each pinning `FAMILY` at module level: `src/bpnet/attribute/attribute.py`
+and `src/cherimoya/attribute/attribute.py`, with a launcher beside each over the same `run_attribute()`.
+**Cherimoya attribution runs ONLY under cherimoya >= 0.3.1** (the `cherimoya-0.3.1.sif` image, with
+tangermeme 1.6.0). It was blocked until 0.3 shipped `cherimoya.deep_lift_shap`, which registers the DeepLIFT
+rule for its fused convolution + normalization itself. **tangermeme alone does not unblock it**: 1.6.0
+still has no `expm1` rule and no cherimoya rules, only shared DeepLIFT helpers. Under 0.2.1 the script exits
+naming the image to use. **The models are 0.2.1-trained, so this depends on a measured equivalence**:
+on 2026-11-18 a 0.2.1 checkpoint gave **bit-identical** predictions under 0.3.1 (max |diff| 0.0, both heads).
+That was measured on one urothelium fold; check it again before attributing models from any other
+version pair (`logs/slurm/cheri_attr_test/` holds the test). Run it with
+`APPTAINER_IMAGE=$OAK/ayhe/apptainer/cherimoya-0.3.1.sif`, set per launcher invocation, while training and
+BPNet stay on 0.2.1.
+
+The Cherimoya script deliberately matches BPNet's: same filtered loci, all folds averaged, hypothetical
+scores, **the same frequency reference** (loaded from the BPNet script, not copied, so it has one
+definition) and the same 0.01 convergence threshold. **Its fast log-counts engine is therefore NOT used by
+default**: it applies only to dinucleotide shuffles or a one-hot reference tensor, and the frequency PFM is
+neither. That costs little, since frequency mode needs one reference per sequence, not 20 shuffles.
+Measured on 200 WT loci, all 5 folds: counts 47 s and profile 23 s with the frequency reference, counts
+94 s with dinucleotide shuffles (fast path engaged, no fallback). Convergence deltas reached 0.027 for
+frequency-reference counts, inside the range the BPNet attributions already show (profile up to 0.14).
 
 ### `filter_nonACGT_regions.py` is REQUIRED, and produces modisco's other input
 

@@ -15,8 +15,10 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-#: This script is BPNet-only; cherimoya attribution is blocked on
-#: DeepLIFT rescale rules for its LayerNorm (see CLAUDE.md).
+#: This script is BPNet-only. Cherimoya's counterpart is
+#: src/cherimoya/attribute/attribute.py, which needs cherimoya >= 0.3.1 and loads
+#: nucleotide_frequency_references() and load_bed() from THIS file, so keep both
+#: importable without torch.
 FAMILY = "bpnet"
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
