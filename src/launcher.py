@@ -117,14 +117,6 @@ def build_parser(
         metavar="EXP",
         help="limit to these experiment IDs (default: every one in the config)",
     )
-    parser.add_argument(
-        "--requeue",
-        action="store_true",
-        help="submit with --requeue so pre-empted jobs are resubmitted by SLURM. "
-        "Each job retrains its fold from epoch 0 (neither bpnet-lite's nor "
-        "cherimoya's fit() has resume), but re-checks for a completed model "
-        "first.",
-    )
     if supports_controls:
         parser.add_argument(
             "--controls",
@@ -196,6 +188,16 @@ def _add_common_args(
     # Defaults are per launcher: a training fold and a tfmodisco run want very
     # different walls, and a shared default that suits neither is how a 40-hour
     # job gets killed at 6.
+    # In the shared block, not per launcher, so every job kind gets it. Safe
+    # because every output a skip test reads is written via experiments.staged()
+    # (or, for the modisco CLI, staged in the emitted command), so a preempted
+    # job never leaves a truncated file that the rerun would take as done.
+    # Training restarts its fold from epoch 0: neither fit() has resume.
+    parser.add_argument(
+        "--requeue", action="store_true",
+        help="submit with --requeue so jobs preempted on owners are resubmitted "
+             "by SLURM. A rerun skips work whose output already exists",
+    )
     parser.add_argument("--cpus-per-task", type=int, default=default_cpus)
     parser.add_argument("--mem", type=str, default=default_mem)
     parser.add_argument(
@@ -955,9 +957,6 @@ def build_negatives_parser(script: Path) -> argparse.ArgumentParser:
     signal.add_argument("--force-signal-filter", dest="signal_flag",
                         action="store_const", const="--force-signal-filter",
                         help=f"passed through to {script.name}")
-    parser.add_argument("--requeue", action="store_true",
-                        help="submit with --requeue; safe here, since a rerun "
-                             "skips an experiment whose negatives already exist")
     return parser
 
 
@@ -1181,14 +1180,20 @@ def run_modisco(family: str) -> None:
             # S.pombe_PROcap. That front end patches the library and then hands
             # argv to the real CLI unchanged. `report` is unaffected and still
             # calls modisco directly. See src/modiscolite_compat.py.
+            # Staged through `.incoming.h5` and renamed only on success, since
+            # the skip test above is `out.exists()` (see experiments.staged).
+            # The mv runs on the host after any apptainer wrap exits, which is
+            # why it trails the command: nothing may precede the tool itself.
+            tmp = out.with_name(f"{out.name}.incoming.h5")
             cmd = (
                 f"python {shlex.quote(str(runner))} motifs "
                 f"-s {shlex.quote(str(ohe))} "
-                f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(out))} "
+                f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(tmp))} "
                 f"-n {args.n_seqlets} -l {args.leiden} -w {args.window} -v"
             )
             if args.modisco_args:
                 cmd += f" {args.modisco_args}"
+            cmd += f" && mv {shlex.quote(str(tmp))} {shlex.quote(str(out))}"
             submitted += _emit(
                 args,
                 log_dir,
@@ -1296,12 +1301,16 @@ def run_modisco_report(family: str) -> None:
                 skipped_missing += 1
                 continue
 
+            # Staged like motifs: the skip test is the directory existing.
+            # A leftover staging dir from a killed run is simply overwritten.
+            tmp = out.with_name(f"{out.name}.incoming")
             cmd = (
                 f"modisco report -i {shlex.quote(str(h5))} "
-                f"-o {shlex.quote(str(out))} -m {shlex.quote(str(db))} --lite"
+                f"-o {shlex.quote(str(tmp))} -m {shlex.quote(str(db))} --lite"
             )
             if args.report_args:
                 cmd += f" {args.report_args}"
+            cmd += f" && mv -T {shlex.quote(str(tmp))} {shlex.quote(str(out))}"
             submitted += _emit(
                 args,
                 log_dir,

@@ -27,6 +27,7 @@ from experiments import (  # noqa: E402
     filtered_loci_path,
     IGNORE,
     load_model,
+    staged,
     load_params,
     loci_stem,
 )
@@ -331,12 +332,13 @@ def main():
             torch.cuda.empty_cache()
 
     Path(params["output_fname"]).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        params["output_fname"],
-        np.stack(attributions).mean(axis=0)
-        if len(attributions) > 1
-        else attributions[0],
-    )
+    with staged(params["output_fname"]) as tmp:
+        np.savez_compressed(
+            tmp,
+            np.stack(attributions).mean(axis=0)
+            if len(attributions) > 1
+            else attributions[0],
+        )
 
 
 if __name__ == "__main__":

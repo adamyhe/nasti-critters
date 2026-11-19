@@ -294,6 +294,16 @@ Why the job units differ, since each was a design question:
   training and then hold an idle card. It also gates on `missing_paths(kinds=("peaks", "sequences"))`
   rather than `exp.missing`, which would demand negatives and models it has nothing to do with.
 
+**`--requeue` is in the shared flag block, so every launcher takes it — and that is only safe because no
+skip test can be fooled by a half-written file.** Each launcher skips work whose output exists, so a job
+preempted on `owners` mid-write would otherwise leave a truncated file that the requeued rerun reads as
+done. Every output a skip test reads is written through `experiments.staged()` (stage, then atomic rename):
+both benchmarks' metrics JSON, `attribute.py`'s npz, the filter's BED and one-hot, and `make_negatives.py`.
+The modisco CLI cannot be wrapped in-process, so its command writes `*.incoming` and **trails** an
+`&& mv` — trailing, because under `APPTAINER_IMAGE` anything placed BEFORE the tool would run inside the
+container and push the tool itself out onto the host. **Any new output a skip test reads must go through
+`staged()` too.** A requeued training fold restarts from epoch 0: neither `fit()` has resume.
+
 **Partitions and the GPU constraint are DEFAULTED; everything else is not.** `src/launcher.py` holds
 `GPU_PARTITION`, `CPU_PARTITION` and `GPU_CONSTRAINT` (the `|`-joined GPU SKU list — `|` is SLURM's OR, so
 any one card satisfies it). Which set a launcher gets is derived from **one** argument,
