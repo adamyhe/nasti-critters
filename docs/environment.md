@@ -75,6 +75,11 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   This replaced a briefly-lived pair of mutually exclusive `sherlock` (torch==2.6.0) and `cherimoya`
   (torch>=2.10) extras with a `[tool.uv] conflicts` declaration, copied from procap-atlas. That works
   and is more machinery than the actual requirement: **Sherlock is not used for GPU jobs here.**
+  The `conflicts` block itself outlived the split, still naming the two deleted extras, and was removed
+  2026-11-09. Re-locking dropped only a second `triton` fork (3.8.0) that the phantom conflict had
+  produced, with no other package or version change. **`.python-version` pins 3.11** in the same change,
+  matching the conda env, because uv otherwise picks whatever newer interpreter it finds first
+  (miniforge's base 3.12 on Sherlock), and that is how a 3.12-only construct gets past local checks.
 - **Sherlock cannot build ANYTHING from source with its default toolchain, so the base set must install
   from wheels alone.** Two facts, both measured rather than inferred. Its glibc is below 2.28 — from the
   torch step change, `torch-2.6.0-...-manylinux1_x86_64.whl` against
@@ -183,6 +188,21 @@ fine for reading/editing config-parsing logic; anything that imports torch and l
   `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime`). A project-local `src/cherimoya/apptainer/` existed and
   was deleted deliberately. Containers are optional and opt-in via `APPTAINER_IMAGE`/`APPTAINER_BIND`; the
   launchers run natively when unset.
+  **That opt-in was silently NOT IMPLEMENTED from 77226f8 until 2026-11-09.** It lived only in the
+  hand-written `slurm.sh` scripts, and deleting them took it out while every doc kept promising it.
+  It now lives in `src/launcher.py::_emit`, the single emission path, so all eight launchers and all three
+  modes get it. `$APPTAINER_IMAGE` is read at emission time, and a missing file aborts before anything is
+  submitted. The command is wrapped in `apptainer exec [--nv if gpus] --bind REPO_ROOT [--bind
+  $APPTAINER_BIND...]`, with `VAR=value` prefixes kept OUTSIDE the wrap (apptainer passes the host
+  environment through), and the default host-env activation dropped. The bare `python`/`modisco` in each
+  command resolves to the image's, because the container's PATH replaces the host's (measured).
+  **The image in use is `cherimoya-0.2.1.sif`**: torch 2.13.0+cu126 (has `Muon`), bpnet-lite 1.0.0,
+  cherimoya 0.2.1, modisco 2.5.2 and tangermeme 1.5.0, on Python 3.12.3. To match it, `uv.lock` was moved
+  from tangermeme 1.4.1 to `==1.5.0`, re-verified inside the image on 2026-11-09:
+  `_interleave_loci` and every `extract_loci` kwarg the repo passes are present; `ignore=` still KEEPS an
+  N-containing locus and zeroes the column; `deep_lift_shap` still refuses it in both reference modes
+  (`ValueError`); `patch_numeric_chroms()` now retires (fixed upstream); `extract_matching_loci` still
+  lacks the `dtype`.
 - **`cherimoya` is pinned by git commit**, not version, in `[tool.uv.sources]` — commit `8e4283fe` = version
   0.2.1, which was never published to PyPI (PyPI stops at 0.2.0). Verified by installing both: the only
   difference is four lines adding `__version__` to `__init__.py`. `cheri.py`, `cherimoya.py`, `io.py`,

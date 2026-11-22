@@ -25,6 +25,7 @@ from experiments import (  # noqa: E402
     load_params,
     loci_stem,
     metrics_path,
+    staged,
 )
 
 
@@ -337,7 +338,7 @@ def main():
     else:
         out_path = metrics_path("bpnet", exp.id, args.metrics_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    with staged(out_path) as tmp, open(tmp, "w") as f:
         json.dump(metrics, f, indent=4)
     print(f"\nMetrics saved to {out_path}")
 

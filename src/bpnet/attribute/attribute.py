@@ -15,8 +15,10 @@ import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-#: This script is BPNet-only; cherimoya attribution is blocked on
-#: DeepLIFT rescale rules for its LayerNorm (see CLAUDE.md).
+#: This script is BPNet-only. Cherimoya's counterpart is
+#: src/cherimoya/attribute/attribute.py, which needs cherimoya >= 0.3.1 and loads
+#: nucleotide_frequency_references() and load_bed() from THIS file, so keep both
+#: importable without torch.
 FAMILY = "bpnet"
 
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -27,6 +29,7 @@ from experiments import (  # noqa: E402
     filtered_loci_path,
     IGNORE,
     load_model,
+    staged,
     load_params,
     loci_stem,
 )
@@ -331,12 +334,13 @@ def main():
             torch.cuda.empty_cache()
 
     Path(params["output_fname"]).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        params["output_fname"],
-        np.stack(attributions).mean(axis=0)
-        if len(attributions) > 1
-        else attributions[0],
-    )
+    with staged(params["output_fname"]) as tmp:
+        np.savez_compressed(
+            tmp,
+            np.stack(attributions).mean(axis=0)
+            if len(attributions) > 1
+            else attributions[0],
+        )
 
 
 if __name__ == "__main__":

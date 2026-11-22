@@ -3,7 +3,7 @@
 **NAScent Transcription Initiation models in critters.**
 
 Sequence-to-function models of PRO-cap / GRO-cap / ChRO-cap initiation profiles
-across non-human species. 42 experiments over 12 species are defined in
+across non-human species. 44 experiments over 12 species are defined in
 `config/experiment_config.yaml`, all mapped uniformly from FASTQ:
 
 | Species | Experiments | Assemblies |
@@ -125,7 +125,7 @@ metadata steps need no conda env at all.
 ### Check it worked
 
 ```bash
-# config parses and all 42 experiments resolve
+# config parses and all 44 experiments resolve
 python src/data_preprocessing/run_procap_pipeline.py --list
 
 # fold assignments agree with the YAML *and* with the real contig names
@@ -350,6 +350,7 @@ The single-experiment path remains available and implements the same steps:
 ```bash
 python src/data_preprocessing/run_procap_pipeline.py --tier include -t 16
 uv run python src/make_negatives.py -j 4
+python src/launch_negatives.py --dry-run   # or one SLURM job per experiment (set APPTAINER_IMAGE on Sherlock)
 ```
 
 Two species use **peak-level** folds and need them built once their peaks
@@ -380,7 +381,7 @@ python src/bpnet/fit/launch.py --print-commands | bash
 
 ### Open questions and resolved ones
 
-Every experiment now has a fold assignment — `launch.py` reports **214
+Every experiment now has a fold assignment — `launch.py` reports **224
 (experiment × fold) jobs and 0 unusable**. What is left is not blocking, but is
 worth knowing before trusting numbers:
 
@@ -453,7 +454,7 @@ python src/data_preprocessing/resolve_runs.py
 # Regenerate config/experiment_config.yaml + config/datasets.tsv from the manifest
 python src/data_preprocessing/build_experiment_config.py
 
-# Bulk-download raw FASTQs (~202 GiB over 82 files, md5-verified, resumable)
+# Bulk-download raw FASTQs (~220 GiB over 85 files, md5-verified, resumable)
 python src/data_preprocessing/fetch_fastqs.py --dry-run
 python src/data_preprocessing/fetch_fastqs.py --tier include -j 4
 

@@ -186,13 +186,16 @@ ReLU form of the binary maximum. Same metric as the `orientation_index_pearson` 
 report, so those two are one piece of work. (`attribute/launch.py` was the other gap here and is now
 closed.)
 
-**Cherimoya attribution is BLOCKED, not merely absent — do not start it.** There is no
+**UNBLOCKED 2026-11-18 by cherimoya 0.3.1** (`cherimoya.deep_lift_shap`); see CLAUDE.md for the version
+equivalence it rests on. The analysis below is kept as the record of why it was blocked.
+
+**Cherimoya attribution WAS BLOCKED, not merely absent.** There is no
 `src/cherimoya/attribute/` and it should stay that way for now: it needs DeepLIFT **rescale rules that
 are still in development and are not in tangermeme yet**. This is not a wrapper-writing exercise, and
 the missing piece is upstream of this repo entirely.
 
 What the code shows, for whoever picks it up when the rules land. The ordinary nonlinearities are
-already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax`, and those are the only
+already covered — tangermeme 1.4.1 ships rules for `GELU` and `Softmax` (1.5.0 still has no `expm1` rule), and those are the only
 activations `cherimoya/cheri.py` and `cherimoya.py` use — so the gap is at the WRAPPER level, exactly
 where bpnet-lite needs `{_ProfileLogitScaling: _nonlinear}`. `cherimoya/wrappers.py` defines
 `ControlWrapper`, `_ProfileLogitScaling`, `ProfileWrapper`, `LogCountWrapper` and

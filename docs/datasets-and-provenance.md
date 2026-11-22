@@ -8,6 +8,67 @@ The manifest TSVs in `planning/` are the pipeline's actual inputs and hold curat
 received. **Apply a workbook update by appending rows, never by regenerating the TSVs from the xlsx** —
 regenerating silently reverts every correction recorded here.
 
+## The 2026-11-09 urothelium addition: PRO-cap in Kmt2c/Kmt2d-knockout mouse bladder cells
+
+Wang et al. 2025, *Nature Genetics* 57(1):165-179, doi
+[10.1038/s41588-024-02015-y](https://doi.org/10.1038/s41588-024-02015-y) (PMID 39806204) — 4 PRO-cap
+libraries, done with the Yu lab (PINTS authors), taking the repo to **44 experiments**, still 12 species.
+The paper's Data Availability names three GEO series; **only `GSE236370` (`PRJNA990720`) holds PRO-cap**.
+`GSE180947` and `GSE264514` are the RNA-seq/ChIP/Cut&Run/ATAC/scRNA-seq of the same study and are not
+wanted. PRJNA990720 is 40 samples and 63 runs, of which these 4 are the targets.
+
+| experiment | runs | condition | pairs | tier |
+| --- | --- | --- | --- | --- |
+| `M.musculus-urothelium_PROcap` | `SRR25117689`, `SRR25117688` | Kmt2c/Kmt2d WT (Adeno-mCherry) | 61.3 M + 59.7 M | include |
+| `M.musculus-urothelium-Kmt2cdKO_PROcap` | `SRR25117687`, `SRR25117686` | dKO (Adeno-Cre) | 63.5 M + 59.9 M | conditional |
+
+The material is a 2D culture of urothelial organoids from Kmt2c/Kmt2d-floxed mice, deleted in vitro, so
+"WT" means "floxed, mock-infected". The dKO is a perturbation with its own model, tiered like Ino80KD.
+No PRO-cap spike-in is reported (the KMT2D ChIP's Drosophila spike-in does not apply). Paired 150 bp on
+HiSeq 2500 per ENA; the paper says Novogene. **21.1 GiB.**
+
+Three things the paper and archive do not tell you, all measured from 200 k read pairs of `SRR25117688`:
+
+- **The pairs are deposited ALREADY PROCESSED.** R1 and R2 are exact reverse complements (median
+  insert ~50 bp, full overlap), so adapters were trimmed before deposit, and a **6 + 6 nt dual UMI was
+  clipped off both mates into the read name**: `@SRR25117688.1 E00489:619:...:5317:GCTCAG_GTTAGA/1`,
+  same tag on `/2`, modal read length 144 out of 150 cycles. This is the corpus's first
+  **header UMI**, and neither driver could consume it: fastp `--umi_loc` would cut 6 real bases, and STAR
+  keeps only the first token of the name, so the UMI never reached umi_tools. It is curated as
+  `umi_loc: read name`, `umi_len: 12` (the `_` removed), and handled by `rule header_umi` /
+  `AWK_HEADER_UMI` (see `steps.dedup.umi_locations`). Worth having: 15% of the sample's reads duplicate
+  another read's sequence, and ~40% of those carry a different UMI. Those are independent molecules on one
+  initiation base, which sequence-only dedup would destroy.
+- **The adapter is `smallRNA_RA3`, but it is visible only in the untrimmed orphan file** (27% of its
+  reads carry `TGGAATTCTCGGGTGCCAAGG`), and 0.1% of the trimmed R1s carry a residual copy. Pinning it on
+  already-trimmed reads costs nothing. Expect `read_structure_qc` to report little adapter for these runs,
+  which is the deposit, not a curation error.
+- **READ 1 IS NOT THE RNA 5' END, and the first reading of this was WRONG.** R1's first base being 73% G
+  and the adapter after the insert were taken to mean R1 reads the RNA sense from its 5' end. Neither can
+  tell the two layouts apart: `TGGAATTCTCGGGTGCCAAGG` is both the standard 3' adapter and the reverse
+  complement of the Mahat 2016 PRO-seq 5' adapter (VRA5), and GEO cites Mahat 2016. The annotated-TSS
+  metaplot settled it (2026-11-16): with R1, nearly all signal was ANTISENSE at ~+60 bp, i.e. read 1's 5'
+  end is the RNA 3' end (the pause site), on the opposite strand. The initiator logo still looked strong
+  (1.95 bits at offset 0), so **the logo alone cannot catch this**. Curated per run as `rna_5prime_end`:
+  `R2` for the three true pairs, `R1_3prime` for `SRR25117689` (no R2 deposited), which takes each R1
+  alignment's far end on the flipped strand, valid because the ~50 bp inserts sit wholly in the 144 bp read.
+
+**`SRR25117689` also lists an orphan-reads `SRR25117689.fastq.gz`** (0.5 GB) beside `_1`/`_2`, the
+corpus's first three-file paired run. Every consumer pairs mates **by position**, and the orphan sorts
+first, so `merge_run_fastqs` and the serial driver would have made it mate 1 with `_1` as mate 2.
+`resolve_runs.py` now drops it (ftp, md5 and bytes together, so the lists stay index-aligned), and both
+drivers refuse a PAIRED run that does not resolve to exactly two files.
+
+**`SRR25117689` (WT rep 1) has NO READ 2 in the deposit, found only after mapping.** Its `_2` is a second
+copy of read 1: same strand, adapter still on, UMI-clipped, while `_1` is the submitter-trimmed copy. In 100%
+of 100 k pairs `_2` starts with `_1`; for the other three runs `_2` is the reverse complement of `_1` in 81-86%.
+The identical UMI halves (`NAAATG_NAAATG` vs `GCTCAG_GTTAGA` on a true pair) were the visible tell, and
+none of the pre-mapping checks looked for it. Processed as a pair, STAR booked **99.97% `too short`** and
+the sample contributed 51 reads, so the first WT peaks and bigWigs (2026-11-15) were rep 2 alone.
+Curated as `deposited_single_mate: 2` -> `raw.single_mate` (per RUN, since rep 2 is a true pair), and
+processed single-end from the untrimmed `_2`, so trimming is this pipeline's own.
+**Check for it on any new paired deposit**: mate 2 should be the reverse complement of mate 1.
+
 ## The 2026-09-01 cotton addition: GRO-cap in diploid and tetraploid cotton
 
 Wen et al. 2026, *Genome Biology* 27(1):12, doi

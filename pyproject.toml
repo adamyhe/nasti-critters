@@ -145,7 +145,10 @@ dependencies = [
 torch = [
     "torch>=2.10",
     "bpnet-lite>=1.0.0",
-    "tangermeme>=1.0.0",
+    # Exact, to match the cherimoya-0.2.1 Apptainer image, which ships 1.5.0.
+    # Raised from 1.4.1 on 2026-11-09 after re-verifying, inside that image, the
+    # behaviours this repo depends on (see docs/environment.md).
+    "tangermeme==1.5.0",
     "cherimoya",
     # Declared because src/make_negatives.py imports it directly, though
     # tangermeme requires it too. It belongs HERE rather than in the base set,
@@ -164,17 +167,6 @@ torch = [
 ]
 
 [tool.uv]
-# The sherlock pin (torch==2.6.0) and the cherimoya extra (torch>=2.10) are
-# never installed together, so let uv resolve them independently rather than
-# failing to find one universal torch that satisfies both.
-conflicts = [
-    [
-        { extra = "sherlock" },
-        { extra = "cherimoya" },
-    ],
-]
-
-
 # macs3 is a transitive dependency of both bpnet-lite and cherimoya, and NOTHING
 # in this repo imports it. It ships no wheels at any version, so uv builds it
 # from sdist -- dragging in cykhash, also sdist-only -- which is the slowest part

@@ -79,12 +79,40 @@ def umi_mate(loc: str | None) -> int:
             f"(known: {sorted(table)}). Add it to config/procap_pipeline.yaml."
         )
     fastp_loc = table[loc]
+    if fastp_loc == "read_name":
+        return HEADER  # in the name of EVERY mate; see header_umi_len()
     if fastp_loc not in _FASTP_LOC_TO_MATE:
         raise SystemExit(
             f"umi_loc {loc!r} maps to fastp value {fastp_loc!r}, which is not "
             f"one of {sorted(_FASTP_LOC_TO_MATE)}."
         )
     return _FASTP_LOC_TO_MATE[fastp_loc]
+
+
+#: umi_mate() sentinel: the UMI was moved into the read NAME before deposit.
+HEADER = 0
+
+
+def header_umi_len(path: Path, n_reads: int) -> int:
+    """Modal UMI length in the read NAMES, parsed exactly as AWK_HEADER_UMI
+    does (last ':' field of the second token, /1 /2 and '_' stripped).
+
+    For a header UMI the entropy screen is meaningless -- the sequence no longer
+    carries it -- so this checks the thing the pipeline will actually consume.
+    """
+    lengths = Counter()
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt") as f:
+        for i, line in enumerate(f):
+            if i >= n_reads * 4:
+                break
+            if i % 4:
+                continue
+            parts = line.split()
+            tag = parts[1].rsplit(":", 1)[-1] if len(parts) > 1 else ""
+            tag = tag.removesuffix("/1").removesuffix("/2").replace("_", "")
+            lengths[len(tag)] += 1
+    return lengths.most_common(1)[0][0] if lengths else 0
 
 
 def profile(path: Path, n_reads: int, width: int) -> list[float]:
@@ -160,12 +188,13 @@ def main():
                 # so it checked the wrong mate and printed
                 # `MISMATCH (manifest says 10)` on R2 while R1 read
                 # `no UMI signature`. Both were artifacts of this line.
-                expect = declared if mate_i == expect_mate else 0
+                expect = declared if mate_i == expect_mate or expect_mate == HEADER else 0
                 if not path.exists():
                     rows.append((exp_id, run, f"R{mate_i}", expect, None, "", "missing"))
                     continue
                 bits = profile(path, args.n_reads, args.width)
-                found = candidate_len(bits)
+                found = (header_umi_len(path, args.n_reads) if expect_mate == HEADER
+                         else candidate_len(bits))
                 if found and not expect:
                     verdict = "UNDECLARED UMI?"
                 elif expect and found == expect:

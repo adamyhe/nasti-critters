@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -259,6 +260,23 @@ def load_model(path, *, map_location: str = "cpu"):
         path, weights_only=False, map_location=torch.device(map_location)
     )
 
+
+
+@contextmanager
+def staged(path):
+    """Yield a staging path for `path`, renamed onto it only if the block succeeds.
+
+    Every launcher's skip test is "output exists", so a job killed mid-write --
+    a --requeue'd job preempted on owners -- must never leave a truncated file
+    at the final path, or the rerun would take it as done. The staging name
+    keeps the real suffix (np.savez_compressed appends .npz otherwise), and the
+    rename is atomic on one filesystem. On an exception the staging file is left
+    for inspection and the final path is untouched.
+    """
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.incoming{path.suffix}")
+    yield tmp
+    tmp.replace(path)
 
 @dataclass
 class Experiment:

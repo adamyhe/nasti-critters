@@ -1204,3 +1204,62 @@ experiments:
       gc_negatives: data/procap/G.hirsutum-ovule_GROcap_negatives.bed.gz
       sequences: data/GCF_007990345.1_Gossypium_hirsutum_v2.1_genomic.fna
       # blacklist: none published for this assembly (see config/genomes.yaml)
+
+  M.musculus-urothelium_PROcap:
+    biosample: "bladder urothelial cells PRO-cap"
+    species: M.musculus
+    project_key: Wang2025_mm_urothelium_PROcap
+    study_accession: "GSE236370"
+    assay_family: "PRO-cap"
+    condition: "Kmt2c/Kmt2d wild type (Adeno-mCherry)"
+    developmental_stage: "cell culture"
+    tier: "include"
+    n_biological_replicates: 2
+    raw:
+      sample_accessions: ["GSM7528773", "GSM7528774"]
+      runs: ["SRR25117689", "SRR25117688"]
+      samples:
+        GSM7528773: ["SRR25117689"]
+        GSM7528774: ["SRR25117688"]
+      library_layout: "PAIRED"
+      run_match_basis: "manifest (already resolved)"
+      single_mate: {"SRR25117689": 2}  # PAIRED deposit, no real read 2: process this mate single-end; see the manifest note
+      five_prime_end: {"SRR25117689": "R1_3prime", "SRR25117688": "R2"}  # per-run RNA 5' end; overrides steps.signal.five_prime_mate
+      adapter: "smallRNA_RA3"
+      umi: {enabled: true, len: 12, loc: "read name"}
+    processed:
+      peaks: data/procap/M.musculus-urothelium_PROcap_peaks.bed.gz
+      pl_bigwig: data/procap/M.musculus-urothelium_PROcap_pl.bw
+      mn_bigwig: data/procap/M.musculus-urothelium_PROcap_mn.bw
+      gc_negatives: data/procap/M.musculus-urothelium_PROcap_negatives.bed.gz
+      sequences: data/mm10.fa
+      blacklist: data/mm10-blacklist.v2.bed.gz
+
+  M.musculus-urothelium-Kmt2cdKO_PROcap:
+    biosample: "bladder urothelial cells PRO-cap"
+    species: M.musculus
+    project_key: Wang2025_mm_urothelium_PROcap
+    study_accession: "GSE236370"
+    assay_family: "PRO-cap"
+    condition: "Kmt2c/Kmt2d double knockout (Adeno-Cre)"
+    developmental_stage: "cell culture"
+    tier: "conditional"
+    n_biological_replicates: 2
+    raw:
+      sample_accessions: ["GSM7528775", "GSM7528776"]
+      runs: ["SRR25117687", "SRR25117686"]
+      samples:
+        GSM7528775: ["SRR25117687"]
+        GSM7528776: ["SRR25117686"]
+      library_layout: "PAIRED"
+      run_match_basis: "manifest (already resolved)"
+      five_prime_end: {"SRR25117687": "R2", "SRR25117686": "R2"}  # per-run RNA 5' end; overrides steps.signal.five_prime_mate
+      adapter: "smallRNA_RA3"
+      umi: {enabled: true, len: 12, loc: "read name"}
+    processed:
+      peaks: data/procap/M.musculus-urothelium-Kmt2cdKO_PROcap_peaks.bed.gz
+      pl_bigwig: data/procap/M.musculus-urothelium-Kmt2cdKO_PROcap_pl.bw
+      mn_bigwig: data/procap/M.musculus-urothelium-Kmt2cdKO_PROcap_mn.bw
+      gc_negatives: data/procap/M.musculus-urothelium-Kmt2cdKO_PROcap_negatives.bed.gz
+      sequences: data/mm10.fa
+      blacklist: data/mm10-blacklist.v2.bed.gz

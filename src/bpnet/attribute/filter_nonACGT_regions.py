@@ -51,7 +51,7 @@ import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
-from experiments import IGNORE, load_params  # noqa: E402
+from experiments import IGNORE, load_params, staged  # noqa: E402
 
 
 def _open_text(path):
@@ -156,7 +156,8 @@ def save_ohe(loci, fa_fp, out_fp, in_window=2114, out_window=1000, verbose=False
     ).to(torch.float32)
 
     Path(out_fp).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_fp, X.to(torch.uint8).numpy())
+    with staged(out_fp) as tmp:
+        np.savez_compressed(tmp, X.to(torch.uint8).numpy())
     print(f"Wrote {X.shape[0]:,} x {X.shape[1]} x {X.shape[2]} one-hot to {out_fp}")
     return X
 
@@ -190,7 +191,7 @@ if __name__ == "__main__":
         args.bed_fp, args.fa_fp, args.in_window, args.verbose
     )
     Path(args.out_fp).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.out_fp, "w") as fh:
+    with staged(args.out_fp) as tmp, open(tmp, "w") as fh:
         fh.write("".join(line + "\n" for line in kept_lines))
 
     if args.save_ohe is not None:

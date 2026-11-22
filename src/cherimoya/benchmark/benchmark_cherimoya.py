@@ -23,6 +23,7 @@ from experiments import (  # noqa: E402
     Experiment,
     load_params,
     metrics_path,
+    staged,
 )
 
 
@@ -265,7 +266,7 @@ def main():
     }
     out_path = metrics_path("cherimoya", exp.id, args.metrics_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    with staged(out_path) as tmp, open(tmp, "w") as f:
         json.dump(metrics, f, indent=4)
     print(f"\nMetrics saved to {out_path}")
 

@@ -38,6 +38,10 @@ and is worth a tangermeme PR. Until then `patch_numeric_chroms()` is
 SELF-RETIRING: it functionally probes the installed version with a numeric BED
 and does nothing if the probe passes, so the shim disappears the moment
 tangermeme is fixed rather than silently shadowing a corrected implementation.
+
+Status: tangermeme 1.5.0 (pinned 2026-11-09) fixed `_load_exclusion_zones`, so
+under it the probe passes and this patches nothing. `extract_matching_loci`
+still lacks the dtype; make_negatives.py works around that one itself.
 """
 
 import tempfile

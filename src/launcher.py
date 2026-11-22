@@ -26,6 +26,7 @@ Three emission modes over the one selection rule:
 """
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -116,14 +117,6 @@ def build_parser(
         metavar="EXP",
         help="limit to these experiment IDs (default: every one in the config)",
     )
-    parser.add_argument(
-        "--requeue",
-        action="store_true",
-        help="submit with --requeue so pre-empted jobs are resubmitted by SLURM. "
-        "Each job retrains its fold from epoch 0 (neither bpnet-lite's nor "
-        "cherimoya's fit() has resume), but re-checks for a completed model "
-        "first.",
-    )
     if supports_controls:
         parser.add_argument(
             "--controls",
@@ -195,6 +188,16 @@ def _add_common_args(
     # Defaults are per launcher: a training fold and a tfmodisco run want very
     # different walls, and a shared default that suits neither is how a 40-hour
     # job gets killed at 6.
+    # In the shared block, not per launcher, so every job kind gets it. Safe
+    # because every output a skip test reads is written via experiments.staged()
+    # (or, for the modisco CLI, staged in the emitted command), so a preempted
+    # job never leaves a truncated file that the rerun would take as done.
+    # Training restarts its fold from epoch 0: neither fit() has resume.
+    parser.add_argument(
+        "--requeue", action="store_true",
+        help="submit with --requeue so jobs preempted on owners are resubmitted "
+             "by SLURM. A rerun skips work whose output already exists",
+    )
     parser.add_argument("--cpus-per-task", type=int, default=default_cpus)
     parser.add_argument("--mem", type=str, default=default_mem)
     parser.add_argument(
@@ -206,14 +209,54 @@ def _add_common_args(
     )
 
 
+def _apptainer_image() -> Path | None:
+    """The .sif named by $APPTAINER_IMAGE at EMISSION time, or None to run natively.
+
+    Read from the environment, never from a flag default or a tracked file, so no
+    cluster path enters the repo. Fails here, before anything is submitted, if the
+    file is missing -- otherwise every job would die on its first line instead.
+    """
+    value = os.environ.get("APPTAINER_IMAGE", "").strip()
+    if not value:
+        return None
+    image = Path(value).expanduser()
+    if not image.is_file():
+        sys.exit(f"APPTAINER_IMAGE set but not found: {image}")
+    return image
+
+
+def _apptainer_wrap(command: str, gpus: int) -> str:
+    """Run `command` inside $APPTAINER_IMAGE, if set.
+
+    The image's own PATH replaces the host's inside the container, so the bare
+    `python`/`modisco` in every command resolves to the image's interpreter and
+    nothing from the host env can leak in. --nv only where a GPU is requested.
+    REPO_ROOT is always bound (Sherlock binds /oak by default, other sites may
+    not), plus each entry of $APPTAINER_BIND, colon- or space-separated.
+    """
+    image = _apptainer_image()
+    if image is None:
+        return command
+    binds = [str(REPO_ROOT)] + os.environ.get("APPTAINER_BIND", "").replace(":", " ").split()
+    parts = ["apptainer", "exec"] + (["--nv"] if gpus else [])
+    for b in binds:
+        parts += ["--bind", b]
+    parts.append(str(image))
+    return " ".join(shlex.quote(p) for p in parts) + " " + command
+
+
 def _setup_block(args) -> str:
     """Environment setup injected into each generated job.
 
     Module names differ per site, so the default only activates this repo's own
-    environment; --setup-file replaces it wholesale.
+    environment; --setup-file replaces it wholesale. Under $APPTAINER_IMAGE the
+    default activation is dropped: the image supplies the Python stack, and
+    activating a host venv would only mislead whoever reads the script.
     """
     if args.setup_file:
         return Path(args.setup_file).read_text().rstrip()
+    if _apptainer_image() is not None:
+        return "# Python stack from $APPTAINER_IMAGE; no host env activated."
     return textwrap.dedent(f"""\
         # Default setup: this repo's mamba env + uv venv (venv last so its
         # interpreter wins). Use --setup-file for site-specific module loads.
@@ -250,6 +293,9 @@ def _emit(
     launchers so the sbatch directives, the setup block and the three modes
     cannot drift between them.
     """
+    # Container wrap first, so an env prefix below lands OUTSIDE `apptainer
+    # exec` -- apptainer passes the host environment through, PATH excepted.
+    command = _apptainer_wrap(command, gpus)
     # Environment goes on the command as a `VAR=value cmd` prefix rather than as
     # an `export` line in the sbatch body, so the SAME string carries it in all
     # three emission modes. An export would silently vanish under
@@ -867,6 +913,105 @@ def run_filter(family: str, script: Path) -> None:
     )
 
 
+def build_negatives_parser(script: Path) -> argparse.ArgumentParser:
+    launcher = "src/launch_negatives.py"
+    parser = argparse.ArgumentParser(
+        description=textwrap.dedent(f"""\
+            Enumerate GC-matched negative jobs, one per experiment.
+
+            Runs {script.name} -e EXP for each experiment whose peaks, FASTA and
+            both strand bigWigs exist and whose negatives BED does not. Negatives
+            are model prep, deliberately OUTSIDE the Snakemake DAG, and shared by
+            both model families, which is why this launcher lives beside the
+            script rather than under a family directory. The fit launchers skip
+            any experiment without them.
+
+            CPU-only. {script.name} imports tangermeme, which is on the torch side
+            and cannot install natively on Sherlock, so export APPTAINER_IMAGE
+            (the cherimoya image) before submitting there.
+
+            Usage:
+                python {launcher} --dry-run
+                python {launcher} --print-commands | bash
+            """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # One experiment per job, and extract_matching_loci's scan is pinned to
+    # n_jobs=1 inside the script, so extra cores would idle. Memory is the real
+    # cost: each job holds its genome plus the genome-wide GC tiles. Not yet
+    # measured on mm10 -- raise --mem rather than guess if a job is OOM-killed.
+    _add_common_args(parser, launcher, gpu=False,
+                     default_cpus=2, default_mem="32G", default_time="4:00:00")
+    parser.add_argument(
+        "-e", "--experiments", nargs="+", default=None, metavar="EXP",
+        help="limit to these experiment IDs (default: every one in the config)",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help=f"regenerate existing negatives (passed through to {script.name})",
+    )
+    signal = parser.add_mutually_exclusive_group()
+    signal.add_argument("--no-signal-filter", dest="signal_flag",
+                        action="store_const", const="--no-signal-filter",
+                        help=f"passed through to {script.name}")
+    signal.add_argument("--force-signal-filter", dest="signal_flag",
+                        action="store_const", const="--force-signal-filter",
+                        help=f"passed through to {script.name}")
+    return parser
+
+
+def run_negatives(script: Path) -> None:
+    """Enumerate and emit one GC-matched negatives job per experiment."""
+    parser = build_negatives_parser(script)
+    args = parser.parse_args()
+
+    if _apptainer_image() is None and not args.print_commands:
+        print("NOTE: APPTAINER_IMAGE is unset, so jobs need a native torch-side "
+              f"venv for {script.name} (tangermeme). On Sherlock, export it first.",
+              file=sys.stderr)
+
+    experiments = _select_experiments(parser, args)
+    log_dir = REPO_ROOT / "logs" / "negatives"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup = _setup_block(args)
+
+    submitted = skipped_done = skipped_missing = skipped_experiments = 0
+    total = 0
+    for exp_id in experiments:
+        try:
+            exp = Experiment.load(exp_id)
+        except KeyError as err:
+            print(f"SKIP {exp_id}: {err}", file=sys.stderr)
+            skipped_experiments += 1
+            continue
+        total += 1
+
+        # What the script reads -- not exp.missing, which demands the very
+        # negatives this step produces.
+        absent = exp.missing_paths(kinds=("peaks", "sequences", "signals"))
+        if absent:
+            print(f"SKIP {exp_id}: missing data — {', '.join(absent)}", file=sys.stderr)
+            skipped_missing += 1
+            continue
+        if Path(exp.negatives).exists() and not args.force:
+            skipped_done += 1
+            continue
+
+        cmd = f"python {shlex.quote(str(script))} -e {shlex.quote(exp_id)}"
+        if args.force:
+            cmd += " --force"
+        if args.signal_flag:
+            cmd += f" {args.signal_flag}"
+        submitted += _emit(args, log_dir, setup, f"negatives_{exp_id}", cmd, gpus=0)
+
+    print(
+        f"\n{_action(args)} {submitted} negatives jobs of {total} (one per "
+        f"experiment); skipped {skipped_done} already done, "
+        f"{skipped_missing} missing data"
+        + (f", {skipped_experiments} experiments unusable" if skipped_experiments else ""),
+        file=sys.stderr if args.print_commands else sys.stdout,
+    )
+
 def numba_env(args) -> dict[str, int]:
     """Pin numba to the cores the job actually asked for.
 
@@ -1035,14 +1180,20 @@ def run_modisco(family: str) -> None:
             # S.pombe_PROcap. That front end patches the library and then hands
             # argv to the real CLI unchanged. `report` is unaffected and still
             # calls modisco directly. See src/modiscolite_compat.py.
+            # Staged through `.incoming.h5` and renamed only on success, since
+            # the skip test above is `out.exists()` (see experiments.staged).
+            # The mv runs on the host after any apptainer wrap exits, which is
+            # why it trails the command: nothing may precede the tool itself.
+            tmp = out.with_name(f"{out.name}.incoming.h5")
             cmd = (
                 f"python {shlex.quote(str(runner))} motifs "
                 f"-s {shlex.quote(str(ohe))} "
-                f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(out))} "
+                f"-a {shlex.quote(str(attr))} -o {shlex.quote(str(tmp))} "
                 f"-n {args.n_seqlets} -l {args.leiden} -w {args.window} -v"
             )
             if args.modisco_args:
                 cmd += f" {args.modisco_args}"
+            cmd += f" && mv {shlex.quote(str(tmp))} {shlex.quote(str(out))}"
             submitted += _emit(
                 args,
                 log_dir,
@@ -1150,12 +1301,16 @@ def run_modisco_report(family: str) -> None:
                 skipped_missing += 1
                 continue
 
+            # Staged like motifs: the skip test is the directory existing.
+            # A leftover staging dir from a killed run is simply overwritten.
+            tmp = out.with_name(f"{out.name}.incoming")
             cmd = (
                 f"modisco report -i {shlex.quote(str(h5))} "
-                f"-o {shlex.quote(str(out))} -m {shlex.quote(str(db))} --lite"
+                f"-o {shlex.quote(str(tmp))} -m {shlex.quote(str(db))} --lite"
             )
             if args.report_args:
                 cmd += f" {args.report_args}"
+            cmd += f" && mv -T {shlex.quote(str(tmp))} {shlex.quote(str(out))}"
             submitted += _emit(
                 args,
                 log_dir,

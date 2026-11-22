@@ -591,7 +591,13 @@ def sample_negatives(
     neg_sig = median_window_signal(bigwig, matched, IN_WINDOW)
     pk_sig = median_window_signal(bigwig, loci, IN_WINDOW)
     bg_sig = median_random_window_signal(bigwig, chrom_sizes, IN_WINDOW)
-    matched.to_csv(out_path, header=False, sep="\t", index=False)
+    # Staged, then renamed: the launcher's skip test is "output exists", so a
+    # job killed mid-write (a requeued owners job) must never leave a truncated
+    # file at the final path. The staging name keeps .gz so to_csv still
+    # compresses by suffix; rename is atomic on one filesystem.
+    staging = out_path.with_name(out_path.name + ".incoming.gz")
+    matched.to_csv(staging, header=False, sep="\t", index=False)
+    staging.replace(out_path)
     print(f"  wrote {len(matched):,} negatives "
           f"({len(matched) / max(len(loci), 1):.2f} per peak, "
           f"{overlap:.1%} overlap a peak)")

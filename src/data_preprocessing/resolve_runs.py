@@ -115,6 +115,32 @@ def ena_read_run(accession: str, retries: int = 3, pause: float = 0.34) -> list[
     return [row for row in reader if row.get("run_accession")]
 
 
+def drop_orphan_reads(hit: dict) -> dict:
+    """For a PAIRED run, keep the _1/_2 mates and drop ENA's orphan-reads file.
+
+    ENA sometimes lists a third FASTQ, `{run}.fastq.gz`, beside `_1`/`_2`: the
+    reads SRA could not pair. Every consumer pairs mates by POSITION, and that
+    file sorts first, so it would become mate 1 with `_1` as mate 2 --
+    SRR25117689 (GSE236370) is the first such run here, 0.5 GB of unpaired and
+    untrimmed reads. They have no mate to dedup or one-mate-filter against, so
+    dropping them is correct as well as safe. ftp, md5 and bytes are filtered
+    TOGETHER so the three lists stay index-aligned.
+    """
+    if not (hit.get("library_layout") or "").upper().startswith("PAIRED"):
+        return hit
+    cols = {k: (hit.get(k) or "").split(";")
+            for k in ("fastq_ftp", "fastq_md5", "fastq_bytes")}
+    keep = [i for i, u in enumerate(cols["fastq_ftp"])
+            if re.search(r"_[12]\.fastq\.gz$", u)]
+    if len(keep) == len(cols["fastq_ftp"]) or len(keep) != 2:
+        return hit  # nothing to drop, or not a shape this understands
+    out = dict(hit)
+    for k, vals in cols.items():
+        out[k] = ";".join(vals[i] for i in keep if i < len(vals))
+    print(f"  {hit['run_accession']}: dropped orphan-reads FASTQ, kept _1/_2")
+    return out
+
+
 def study_ids(row: dict) -> list[str]:
     """Archive identifiers worth querying for a manifest row, best first."""
     return [v for v in (row["bioproject"], row["sra_study"]) if v]
@@ -267,7 +293,8 @@ def main():
             # accession lists reshuffle on every re-run and experiment_config.yaml
             # and datasets.tsv churn. Sort the hits themselves, not just the
             # joined string, so read_count below stays aligned with run_accession.
-            hits = sorted(unique_hits, key=lambda h: h["run_accession"])
+            hits = sorted((drop_orphan_reads(h) for h in unique_hits),
+                          key=lambda h: h["run_accession"])
             if not row["run_accession"]:
                 out["run_accession"] = ";".join(h["run_accession"] for h in hits)
             out["library_layout"] = ";".join(
