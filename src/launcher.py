@@ -1143,7 +1143,10 @@ def run_modisco(family: str) -> None:
     # Resolved once, and checked: only bpnet has a front end today, so a second
     # family would otherwise emit jobs pointing at a path that does not exist
     # and fail one queue wait later.
-    runner = REPO_ROOT / f"src/{family}/modisco/run_modisco.py"
+    # ONE front end for every family, not src/{family}/...: it only patches
+    # modiscolite and hands argv to the real CLI, so nothing in it depends on the
+    # model, and a per-family copy would be a second definition to drift.
+    runner = REPO_ROOT / "src" / "bpnet" / "modisco" / "run_modisco.py"
     if not runner.exists():
         parser.error(
             f"no modisco front end at {runner}. `modisco motifs` must run "
