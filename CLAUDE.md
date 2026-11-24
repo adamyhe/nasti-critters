@@ -259,9 +259,9 @@ needing pushing upstream before those species are used elsewhere: `C.griseus`, b
 6-fold `C.elegans`, and S. moellendorffii's peak-level folds. Derivations, the paired-homoeolog constraint
 for G. hirsutum, and the per-library balance notes are in `docs/cross-validation-folds.md`.
 
-## Launchers: ten of them, one emission path
+## Launchers: twelve of them, one emission path
 
-`src/launcher.py` holds the selection rule and the emission machinery; the nine `launch.py` files are thin
+`src/launcher.py` holds the selection rule and the emission machinery; the eleven `launch.py`-style files are thin
 wrappers over `_add_common_args` and `_emit` (`src/launch_negatives.py` sits beside the
 script it runs). **It is the only thing in the repo that writes an sbatch
 script — do not add another**, and do not add another copy of the flag block.
@@ -277,6 +277,8 @@ script — do not add another**, and do not add another copy of the flag block.
 | `src/bpnet/attribute/launch_filter.py` | **experiment** | 44 | **no** | filtered BED + OHE exist, peaks/sequences missing |
 | `src/bpnet/modisco/launch.py` | experiment x **attribute type** | 44 x types | **no** | .h5 exists, attribution or OHE npz missing |
 | `src/bpnet/modisco/launch_report.py` | experiment x **attribute type** | 44 x types | **no** | report dir exists, .h5 or MEME db missing |
+| `src/cherimoya/modisco/launch.py` | experiment x **attribute type** | 44 x types | **no** | same as BPNet's, on `attributions/cherimoya/` |
+| `src/cherimoya/modisco/launch_report.py` | experiment x **attribute type** | 44 x types | **no** | same as BPNet's |
 | `src/launch_negatives.py` | **experiment** | 44 | **no** | negatives BED exists, peaks/sequences/bigWigs missing |
 
 Why the job units differ, since each was a design question:
@@ -498,7 +500,9 @@ supports the outcome (`neg_patterns = None`) and simply cannot reach it. `src/bp
 a CLI front end because nothing here imports modiscolite, so unlike `tangermeme_compat.py` there is no
 in-process call site to patch. It is **self-retiring**: it functionally probes the installed version and
 does nothing if the probe passes, and refuses to install a patch that fails its own probe.
-`launcher.py` emits it for **motifs only**; `modisco report` still calls `modisco` directly.
+`launcher.py` emits it for **motifs only**; `modisco report` still calls `modisco` directly. **There is ONE
+front end for both families**: `run_modisco()` always points at `src/bpnet/modisco/run_modisco.py`, since
+nothing in it depends on the model. Do not copy it under `src/cherimoya/`.
 Read the **exception type** to tell the degenerate cases apart — a `ValueError` rules out a blank or
 corrupt npz, because an all-zero array fails with `IndexError` instead. Which experiments are near that
 boundary, and why, is in `docs/investigations.md`; treat it as fragile for any low-variance counts head.
